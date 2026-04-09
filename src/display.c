@@ -1,0 +1,973 @@
+/*
+ * libwaywallen_display — lifecycle + state machine.
+ *
+ * Phase 2: full wire handshake + dispatch loop + release path.
+ * Backend bindings are recorded but no texture import is performed;
+ * `on_textures_ready` fires with `backend = NONE` and NULL handle
+ * arrays. Incoming dma-buf fds and acquire sync_fds are closed by
+ * the library without being surfaced to the host. All protocol /
+ * IO errors transition the state machine to DEAD and invoke
+ * `on_disconnected`. No code path aborts or exits.
+ */
+
+#define _POSIX_C_SOURCE 200809L
+
+#include "waywallen_display.h"
+
+#include "codec.h"
+#include "ww_proto.h"
+
+#ifdef WW_HAVE_EGL
+#  include "backend_egl.h"
+#endif
+#ifdef WW_HAVE_VULKAN
+#  include "backend_vulkan.h"
+#endif
+
+#include <errno.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/un.h>
+#include <unistd.h>
+
+typedef enum display_state {
+    WW_STATE_INIT = 0,
+    WW_STATE_HELLO_SENT,
+    WW_STATE_READY,
+    WW_STATE_REGISTERING,
+    WW_STATE_IDLE,
+    WW_STATE_PENDING_CONFIG,
+    WW_STATE_BOUND,
+    WW_STATE_DEAD,
+} display_state_t;
+
+struct waywallen_display {
+    waywallen_display_callbacks_t cb;
+
+    /* Connection state. */
+    int fd;
+    display_state_t state;
+    uint64_t display_id;
+
+    /* Backend selection. */
+    waywallen_backend_t backend;
+    waywallen_egl_ctx_t egl;
+    waywallen_vk_ctx_t vk;
+
+#ifdef WW_HAVE_EGL
+    /* Populated on `bind_egl` if libEGL is loadable. */
+    ww_egl_backend_t egl_backend;
+    uint32_t egl_import_count;
+    void **egl_images;
+    uint32_t *egl_gl_textures;
+#endif
+#ifdef WW_HAVE_VULKAN
+    ww_vk_backend_t vk_backend;
+    uint32_t vk_import_count;
+    ww_vk_imported_image_t *vk_images;   /* length = vk_import_count */
+    VkSemaphore *vk_semaphores;          /* one per buffer slot */
+#endif
+
+    /* Current bound buffer pool metadata — kept so
+     * `on_textures_releasing` can fire with the same descriptor when
+     * unbind/rebind arrives. */
+    bool has_textures;
+    uint64_t current_buffer_generation;
+    waywallen_textures_t current_textures;
+};
+
+/* ------------------------------------------------------------------ */
+/*  Helpers                                                            */
+/* ------------------------------------------------------------------ */
+
+static void fire_disconnected(waywallen_display_t *d, int err, const char *msg) {
+    if (d->state == WW_STATE_DEAD) return;
+    d->state = WW_STATE_DEAD;
+    if (d->cb.on_disconnected) {
+        d->cb.on_disconnected(d->cb.user_data, err, msg);
+    }
+    if (d->fd >= 0) {
+        close(d->fd);
+        d->fd = -1;
+    }
+}
+
+static void close_all_fds(int *fds, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        if (fds[i] >= 0) close(fds[i]);
+    }
+}
+
+static int default_socket_path(char *out, size_t cap) {
+    const char *runtime = getenv("XDG_RUNTIME_DIR");
+    const char *base = (runtime && runtime[0]) ? runtime : "/tmp";
+    int n = snprintf(out, cap, "%s/waywallen/display.sock", base);
+    if (n < 0 || (size_t)n >= cap) return WAYWALLEN_ERR_INVAL;
+    return WAYWALLEN_OK;
+}
+
+/* Blocking helper: encode a request body into a scratch buf, hand it
+ * to the codec, free the buf. */
+static int send_request_msg(waywallen_display_t *d, uint16_t opcode,
+                            int (*encode)(const void *, ww_buf_t *),
+                            const void *msg) {
+    ww_buf_t body;
+    ww_buf_init(&body);
+    int rc = encode(msg, &body);
+    if (rc != WW_OK) {
+        ww_buf_free(&body);
+        return WAYWALLEN_ERR_NOMEM;
+    }
+    rc = ww_codec_send_request(d->fd, opcode, body.data, body.len, NULL, 0);
+    ww_buf_free(&body);
+    if (rc < 0) return WAYWALLEN_ERR_IO;
+    return WAYWALLEN_OK;
+}
+
+/* Encoder trampolines with void-pointer signature so send_request_msg
+ * can call them generically. */
+static int enc_hello(const void *m, ww_buf_t *out) {
+    return ww_req_hello_encode((const ww_req_hello_t *)m, out);
+}
+static int enc_register(const void *m, ww_buf_t *out) {
+    return ww_req_register_display_encode((const ww_req_register_display_t *)m, out);
+}
+static int enc_update(const void *m, ww_buf_t *out) {
+    return ww_req_update_display_encode((const ww_req_update_display_t *)m, out);
+}
+static int enc_release(const void *m, ww_buf_t *out) {
+    return ww_req_buffer_release_encode((const ww_req_buffer_release_t *)m, out);
+}
+static int enc_bye(const void *m, ww_buf_t *out) {
+    return ww_req_bye_encode((const ww_req_bye_t *)m, out);
+}
+
+/* Receive the next event frame. `body_buf` must be ≥ WW_CODEC_MAX_BODY_BYTES.
+ * Returns 0 on success and fills the out-params. */
+static int recv_event_frame(waywallen_display_t *d,
+                            uint16_t *op,
+                            uint8_t *body_buf, size_t *body_len,
+                            int *fd_buf, size_t fd_cap, size_t *n_fds) {
+    int rc = ww_codec_recv_event(d->fd, op, body_buf, WW_CODEC_MAX_BODY_BYTES,
+                                 body_len, fd_buf, fd_cap, n_fds);
+    if (rc == 0) return WAYWALLEN_OK;
+    if (rc == -ECONNRESET) return WAYWALLEN_ERR_NOTCONN;
+    return WAYWALLEN_ERR_IO;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Lifecycle                                                          */
+/* ------------------------------------------------------------------ */
+
+waywallen_display_t *waywallen_display_new(const waywallen_display_callbacks_t *cb) {
+    if (!cb) return NULL;
+    waywallen_display_t *d = (waywallen_display_t *)calloc(1, sizeof(*d));
+    if (!d) return NULL;
+    d->cb = *cb;
+    d->fd = -1;
+    d->state = WW_STATE_INIT;
+    d->backend = WAYWALLEN_BACKEND_NONE;
+    return d;
+}
+
+void waywallen_display_destroy(waywallen_display_t *d) {
+    if (!d) return;
+    if (d->fd >= 0) {
+        close(d->fd);
+        d->fd = -1;
+    }
+    free(d);
+}
+
+int waywallen_display_bind_egl(waywallen_display_t *d,
+                               const waywallen_egl_ctx_t *ctx) {
+    if (!d || !ctx) return WAYWALLEN_ERR_INVAL;
+    if (d->state != WW_STATE_INIT) return WAYWALLEN_ERR_STATE;
+    d->backend = WAYWALLEN_BACKEND_EGL;
+    d->egl = *ctx;
+#ifdef WW_HAVE_EGL
+    /* Best-effort: if libEGL is on the system, resolve the function
+     * pointer table now. Failure is non-fatal — the import path will
+     * fall back to the NONE behavior (close incoming dma-buf fds
+     * without creating textures). */
+    int rc = ww_egl_backend_load(&d->egl_backend, ctx->get_proc_address);
+    if (rc != 0) {
+        memset(&d->egl_backend, 0, sizeof(d->egl_backend));
+        /* Not an error from the public API's perspective: the host
+         * chose EGL but the runtime lacks required extensions. We'll
+         * deliver textures with backend=NONE and let the host notice. */
+    }
+#endif
+    return WAYWALLEN_OK;
+}
+
+int waywallen_display_bind_vulkan(waywallen_display_t *d,
+                                  const waywallen_vk_ctx_t *ctx) {
+    if (!d || !ctx) return WAYWALLEN_ERR_INVAL;
+    if (d->state != WW_STATE_INIT) return WAYWALLEN_ERR_STATE;
+    if (!ctx->vk_get_instance_proc_addr) return WAYWALLEN_ERR_INVAL;
+    d->backend = WAYWALLEN_BACKEND_VULKAN;
+    d->vk = *ctx;
+#ifdef WW_HAVE_VULKAN
+    int rc = ww_vk_backend_load(
+        &d->vk_backend,
+        (VkInstance)ctx->instance,
+        (VkPhysicalDevice)ctx->physical_device,
+        (VkDevice)ctx->device,
+        ctx->queue_family_index,
+        (ww_vk_get_instance_proc_addr_fn)ctx->vk_get_instance_proc_addr);
+    if (rc != 0) {
+        memset(&d->vk_backend, 0, sizeof(d->vk_backend));
+    }
+#endif
+    return WAYWALLEN_OK;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Connect + handshake                                                */
+/* ------------------------------------------------------------------ */
+
+static int open_uds(const char *path) {
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) return -errno;
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    size_t pl = strlen(path);
+    if (pl >= sizeof(addr.sun_path)) {
+        close(fd);
+        return -ENAMETOOLONG;
+    }
+    memcpy(addr.sun_path, path, pl);
+    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        int e = errno;
+        close(fd);
+        return -e;
+    }
+    return fd;
+}
+
+int waywallen_display_connect(waywallen_display_t *d,
+                              const char *socket_path,
+                              const char *display_name,
+                              uint32_t width,
+                              uint32_t height,
+                              uint32_t refresh_mhz) {
+    if (!d || !display_name) return WAYWALLEN_ERR_INVAL;
+    if (d->state != WW_STATE_INIT && d->state != WW_STATE_DEAD) {
+        return WAYWALLEN_ERR_STATE;
+    }
+
+    char path_buf[256];
+    if (!socket_path) {
+        int rc = default_socket_path(path_buf, sizeof(path_buf));
+        if (rc != WAYWALLEN_OK) return rc;
+        socket_path = path_buf;
+    }
+
+    int rc = open_uds(socket_path);
+    if (rc < 0) {
+        return WAYWALLEN_ERR_IO;
+    }
+    d->fd = rc;
+    d->state = WW_STATE_INIT;
+
+    /* ---- Step 1: hello ---- */
+    ww_req_hello_t hello;
+    memset(&hello, 0, sizeof(hello));
+    hello.protocol = (char *)WW_PROTOCOL_NAME;
+    hello.client_name = (char *)"libwaywallen_display";
+    hello.client_version = (char *)"0.1.0";
+    int srv = send_request_msg(d, WW_REQ_HELLO, enc_hello, &hello);
+    if (srv != WAYWALLEN_OK) {
+        fire_disconnected(d, srv, "send hello");
+        return srv;
+    }
+    d->state = WW_STATE_HELLO_SENT;
+
+    /* ---- Step 2: welcome ---- */
+    static uint8_t body_buf[WW_CODEC_MAX_BODY_BYTES];
+    uint16_t op;
+    size_t body_len;
+    int fd_buf[WW_CODEC_MAX_FDS_PER_MSG];
+    size_t n_fds;
+    rc = recv_event_frame(d, &op, body_buf, &body_len, fd_buf,
+                          WW_CODEC_MAX_FDS_PER_MSG, &n_fds);
+    close_all_fds(fd_buf, n_fds);
+    if (rc != WAYWALLEN_OK) {
+        fire_disconnected(d, rc, "recv welcome");
+        return rc;
+    }
+    if (op != WW_EVT_WELCOME) {
+        fire_disconnected(d, WAYWALLEN_ERR_PROTO, "expected welcome");
+        return WAYWALLEN_ERR_PROTO;
+    }
+    ww_evt_welcome_t welcome;
+    if (ww_evt_welcome_decode(body_buf, body_len, &welcome) != WW_OK) {
+        fire_disconnected(d, WAYWALLEN_ERR_PROTO, "decode welcome");
+        return WAYWALLEN_ERR_PROTO;
+    }
+    /* Check for the mandatory explicit_sync_fd feature. */
+    bool has_explicit_sync = false;
+    for (uint32_t i = 0; i < welcome.features.count; i++) {
+        if (welcome.features.data[i]
+            && strcmp(welcome.features.data[i], "explicit_sync_fd") == 0) {
+            has_explicit_sync = true;
+            break;
+        }
+    }
+    ww_evt_welcome_free(&welcome);
+    if (!has_explicit_sync) {
+        fire_disconnected(d, WAYWALLEN_ERR_PROTO,
+                          "server missing explicit_sync_fd feature");
+        return WAYWALLEN_ERR_PROTO;
+    }
+    d->state = WW_STATE_READY;
+
+    /* ---- Step 3: register_display ---- */
+    ww_req_register_display_t reg;
+    memset(&reg, 0, sizeof(reg));
+    reg.name = (char *)display_name;
+    reg.width = width;
+    reg.height = height;
+    reg.refresh_mhz = refresh_mhz;
+    reg.properties.count = 0;
+    reg.properties.data = NULL;
+    srv = send_request_msg(d, WW_REQ_REGISTER_DISPLAY, enc_register, &reg);
+    if (srv != WAYWALLEN_OK) {
+        fire_disconnected(d, srv, "send register_display");
+        return srv;
+    }
+    d->state = WW_STATE_REGISTERING;
+
+    /* ---- Step 4: display_accepted ---- */
+    rc = recv_event_frame(d, &op, body_buf, &body_len, fd_buf,
+                          WW_CODEC_MAX_FDS_PER_MSG, &n_fds);
+    close_all_fds(fd_buf, n_fds);
+    if (rc != WAYWALLEN_OK) {
+        fire_disconnected(d, rc, "recv display_accepted");
+        return rc;
+    }
+    if (op != WW_EVT_DISPLAY_ACCEPTED) {
+        fire_disconnected(d, WAYWALLEN_ERR_PROTO, "expected display_accepted");
+        return WAYWALLEN_ERR_PROTO;
+    }
+    ww_evt_display_accepted_t accepted;
+    if (ww_evt_display_accepted_decode(body_buf, body_len, &accepted) != WW_OK) {
+        fire_disconnected(d, WAYWALLEN_ERR_PROTO, "decode display_accepted");
+        return WAYWALLEN_ERR_PROTO;
+    }
+    d->display_id = accepted.display_id;
+    ww_evt_display_accepted_free(&accepted);
+    d->state = WW_STATE_IDLE;
+
+    return WAYWALLEN_OK;
+}
+
+int waywallen_display_update_size(waywallen_display_t *d,
+                                  uint32_t width,
+                                  uint32_t height) {
+    if (!d) return WAYWALLEN_ERR_INVAL;
+    if (d->state == WW_STATE_INIT || d->state == WW_STATE_DEAD) {
+        return WAYWALLEN_ERR_STATE;
+    }
+    ww_req_update_display_t upd;
+    memset(&upd, 0, sizeof(upd));
+    upd.width = width;
+    upd.height = height;
+    upd.properties.count = 0;
+    upd.properties.data = NULL;
+    int rc = send_request_msg(d, WW_REQ_UPDATE_DISPLAY, enc_update, &upd);
+    if (rc != WAYWALLEN_OK) {
+        fire_disconnected(d, rc, "send update_display");
+    }
+    return rc;
+}
+
+int waywallen_display_get_fd(waywallen_display_t *d) {
+    if (!d) return -1;
+    return d->fd;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Dispatch                                                           */
+/* ------------------------------------------------------------------ */
+
+#ifdef WW_HAVE_EGL
+/* Destroy any cached EGL resources associated with the current bound
+ * pool. Called from fire_textures_releasing_if_any and on disconnect. */
+static void egl_release_current_pool(waywallen_display_t *d) {
+    if (!d->egl_backend.loaded || d->egl_import_count == 0) {
+        free(d->egl_images);
+        free(d->egl_gl_textures);
+        d->egl_images = NULL;
+        d->egl_gl_textures = NULL;
+        d->egl_import_count = 0;
+        return;
+    }
+    if (d->egl_gl_textures) {
+        d->egl_backend.glDeleteTextures((int)d->egl_import_count,
+                                        d->egl_gl_textures);
+    }
+    if (d->egl_images) {
+        for (uint32_t i = 0; i < d->egl_import_count; i++) {
+            if (d->egl_images[i]) {
+                ww_egl_destroy_image(&d->egl_backend, d->egl.egl_display,
+                                     (EGLImageKHR)d->egl_images[i]);
+            }
+        }
+    }
+    free(d->egl_images);
+    free(d->egl_gl_textures);
+    d->egl_images = NULL;
+    d->egl_gl_textures = NULL;
+    d->egl_import_count = 0;
+}
+#endif
+
+#ifdef WW_HAVE_VULKAN
+static void vk_release_current_pool(waywallen_display_t *d) {
+    if (!d->vk_backend.loaded || d->vk_import_count == 0) {
+        free(d->vk_images);
+        free(d->vk_semaphores);
+        d->vk_images = NULL;
+        d->vk_semaphores = NULL;
+        d->vk_import_count = 0;
+        return;
+    }
+    if (d->vk_images) {
+        for (uint32_t i = 0; i < d->vk_import_count; i++) {
+            ww_vk_destroy_imported_image(&d->vk_backend, &d->vk_images[i]);
+        }
+    }
+    if (d->vk_semaphores) {
+        for (uint32_t i = 0; i < d->vk_import_count; i++) {
+            if (d->vk_semaphores[i] != VK_NULL_HANDLE) {
+                d->vk_backend.vkDestroySemaphore(
+                    d->vk_backend.device, d->vk_semaphores[i], NULL);
+            }
+        }
+    }
+    free(d->vk_images);
+    free(d->vk_semaphores);
+    d->vk_images = NULL;
+    d->vk_semaphores = NULL;
+    d->vk_import_count = 0;
+}
+#endif
+
+static void fire_textures_releasing_if_any(waywallen_display_t *d) {
+    if (!d->has_textures) return;
+    if (d->cb.on_textures_releasing) {
+        d->cb.on_textures_releasing(d->cb.user_data, &d->current_textures);
+    }
+#ifdef WW_HAVE_EGL
+    egl_release_current_pool(d);
+#endif
+#ifdef WW_HAVE_VULKAN
+    vk_release_current_pool(d);
+#endif
+    /* Free the void** handle arrays we built for the callback payload. */
+    free(d->current_textures.vk_images);
+    free(d->current_textures.vk_memories);
+    memset(&d->current_textures, 0, sizeof(d->current_textures));
+    d->has_textures = false;
+}
+
+#ifdef WW_HAVE_EGL
+/*
+ * Attempt to import the N dma-buf fds as N EGLImages + N GL textures
+ * using the cached backend function table. Returns 0 on success (and
+ * populates d->egl_images / d->egl_gl_textures / d->egl_import_count),
+ * negative on failure (and leaves the display's EGL pool empty). On
+ * failure the caller is responsible for closing the fds. On success
+ * the fds are closed by this function before return — the EGL
+ * driver has dup2'd them internally.
+ */
+static int try_egl_import(waywallen_display_t *d,
+                          const ww_evt_bind_buffers_t *bb,
+                          int *fd_buf, size_t n_fds) {
+    if (!d->egl_backend.loaded) return -ENOSYS;
+    if (bb->planes_per_buffer == 0
+        || bb->planes_per_buffer > WW_EGL_MAX_PLANES) {
+        return -EINVAL;
+    }
+    if (bb->count == 0) return -EINVAL;
+    if (bb->stride.count != n_fds
+        || bb->plane_offset.count != n_fds) {
+        return -EINVAL;
+    }
+
+    d->egl_import_count = 0;
+    d->egl_images = (void **)calloc(bb->count, sizeof(void *));
+    d->egl_gl_textures = (uint32_t *)calloc(bb->count, sizeof(uint32_t));
+    if (!d->egl_images || !d->egl_gl_textures) {
+        free(d->egl_images);
+        free(d->egl_gl_textures);
+        d->egl_images = NULL;
+        d->egl_gl_textures = NULL;
+        return -ENOMEM;
+    }
+
+    for (uint32_t b = 0; b < bb->count; b++) {
+        ww_egl_dmabuf_import_t im;
+        memset(&im, 0, sizeof(im));
+        im.egl_display = d->egl.egl_display;
+        im.fourcc = bb->fourcc;
+        im.width = bb->width;
+        im.height = bb->height;
+        im.modifier = bb->modifier;
+        im.n_planes = bb->planes_per_buffer;
+        for (uint32_t p = 0; p < bb->planes_per_buffer; p++) {
+            size_t idx = (size_t)b * bb->planes_per_buffer + p;
+            im.fds[p] = fd_buf[idx];
+            im.strides[p] = bb->stride.data[idx];
+            im.offsets[p] = bb->plane_offset.data[idx];
+        }
+        EGLImageKHR img;
+        int rc = ww_egl_import_dmabuf(&d->egl_backend, &im, &img);
+        if (rc != 0) {
+            /* Roll back previously created resources for buffers 0..b-1. */
+            for (uint32_t j = 0; j < b; j++) {
+                if (d->egl_gl_textures[j]) {
+                    d->egl_backend.glDeleteTextures(1, &d->egl_gl_textures[j]);
+                }
+                if (d->egl_images[j]) {
+                    ww_egl_destroy_image(&d->egl_backend, d->egl.egl_display,
+                                         (EGLImageKHR)d->egl_images[j]);
+                }
+            }
+            free(d->egl_images);
+            free(d->egl_gl_textures);
+            d->egl_images = NULL;
+            d->egl_gl_textures = NULL;
+            return rc;
+        }
+        d->egl_images[b] = (void *)img;
+        GLuint tex = 0;
+        rc = ww_egl_texture_from_image(&d->egl_backend, img, &tex);
+        if (rc != 0) {
+            ww_egl_destroy_image(&d->egl_backend, d->egl.egl_display, img);
+            d->egl_images[b] = NULL;
+            for (uint32_t j = 0; j < b; j++) {
+                if (d->egl_gl_textures[j]) {
+                    d->egl_backend.glDeleteTextures(1, &d->egl_gl_textures[j]);
+                }
+                if (d->egl_images[j]) {
+                    ww_egl_destroy_image(&d->egl_backend, d->egl.egl_display,
+                                         (EGLImageKHR)d->egl_images[j]);
+                }
+            }
+            free(d->egl_images);
+            free(d->egl_gl_textures);
+            d->egl_images = NULL;
+            d->egl_gl_textures = NULL;
+            return rc;
+        }
+        d->egl_gl_textures[b] = tex;
+    }
+
+    d->egl_import_count = bb->count;
+    /* The EGL driver has dup'd the fds into its own references.
+     * Close our copies. */
+    close_all_fds(fd_buf, n_fds);
+    return 0;
+}
+#endif  /* WW_HAVE_EGL */
+
+#ifdef WW_HAVE_VULKAN
+static int try_vk_import(waywallen_display_t *d,
+                         const ww_evt_bind_buffers_t *bb,
+                         int *fd_buf, size_t n_fds) {
+    if (!d->vk_backend.loaded) return -ENOSYS;
+    if (bb->planes_per_buffer == 0
+        || bb->planes_per_buffer > WW_VK_MAX_PLANES) return -EINVAL;
+    if (bb->count == 0) return -EINVAL;
+    if (bb->stride.count != n_fds || bb->plane_offset.count != n_fds)
+        return -EINVAL;
+
+    d->vk_import_count = 0;
+    d->vk_images = (ww_vk_imported_image_t *)calloc(
+        bb->count, sizeof(ww_vk_imported_image_t));
+    d->vk_semaphores = (VkSemaphore *)calloc(bb->count, sizeof(VkSemaphore));
+    if (!d->vk_images || !d->vk_semaphores) {
+        free(d->vk_images);
+        free(d->vk_semaphores);
+        d->vk_images = NULL;
+        d->vk_semaphores = NULL;
+        return -ENOMEM;
+    }
+
+    /* Create one semaphore per slot for sync_fd import. */
+    for (uint32_t b = 0; b < bb->count; b++) {
+        VkSemaphoreCreateInfo sci = {
+            .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+        };
+        VkResult vr = d->vk_backend.vkCreateSemaphore(
+            d->vk_backend.device, &sci, NULL, &d->vk_semaphores[b]);
+        if (vr != VK_SUCCESS) goto rollback;
+    }
+
+    for (uint32_t b = 0; b < bb->count; b++) {
+        ww_vk_dmabuf_import_t im;
+        memset(&im, 0, sizeof(im));
+        im.fourcc = bb->fourcc;
+        im.width = bb->width;
+        im.height = bb->height;
+        im.modifier = bb->modifier;
+        im.n_planes = bb->planes_per_buffer;
+        for (uint32_t p = 0; p < bb->planes_per_buffer; p++) {
+            size_t idx = (size_t)b * bb->planes_per_buffer + p;
+            im.fds[p] = fd_buf[idx];
+            im.strides[p] = bb->stride.data[idx];
+            im.offsets[p] = bb->plane_offset.data[idx];
+        }
+        int rc = ww_vk_import_dmabuf(&d->vk_backend, &im, &d->vk_images[b]);
+        if (rc != 0) goto rollback;
+    }
+
+    d->vk_import_count = bb->count;
+    /* vkAllocateMemory took ownership of fds[0] per buffer on success.
+     * Close remaining plane fds for multi-plane (planes > 0). For
+     * single-plane (common case), all fds were consumed. */
+    for (size_t i = 0; i < n_fds; i++) {
+        /* For single-plane: fd was consumed by vkAllocateMemory; the
+         * kernel already closed our copy. For safety, mark invalid. */
+        fd_buf[i] = -1;
+    }
+    return 0;
+
+rollback:
+    for (uint32_t j = 0; j < bb->count; j++) {
+        ww_vk_destroy_imported_image(&d->vk_backend, &d->vk_images[j]);
+        if (d->vk_semaphores[j] != VK_NULL_HANDLE) {
+            d->vk_backend.vkDestroySemaphore(
+                d->vk_backend.device, d->vk_semaphores[j], NULL);
+        }
+    }
+    free(d->vk_images);
+    free(d->vk_semaphores);
+    d->vk_images = NULL;
+    d->vk_semaphores = NULL;
+    return -EIO;
+}
+#endif  /* WW_HAVE_VULKAN */
+
+static int handle_bind_buffers(waywallen_display_t *d,
+                               const uint8_t *body, size_t body_len,
+                               int *fd_buf, size_t n_fds) {
+    /* Close any prior texture state first. */
+    fire_textures_releasing_if_any(d);
+
+    ww_evt_bind_buffers_t bb;
+    if (ww_evt_bind_buffers_decode(body, body_len, &bb) != WW_OK) {
+        close_all_fds(fd_buf, n_fds);
+        fire_disconnected(d, WAYWALLEN_ERR_PROTO, "decode bind_buffers");
+        return WAYWALLEN_ERR_PROTO;
+    }
+    uint32_t expected = bb.count * bb.planes_per_buffer;
+    if ((size_t)expected != n_fds) {
+        close_all_fds(fd_buf, n_fds);
+        ww_evt_bind_buffers_free(&bb);
+        fire_disconnected(d, WAYWALLEN_ERR_PROTO,
+                          "bind_buffers fd count mismatch");
+        return WAYWALLEN_ERR_PROTO;
+    }
+
+    waywallen_backend_t reported_backend = WAYWALLEN_BACKEND_NONE;
+    uint32_t *reported_gl_textures = NULL;
+    void **reported_vk_images = NULL;
+    void **reported_vk_memories = NULL;
+    int fds_consumed = 0;
+
+#ifdef WW_HAVE_EGL
+    if (!fds_consumed && d->backend == WAYWALLEN_BACKEND_EGL
+        && d->egl_backend.loaded) {
+        int ir = try_egl_import(d, &bb, fd_buf, n_fds);
+        if (ir == 0) {
+            reported_backend = WAYWALLEN_BACKEND_EGL;
+            reported_gl_textures = d->egl_gl_textures;
+            fds_consumed = 1;
+        }
+    }
+#endif
+#ifdef WW_HAVE_VULKAN
+    if (!fds_consumed && d->backend == WAYWALLEN_BACKEND_VULKAN
+        && d->vk_backend.loaded) {
+        int ir = try_vk_import(d, &bb, fd_buf, n_fds);
+        if (ir == 0) {
+            reported_backend = WAYWALLEN_BACKEND_VULKAN;
+            /* Build void* arrays pointing into the imported image
+             * structs so the callback payload matches the public API. */
+            reported_vk_images = (void **)calloc(bb.count, sizeof(void *));
+            reported_vk_memories = (void **)calloc(bb.count, sizeof(void *));
+            if (reported_vk_images && reported_vk_memories) {
+                for (uint32_t i = 0; i < bb.count; i++) {
+                    reported_vk_images[i] = (void *)d->vk_images[i].image;
+                    reported_vk_memories[i] = (void *)d->vk_images[i].memory;
+                }
+            }
+            fds_consumed = 1;
+        }
+    }
+#endif
+    if (!fds_consumed) {
+        close_all_fds(fd_buf, n_fds);
+    }
+
+    d->current_buffer_generation = bb.buffer_generation;
+    d->current_textures.count = bb.count;
+    d->current_textures.tex_width = bb.width;
+    d->current_textures.tex_height = bb.height;
+    d->current_textures.fourcc = bb.fourcc;
+    d->current_textures.modifier = bb.modifier;
+    d->current_textures.planes_per_buffer = bb.planes_per_buffer;
+    d->current_textures.backend = reported_backend;
+    d->current_textures.gl_textures = reported_gl_textures;
+    d->current_textures.vk_images = reported_vk_images;
+    d->current_textures.vk_memories = reported_vk_memories;
+    d->has_textures = true;
+
+    ww_evt_bind_buffers_free(&bb);
+    d->state = WW_STATE_PENDING_CONFIG;
+
+    if (d->cb.on_textures_ready) {
+        d->cb.on_textures_ready(d->cb.user_data, &d->current_textures);
+    }
+    return WAYWALLEN_OK;
+}
+
+static int handle_set_config(waywallen_display_t *d,
+                             const uint8_t *body, size_t body_len) {
+    ww_evt_set_config_t sc;
+    if (ww_evt_set_config_decode(body, body_len, &sc) != WW_OK) {
+        fire_disconnected(d, WAYWALLEN_ERR_PROTO, "decode set_config");
+        return WAYWALLEN_ERR_PROTO;
+    }
+    /* Only valid after bind_buffers. */
+    if (d->state != WW_STATE_PENDING_CONFIG && d->state != WW_STATE_BOUND) {
+        ww_evt_set_config_free(&sc);
+        fire_disconnected(d, WAYWALLEN_ERR_PROTO,
+                          "set_config in invalid state");
+        return WAYWALLEN_ERR_PROTO;
+    }
+    waywallen_config_t cfg;
+    cfg.source_rect.x = sc.source_rect.x;
+    cfg.source_rect.y = sc.source_rect.y;
+    cfg.source_rect.w = sc.source_rect.w;
+    cfg.source_rect.h = sc.source_rect.h;
+    cfg.dest_rect.x = sc.dest_rect.x;
+    cfg.dest_rect.y = sc.dest_rect.y;
+    cfg.dest_rect.w = sc.dest_rect.w;
+    cfg.dest_rect.h = sc.dest_rect.h;
+    cfg.transform = sc.transform;
+    cfg.clear_color[0] = sc.clear_r;
+    cfg.clear_color[1] = sc.clear_g;
+    cfg.clear_color[2] = sc.clear_b;
+    cfg.clear_color[3] = sc.clear_a;
+    ww_evt_set_config_free(&sc);
+
+    d->state = WW_STATE_BOUND;
+
+    if (d->cb.on_config) {
+        d->cb.on_config(d->cb.user_data, &cfg);
+    }
+    return WAYWALLEN_OK;
+}
+
+static int handle_frame_ready(waywallen_display_t *d,
+                              const uint8_t *body, size_t body_len,
+                              int *fd_buf, size_t n_fds) {
+    ww_evt_frame_ready_t fr;
+    if (ww_evt_frame_ready_decode(body, body_len, &fr) != WW_OK) {
+        close_all_fds(fd_buf, n_fds);
+        fire_disconnected(d, WAYWALLEN_ERR_PROTO, "decode frame_ready");
+        return WAYWALLEN_ERR_PROTO;
+    }
+    if (n_fds != 1) {
+        close_all_fds(fd_buf, n_fds);
+        ww_evt_frame_ready_free(&fr);
+        fire_disconnected(d, WAYWALLEN_ERR_PROTO,
+                          "frame_ready expected 1 sync_fd");
+        return WAYWALLEN_ERR_PROTO;
+    }
+    if (d->state != WW_STATE_BOUND) {
+        close_all_fds(fd_buf, n_fds);
+        ww_evt_frame_ready_free(&fr);
+        fire_disconnected(d, WAYWALLEN_ERR_PROTO,
+                          "frame_ready in wrong state");
+        return WAYWALLEN_ERR_PROTO;
+    }
+    /* Drop stale-generation frames silently. */
+    if (fr.buffer_generation != d->current_buffer_generation) {
+        close_all_fds(fd_buf, n_fds);
+        ww_evt_frame_ready_free(&fr);
+        return WAYWALLEN_OK;
+    }
+
+    int fd_handled = 0;
+    void *acquire_semaphore = NULL;
+
+#ifdef WW_HAVE_EGL
+    if (!fd_handled && d->backend == WAYWALLEN_BACKEND_EGL
+        && d->egl_backend.loaded) {
+        int rc = ww_egl_wait_sync_fd(&d->egl_backend, d->egl.egl_display,
+                                     fd_buf[0]);
+        if (rc != 0) {
+            close(fd_buf[0]);
+        }
+        fd_handled = 1;
+    }
+#endif
+#ifdef WW_HAVE_VULKAN
+    if (!fd_handled && d->backend == WAYWALLEN_BACKEND_VULKAN
+        && d->vk_backend.loaded && d->vk_semaphores) {
+        uint32_t slot = fr.buffer_index;
+        if (slot < d->vk_import_count && d->vk_semaphores[slot] != VK_NULL_HANDLE) {
+            int rc = ww_vk_import_sync_fd(&d->vk_backend,
+                                          d->vk_semaphores[slot],
+                                          fd_buf[0]);
+            if (rc == 0) {
+                acquire_semaphore = (void *)d->vk_semaphores[slot];
+            } else {
+                close(fd_buf[0]);
+            }
+        } else {
+            close(fd_buf[0]);
+        }
+        fd_handled = 1;
+    }
+#endif
+    if (!fd_handled) {
+        close_all_fds(fd_buf, n_fds);
+    }
+
+    waywallen_frame_t frame;
+    frame.buffer_index = fr.buffer_index;
+    frame.seq = fr.seq;
+    frame.vk_acquire_semaphore = acquire_semaphore;
+    ww_evt_frame_ready_free(&fr);
+
+    if (d->cb.on_frame_ready) {
+        d->cb.on_frame_ready(d->cb.user_data, &frame);
+    }
+    return WAYWALLEN_OK;
+}
+
+static int handle_unbind(waywallen_display_t *d,
+                         const uint8_t *body, size_t body_len) {
+    ww_evt_unbind_t ub;
+    if (ww_evt_unbind_decode(body, body_len, &ub) != WW_OK) {
+        fire_disconnected(d, WAYWALLEN_ERR_PROTO, "decode unbind");
+        return WAYWALLEN_ERR_PROTO;
+    }
+    ww_evt_unbind_free(&ub);
+    fire_textures_releasing_if_any(d);
+    d->state = WW_STATE_IDLE;
+    return WAYWALLEN_OK;
+}
+
+static int handle_error(waywallen_display_t *d,
+                        const uint8_t *body, size_t body_len) {
+    ww_evt_error_t er;
+    if (ww_evt_error_decode(body, body_len, &er) != WW_OK) {
+        fire_disconnected(d, WAYWALLEN_ERR_PROTO, "decode error");
+        return WAYWALLEN_ERR_PROTO;
+    }
+    /* Make a local copy of the message before freeing `er`, then
+     * fire the callback. */
+    char *msg = er.message;
+    er.message = NULL;
+    ww_evt_error_free(&er);
+    fire_disconnected(d, WAYWALLEN_ERR_PROTO, msg ? msg : "server error");
+    free(msg);
+    return WAYWALLEN_ERR_PROTO;
+}
+
+int waywallen_display_dispatch(waywallen_display_t *d) {
+    if (!d) return WAYWALLEN_ERR_INVAL;
+    if (d->fd < 0 || d->state == WW_STATE_DEAD) return WAYWALLEN_ERR_NOTCONN;
+    if (d->state == WW_STATE_INIT) return WAYWALLEN_ERR_STATE;
+
+    static uint8_t body_buf[WW_CODEC_MAX_BODY_BYTES];
+    uint16_t op;
+    size_t body_len;
+    int fd_buf[WW_CODEC_MAX_FDS_PER_MSG];
+    size_t n_fds;
+    int rc = recv_event_frame(d, &op, body_buf, &body_len, fd_buf,
+                              WW_CODEC_MAX_FDS_PER_MSG, &n_fds);
+    if (rc != WAYWALLEN_OK) {
+        fire_disconnected(d, rc, "recv event");
+        return rc;
+    }
+
+    switch (op) {
+        case WW_EVT_BIND_BUFFERS:
+            return handle_bind_buffers(d, body_buf, body_len, fd_buf, n_fds);
+        case WW_EVT_SET_CONFIG:
+            close_all_fds(fd_buf, n_fds);
+            return handle_set_config(d, body_buf, body_len);
+        case WW_EVT_FRAME_READY:
+            return handle_frame_ready(d, body_buf, body_len, fd_buf, n_fds);
+        case WW_EVT_UNBIND:
+            close_all_fds(fd_buf, n_fds);
+            return handle_unbind(d, body_buf, body_len);
+        case WW_EVT_ERROR:
+            close_all_fds(fd_buf, n_fds);
+            return handle_error(d, body_buf, body_len);
+        case WW_EVT_WELCOME:
+        case WW_EVT_DISPLAY_ACCEPTED:
+            /* Legal only during handshake. Seeing them again is a
+             * protocol violation. */
+            close_all_fds(fd_buf, n_fds);
+            fire_disconnected(d, WAYWALLEN_ERR_PROTO,
+                              "unexpected handshake event");
+            return WAYWALLEN_ERR_PROTO;
+        default:
+            /* Unknown opcodes are forward-compat: log + drop. */
+            close_all_fds(fd_buf, n_fds);
+            return WAYWALLEN_OK;
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Release / disconnect                                               */
+/* ------------------------------------------------------------------ */
+
+int waywallen_display_release_frame(waywallen_display_t *d,
+                                    uint32_t buffer_index,
+                                    uint64_t seq) {
+    if (!d) return WAYWALLEN_ERR_INVAL;
+    if (d->state != WW_STATE_BOUND) return WAYWALLEN_ERR_STATE;
+    ww_req_buffer_release_t rel;
+    memset(&rel, 0, sizeof(rel));
+    rel.buffer_generation = d->current_buffer_generation;
+    rel.buffer_index = buffer_index;
+    rel.seq = seq;
+    int rc = send_request_msg(d, WW_REQ_BUFFER_RELEASE, enc_release, &rel);
+    if (rc != WAYWALLEN_OK) {
+        fire_disconnected(d, rc, "send buffer_release");
+    }
+    return rc;
+}
+
+void waywallen_display_disconnect(waywallen_display_t *d) {
+    if (!d) return;
+    if (d->fd >= 0) {
+        /* Best-effort bye; ignore errors. */
+        if (d->state != WW_STATE_INIT && d->state != WW_STATE_DEAD) {
+            ww_req_bye_t bye;
+            memset(&bye, 0, sizeof(bye));
+            (void)send_request_msg(d, WW_REQ_BYE, enc_bye, &bye);
+        }
+        close(d->fd);
+        d->fd = -1;
+    }
+    fire_textures_releasing_if_any(d);
+    d->state = WW_STATE_INIT;
+}
