@@ -290,6 +290,20 @@ if(WAYWALLEN_DISPLAY_BUILD_EXAMPLES)
 endif()
 
 # ---------------------------------------------------------------------------
+# Plugins
+# ---------------------------------------------------------------------------
+
+option(WAYWALLEN_DISPLAY_BUILD_PLUGINS "Build plugins under plugins/" OFF)
+
+if(WAYWALLEN_DISPLAY_BUILD_PLUGINS)
+    # QML plugin (requires Qt6)
+    option(WAYWALLEN_DISPLAY_PLUGIN_QML "Build the QML display plugin" ON)
+    if(WAYWALLEN_DISPLAY_PLUGIN_QML)
+        add_subdirectory(plugins/qml)
+    endif()
+endif()
+
+# ---------------------------------------------------------------------------
 # Install
 # ---------------------------------------------------------------------------
 

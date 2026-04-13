@@ -23,18 +23,24 @@ qt_add_qml_module(waywallen-display-qml
         ${CMAKE_CURRENT_BINARY_DIR}/Waywallen/Display
 )
 
-# Build the C display library from the sibling project if not already built.
-# For now, expect it pre-built and link the static archive.
-set(WAYWALLEN_DISPLAY_BUILD_DIR "${WAYWALLEN_DISPLAY_DIR}/build"
-    CACHE PATH "Build directory of libwaywallen_display")
-
-target_link_libraries(waywallen-display-qml PRIVATE
-    Qt6::Quick
-    Qt6::Gui
-    ${WAYWALLEN_DISPLAY_BUILD_DIR}/libwaywallen_display.a)
-
-target_include_directories(waywallen-display-qml PRIVATE
-    ${WAYWALLEN_DISPLAY_DIR}/include)
+# When built as a subdirectory of the top-level waywallen_display project,
+# the CMake target is already available — link it directly.
+# Otherwise fall back to a pre-built static archive.
+if(TARGET waywallen_display_static)
+    target_link_libraries(waywallen-display-qml PRIVATE
+        Qt6::Quick
+        Qt6::Gui
+        waywallen_display_static)
+else()
+    set(WAYWALLEN_DISPLAY_BUILD_DIR "${WAYWALLEN_DISPLAY_DIR}/build"
+        CACHE PATH "Build directory of libwaywallen_display")
+    target_link_libraries(waywallen-display-qml PRIVATE
+        Qt6::Quick
+        Qt6::Gui
+        ${WAYWALLEN_DISPLAY_BUILD_DIR}/libwaywallen_display.a)
+    target_include_directories(waywallen-display-qml PRIVATE
+        ${WAYWALLEN_DISPLAY_DIR}/include)
+endif()
 
 target_compile_options(waywallen-display-qml PRIVATE
     -Wall -Wextra -Wpedantic)
