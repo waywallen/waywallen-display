@@ -41,7 +41,7 @@ Window {
                 color: "#cdd6f4"
                 font.pixelSize: 13
                 font.family: "monospace"
-                text: "left  | " + statusLabel(left.status) + " | frames: " + left.framesReceived
+                text: "left  | " + connLabel(left.connState) + " " + streamLabel(left.streamState) + " | frames: " + left.framesReceived
             }
         }
 
@@ -64,18 +64,25 @@ Window {
                 color: "#cdd6f4"
                 font.pixelSize: 13
                 font.family: "monospace"
-                text: "right | " + statusLabel(right.status) + " | frames: " + right.framesReceived
+                text: "right | " + connLabel(right.connState) + " " + streamLabel(right.streamState) + " | frames: " + right.framesReceived
             }
         }
     }
 
-    function statusLabel(st) {
+    function connLabel(st) {
         switch (st) {
         case WaywallenDisplay.Disconnected: return "disc"
         case WaywallenDisplay.Connecting:   return "conn…"
-        case WaywallenDisplay.Idle:         return "idle"
-        case WaywallenDisplay.Bound:        return "bound"
+        case WaywallenDisplay.Connected:    return "conn"
         case WaywallenDisplay.Error:        return "err"
+        }
+        return "?"
+    }
+
+    function streamLabel(st) {
+        switch (st) {
+        case WaywallenDisplay.Inactive: return "inactive"
+        case WaywallenDisplay.Active:   return "active"
         }
         return "?"
     }

@@ -71,6 +71,30 @@ typedef enum waywallen_err {
 typedef struct waywallen_display waywallen_display_t;
 
 /* -------------------------------------------------------------------------
+ * Connection + stream state
+ *
+ * The display tracks two independent state dimensions:
+ *   conn_state  — socket connection to the backend daemon
+ *   stream_state — whether the daemon is actively pushing DMA-BUF frames
+ *
+ * The display does NOT know or care about renderer processes. It only
+ * sees: "am I connected to the backend?" and "is the backend sending
+ * me frames?"
+ * ------------------------------------------------------------------------- */
+
+typedef enum waywallen_conn_state {
+    WAYWALLEN_CONN_DISCONNECTED = 0,
+    WAYWALLEN_CONN_CONNECTING,
+    WAYWALLEN_CONN_CONNECTED,
+    WAYWALLEN_CONN_DEAD,
+} waywallen_conn_state_t;
+
+typedef enum waywallen_stream_state {
+    WAYWALLEN_STREAM_INACTIVE = 0,
+    WAYWALLEN_STREAM_ACTIVE,
+} waywallen_stream_state_t;
+
+/* -------------------------------------------------------------------------
  * Backends (Phase 2: enum is recorded but not honoured beyond that)
  * ------------------------------------------------------------------------- */
 
@@ -118,11 +142,12 @@ typedef struct waywallen_textures {
     uint32_t planes_per_buffer;
 
     waywallen_backend_t backend;
-    /* Only one of these is non-NULL, depending on `backend`.
-     * Phase 2: both are NULL regardless of backend. */
-    uint32_t *gl_textures;       /* length == count */
-    void **vk_images;            /* length == count; each is a VkImage */
-    void **vk_memories;          /* length == count; each is a VkDeviceMemory */
+    /* Only one set of handles is non-NULL, depending on `backend`. */
+    void **egl_images;           /* length == count; each is an EGLImageKHR (EGL) */
+    uint32_t *gl_textures;       /* length == count; created by host via
+                                  * waywallen_display_create_gl_texture (EGL) */
+    void **vk_images;            /* length == count; each is a VkImage (Vulkan) */
+    void **vk_memories;          /* length == count; each is a VkDeviceMemory (Vulkan) */
 } waywallen_textures_t;
 
 typedef struct waywallen_config {
@@ -227,6 +252,28 @@ int waywallen_display_release_frame(waywallen_display_t *d,
                                     uint64_t seq);
 
 void waywallen_display_disconnect(waywallen_display_t *d);
+
+/* -------------------------------------------------------------------------
+ * State queries
+ * ------------------------------------------------------------------------- */
+
+waywallen_conn_state_t   waywallen_display_conn_state(waywallen_display_t *d);
+waywallen_stream_state_t waywallen_display_stream_state(waywallen_display_t *d);
+
+/* -------------------------------------------------------------------------
+ * EGL deferred GL texture creation
+ *
+ * When backend == EGL, `on_textures_ready` delivers EGLImageKHR handles
+ * but no GL textures. The host calls these from a thread with a current
+ * GL context (typically the render thread) to create / destroy the GL
+ * texture objects.
+ * ------------------------------------------------------------------------- */
+
+int  waywallen_display_create_gl_texture(waywallen_display_t *d,
+                                         uint32_t image_index,
+                                         uint32_t *out_gl_texture);
+void waywallen_display_delete_gl_texture(waywallen_display_t *d,
+                                         uint32_t image_index);
 
 #ifdef __cplusplus
 } /* extern "C" */

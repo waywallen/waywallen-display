@@ -38,18 +38,26 @@ Window {
         font.pixelSize: 14
         font.family: "monospace"
         text: {
-            let s = "status: " + statusText(wallpaper.status)
+            let s = "conn: " + connText(wallpaper.connState)
+            s += "  stream: " + streamText(wallpaper.streamState)
             s += "\nframes: " + wallpaper.framesReceived
             return s
         }
 
-        function statusText(st) {
+        function connText(st) {
             switch (st) {
             case WaywallenDisplay.Disconnected: return "disconnected"
             case WaywallenDisplay.Connecting:   return "connecting…"
-            case WaywallenDisplay.Idle:         return "idle"
-            case WaywallenDisplay.Bound:        return "bound"
+            case WaywallenDisplay.Connected:    return "connected"
             case WaywallenDisplay.Error:        return "error"
+            }
+            return "unknown"
+        }
+
+        function streamText(st) {
+            switch (st) {
+            case WaywallenDisplay.Inactive: return "inactive"
+            case WaywallenDisplay.Active:   return "active"
             }
             return "unknown"
         }

@@ -35,24 +35,30 @@
 #include <sys/un.h>
 #include <unistd.h>
 
-typedef enum display_state {
-    WW_STATE_INIT = 0,
-    WW_STATE_HELLO_SENT,
-    WW_STATE_READY,
-    WW_STATE_REGISTERING,
-    WW_STATE_IDLE,
-    WW_STATE_PENDING_CONFIG,
-    WW_STATE_BOUND,
-    WW_STATE_DEAD,
-} display_state_t;
+/* Internal connection state (maps to public waywallen_conn_state_t). */
+typedef enum ww_conn_state {
+    WW_CONN_DISCONNECTED = 0,
+    WW_CONN_CONNECTING,
+    WW_CONN_CONNECTED,
+    WW_CONN_DEAD,
+} ww_conn_state_t;
+
+/* Internal stream state (maps to public waywallen_stream_state_t). */
+typedef enum ww_stream_state {
+    WW_STREAM_INACTIVE = 0,
+    WW_STREAM_ACTIVE,
+} ww_stream_state_t;
 
 struct waywallen_display {
     waywallen_display_callbacks_t cb;
 
-    /* Connection state. */
+    /* Connection to the backend daemon. */
     int fd;
-    display_state_t state;
+    ww_conn_state_t conn;
     uint64_t display_id;
+
+    /* Whether the backend is actively pushing frames. */
+    ww_stream_state_t stream;
 
     /* Backend selection. */
     waywallen_backend_t backend;
@@ -86,8 +92,9 @@ struct waywallen_display {
 /* ------------------------------------------------------------------ */
 
 static void fire_disconnected(waywallen_display_t *d, int err, const char *msg) {
-    if (d->state == WW_STATE_DEAD) return;
-    d->state = WW_STATE_DEAD;
+    if (d->conn == WW_CONN_DEAD) return;
+    d->conn = WW_CONN_DEAD;
+    d->stream = WW_STREAM_INACTIVE;
     if (d->cb.on_disconnected) {
         d->cb.on_disconnected(d->cb.user_data, err, msg);
     }
@@ -170,7 +177,8 @@ waywallen_display_t *waywallen_display_new(const waywallen_display_callbacks_t *
     if (!d) return NULL;
     d->cb = *cb;
     d->fd = -1;
-    d->state = WW_STATE_INIT;
+    d->conn = WW_CONN_DISCONNECTED;
+    d->stream = WW_STREAM_INACTIVE;
     d->backend = WAYWALLEN_BACKEND_NONE;
     return d;
 }
@@ -187,7 +195,7 @@ void waywallen_display_destroy(waywallen_display_t *d) {
 int waywallen_display_bind_egl(waywallen_display_t *d,
                                const waywallen_egl_ctx_t *ctx) {
     if (!d || !ctx) return WAYWALLEN_ERR_INVAL;
-    if (d->state != WW_STATE_INIT) return WAYWALLEN_ERR_STATE;
+    if (d->conn != WW_CONN_DISCONNECTED) return WAYWALLEN_ERR_STATE;
     d->backend = WAYWALLEN_BACKEND_EGL;
     d->egl = *ctx;
 #ifdef WW_HAVE_EGL
@@ -209,7 +217,7 @@ int waywallen_display_bind_egl(waywallen_display_t *d,
 int waywallen_display_bind_vulkan(waywallen_display_t *d,
                                   const waywallen_vk_ctx_t *ctx) {
     if (!d || !ctx) return WAYWALLEN_ERR_INVAL;
-    if (d->state != WW_STATE_INIT) return WAYWALLEN_ERR_STATE;
+    if (d->conn != WW_CONN_DISCONNECTED) return WAYWALLEN_ERR_STATE;
     if (!ctx->vk_get_instance_proc_addr) return WAYWALLEN_ERR_INVAL;
     d->backend = WAYWALLEN_BACKEND_VULKAN;
     d->vk = *ctx;
@@ -259,7 +267,7 @@ int waywallen_display_connect(waywallen_display_t *d,
                               uint32_t height,
                               uint32_t refresh_mhz) {
     if (!d || !display_name) return WAYWALLEN_ERR_INVAL;
-    if (d->state != WW_STATE_INIT && d->state != WW_STATE_DEAD) {
+    if (d->conn != WW_CONN_DISCONNECTED && d->conn != WW_CONN_DEAD) {
         return WAYWALLEN_ERR_STATE;
     }
 
@@ -275,7 +283,8 @@ int waywallen_display_connect(waywallen_display_t *d,
         return WAYWALLEN_ERR_IO;
     }
     d->fd = rc;
-    d->state = WW_STATE_INIT;
+    d->conn = WW_CONN_CONNECTING;
+    d->stream = WW_STREAM_INACTIVE;
 
     /* ---- Step 1: hello ---- */
     ww_req_hello_t hello;
@@ -288,7 +297,7 @@ int waywallen_display_connect(waywallen_display_t *d,
         fire_disconnected(d, srv, "send hello");
         return srv;
     }
-    d->state = WW_STATE_HELLO_SENT;
+    /* conn stays CONNECTING through the handshake */
 
     /* ---- Step 2: welcome ---- */
     static uint8_t body_buf[WW_CODEC_MAX_BODY_BYTES];
@@ -327,8 +336,6 @@ int waywallen_display_connect(waywallen_display_t *d,
                           "server missing explicit_sync_fd feature");
         return WAYWALLEN_ERR_PROTO;
     }
-    d->state = WW_STATE_READY;
-
     /* ---- Step 3: register_display ---- */
     ww_req_register_display_t reg;
     memset(&reg, 0, sizeof(reg));
@@ -343,8 +350,6 @@ int waywallen_display_connect(waywallen_display_t *d,
         fire_disconnected(d, srv, "send register_display");
         return srv;
     }
-    d->state = WW_STATE_REGISTERING;
-
     /* ---- Step 4: display_accepted ---- */
     rc = recv_event_frame(d, &op, body_buf, &body_len, fd_buf,
                           WW_CODEC_MAX_FDS_PER_MSG, &n_fds);
@@ -364,7 +369,8 @@ int waywallen_display_connect(waywallen_display_t *d,
     }
     d->display_id = accepted.display_id;
     ww_evt_display_accepted_free(&accepted);
-    d->state = WW_STATE_IDLE;
+    d->conn = WW_CONN_CONNECTED;
+    d->stream = WW_STREAM_INACTIVE;
 
     return WAYWALLEN_OK;
 }
@@ -373,7 +379,7 @@ int waywallen_display_update_size(waywallen_display_t *d,
                                   uint32_t width,
                                   uint32_t height) {
     if (!d) return WAYWALLEN_ERR_INVAL;
-    if (d->state == WW_STATE_INIT || d->state == WW_STATE_DEAD) {
+    if (d->conn != WW_CONN_CONNECTED) {
         return WAYWALLEN_ERR_STATE;
     }
     ww_req_update_display_t upd;
@@ -532,11 +538,7 @@ static int try_egl_import(waywallen_display_t *d,
         EGLImageKHR img;
         int rc = ww_egl_import_dmabuf(&d->egl_backend, &im, &img);
         if (rc != 0) {
-            /* Roll back previously created resources for buffers 0..b-1. */
             for (uint32_t j = 0; j < b; j++) {
-                if (d->egl_gl_textures[j]) {
-                    d->egl_backend.glDeleteTextures(1, &d->egl_gl_textures[j]);
-                }
                 if (d->egl_images[j]) {
                     ww_egl_destroy_image(&d->egl_backend, d->egl.egl_display,
                                          (EGLImageKHR)d->egl_images[j]);
@@ -549,32 +551,11 @@ static int try_egl_import(waywallen_display_t *d,
             return rc;
         }
         d->egl_images[b] = (void *)img;
-        GLuint tex = 0;
-        rc = ww_egl_texture_from_image(&d->egl_backend, img, &tex);
-        if (rc != 0) {
-            ww_egl_destroy_image(&d->egl_backend, d->egl.egl_display, img);
-            d->egl_images[b] = NULL;
-            for (uint32_t j = 0; j < b; j++) {
-                if (d->egl_gl_textures[j]) {
-                    d->egl_backend.glDeleteTextures(1, &d->egl_gl_textures[j]);
-                }
-                if (d->egl_images[j]) {
-                    ww_egl_destroy_image(&d->egl_backend, d->egl.egl_display,
-                                         (EGLImageKHR)d->egl_images[j]);
-                }
-            }
-            free(d->egl_images);
-            free(d->egl_gl_textures);
-            d->egl_images = NULL;
-            d->egl_gl_textures = NULL;
-            return rc;
-        }
-        d->egl_gl_textures[b] = tex;
+        /* GL texture creation is deferred to the host's render thread
+         * via waywallen_display_create_gl_texture(). */
     }
 
     d->egl_import_count = bb->count;
-    /* The EGL driver has dup'd the fds into its own references.
-     * Close our copies. */
     close_all_fds(fd_buf, n_fds);
     return 0;
 }
@@ -680,6 +661,7 @@ static int handle_bind_buffers(waywallen_display_t *d,
     }
 
     waywallen_backend_t reported_backend = WAYWALLEN_BACKEND_NONE;
+    void **reported_egl_images = NULL;
     uint32_t *reported_gl_textures = NULL;
     void **reported_vk_images = NULL;
     void **reported_vk_memories = NULL;
@@ -691,7 +673,9 @@ static int handle_bind_buffers(waywallen_display_t *d,
         int ir = try_egl_import(d, &bb, fd_buf, n_fds);
         if (ir == 0) {
             reported_backend = WAYWALLEN_BACKEND_EGL;
-            reported_gl_textures = d->egl_gl_textures;
+            reported_egl_images = d->egl_images;
+            /* gl_textures left NULL — host creates them on the render
+             * thread via waywallen_display_create_gl_texture(). */
             fds_consumed = 1;
         }
     }
@@ -728,13 +712,14 @@ static int handle_bind_buffers(waywallen_display_t *d,
     d->current_textures.modifier = bb.modifier;
     d->current_textures.planes_per_buffer = bb.planes_per_buffer;
     d->current_textures.backend = reported_backend;
+    d->current_textures.egl_images = reported_egl_images;
     d->current_textures.gl_textures = reported_gl_textures;
     d->current_textures.vk_images = reported_vk_images;
     d->current_textures.vk_memories = reported_vk_memories;
     d->has_textures = true;
 
     ww_evt_bind_buffers_free(&bb);
-    d->state = WW_STATE_PENDING_CONFIG;
+    d->stream = WW_STREAM_ACTIVE;
 
     if (d->cb.on_textures_ready) {
         d->cb.on_textures_ready(d->cb.user_data, &d->current_textures);
@@ -750,7 +735,7 @@ static int handle_set_config(waywallen_display_t *d,
         return WAYWALLEN_ERR_PROTO;
     }
     /* Only valid after bind_buffers. */
-    if (d->state != WW_STATE_PENDING_CONFIG && d->state != WW_STATE_BOUND) {
+    if (d->stream != WW_STREAM_ACTIVE) {
         ww_evt_set_config_free(&sc);
         fire_disconnected(d, WAYWALLEN_ERR_PROTO,
                           "set_config in invalid state");
@@ -772,7 +757,7 @@ static int handle_set_config(waywallen_display_t *d,
     cfg.clear_color[3] = sc.clear_a;
     ww_evt_set_config_free(&sc);
 
-    d->state = WW_STATE_BOUND;
+    /* stream stays ACTIVE */
 
     if (d->cb.on_config) {
         d->cb.on_config(d->cb.user_data, &cfg);
@@ -796,7 +781,7 @@ static int handle_frame_ready(waywallen_display_t *d,
                           "frame_ready expected 1 sync_fd");
         return WAYWALLEN_ERR_PROTO;
     }
-    if (d->state != WW_STATE_BOUND) {
+    if (d->stream != WW_STREAM_ACTIVE) {
         close_all_fds(fd_buf, n_fds);
         ww_evt_frame_ready_free(&fr);
         fire_disconnected(d, WAYWALLEN_ERR_PROTO,
@@ -868,7 +853,7 @@ static int handle_unbind(waywallen_display_t *d,
     }
     ww_evt_unbind_free(&ub);
     fire_textures_releasing_if_any(d);
-    d->state = WW_STATE_IDLE;
+    d->stream = WW_STREAM_INACTIVE;
     return WAYWALLEN_OK;
 }
 
@@ -891,8 +876,8 @@ static int handle_error(waywallen_display_t *d,
 
 int waywallen_display_dispatch(waywallen_display_t *d) {
     if (!d) return WAYWALLEN_ERR_INVAL;
-    if (d->fd < 0 || d->state == WW_STATE_DEAD) return WAYWALLEN_ERR_NOTCONN;
-    if (d->state == WW_STATE_INIT) return WAYWALLEN_ERR_STATE;
+    if (d->fd < 0 || d->conn == WW_CONN_DEAD) return WAYWALLEN_ERR_NOTCONN;
+    if (d->conn == WW_CONN_DISCONNECTED) return WAYWALLEN_ERR_STATE;
 
     static uint8_t body_buf[WW_CODEC_MAX_BODY_BYTES];
     uint16_t op;
@@ -943,7 +928,7 @@ int waywallen_display_release_frame(waywallen_display_t *d,
                                     uint32_t buffer_index,
                                     uint64_t seq) {
     if (!d) return WAYWALLEN_ERR_INVAL;
-    if (d->state != WW_STATE_BOUND) return WAYWALLEN_ERR_STATE;
+    if (d->stream != WW_STREAM_ACTIVE) return WAYWALLEN_ERR_STATE;
     ww_req_buffer_release_t rel;
     memset(&rel, 0, sizeof(rel));
     rel.buffer_generation = d->current_buffer_generation;
@@ -960,7 +945,7 @@ void waywallen_display_disconnect(waywallen_display_t *d) {
     if (!d) return;
     if (d->fd >= 0) {
         /* Best-effort bye; ignore errors. */
-        if (d->state != WW_STATE_INIT && d->state != WW_STATE_DEAD) {
+        if (d->conn != WW_CONN_DISCONNECTED && d->conn != WW_CONN_DEAD) {
             ww_req_bye_t bye;
             memset(&bye, 0, sizeof(bye));
             (void)send_request_msg(d, WW_REQ_BYE, enc_bye, &bye);
@@ -969,5 +954,72 @@ void waywallen_display_disconnect(waywallen_display_t *d) {
         d->fd = -1;
     }
     fire_textures_releasing_if_any(d);
-    d->state = WW_STATE_INIT;
+    d->conn = WW_CONN_DISCONNECTED;
+    d->stream = WW_STREAM_INACTIVE;
+}
+
+/* ------------------------------------------------------------------ */
+/*  State queries                                                      */
+/* ------------------------------------------------------------------ */
+
+waywallen_conn_state_t waywallen_display_conn_state(waywallen_display_t *d) {
+    if (!d) return WAYWALLEN_CONN_DISCONNECTED;
+    return (waywallen_conn_state_t)d->conn;
+}
+
+waywallen_stream_state_t waywallen_display_stream_state(waywallen_display_t *d) {
+    if (!d) return WAYWALLEN_STREAM_INACTIVE;
+    return (waywallen_stream_state_t)d->stream;
+}
+
+/* ------------------------------------------------------------------ */
+/*  EGL deferred GL texture creation                                   */
+/* ------------------------------------------------------------------ */
+
+int waywallen_display_create_gl_texture(waywallen_display_t *d,
+                                        uint32_t idx,
+                                        uint32_t *out_gl_texture) {
+#ifdef WW_HAVE_EGL
+    if (!d || !out_gl_texture) return WAYWALLEN_ERR_INVAL;
+    if (d->backend != WAYWALLEN_BACKEND_EGL || !d->egl_backend.loaded)
+        return WAYWALLEN_ERR_STATE;
+    if (idx >= d->egl_import_count || !d->egl_images)
+        return WAYWALLEN_ERR_INVAL;
+    if (!d->egl_images[idx])
+        return WAYWALLEN_ERR_INVAL;
+
+    /* Already created? Return the cached texture. */
+    if (d->egl_gl_textures && d->egl_gl_textures[idx]) {
+        *out_gl_texture = d->egl_gl_textures[idx];
+        return WAYWALLEN_OK;
+    }
+
+    GLuint tex = 0;
+    int rc = ww_egl_texture_from_image(&d->egl_backend,
+                                        (EGLImageKHR)d->egl_images[idx],
+                                        &tex);
+    if (rc != 0) return WAYWALLEN_ERR_IO;
+
+    d->egl_gl_textures[idx] = tex;
+    *out_gl_texture = tex;
+    return WAYWALLEN_OK;
+#else
+    (void)d; (void)idx; (void)out_gl_texture;
+    return WAYWALLEN_ERR_NOT_IMPL;
+#endif
+}
+
+void waywallen_display_delete_gl_texture(waywallen_display_t *d,
+                                         uint32_t idx) {
+#ifdef WW_HAVE_EGL
+    if (!d || d->backend != WAYWALLEN_BACKEND_EGL) return;
+    if (!d->egl_backend.loaded) return;
+    if (idx >= d->egl_import_count) return;
+    if (!d->egl_gl_textures || !d->egl_gl_textures[idx]) return;
+
+    d->egl_backend.glDeleteTextures(1, &d->egl_gl_textures[idx]);
+    d->egl_gl_textures[idx] = 0;
+#else
+    (void)d; (void)idx;
+#endif
 }

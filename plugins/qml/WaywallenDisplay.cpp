@@ -3,11 +3,15 @@
 #include <waywallen_display.h>
 
 #include <QDebug>
+#include <QLoggingCategory>
+#include <QQuickGraphicsConfiguration>
 #include <QQuickWindow>
-#include <QSGNode>
 #include <QSGRendererInterface>
 #include <QSGSimpleTextureNode>
+#include <QtGui/qopenglcontext_platform.h>
 #include <QtQuick/qsgtexture_platform.h>
+
+Q_LOGGING_CATEGORY(lcWD, "waywallen.display")
 
 // ---------------------------------------------------------------------------
 // C callback trampolines
@@ -20,29 +24,45 @@ void WaywallenDisplay::c_on_textures_ready(void *ud,
     self->m_texWidth = static_cast<int>(t->tex_width);
     self->m_texHeight = static_cast<int>(t->tex_height);
 
-    if (t->backend == WAYWALLEN_BACKEND_EGL && t->gl_textures) {
-        self->m_glTextures.resize(static_cast<int>(t->count));
-        for (uint32_t i = 0; i < t->count; i++)
-            self->m_glTextures[static_cast<int>(i)] = t->gl_textures[i];
-        self->m_texturesValid = true;
-        self->setStatus(Bound);
-    } else {
+    if (t->backend == WAYWALLEN_BACKEND_EGL && t->egl_images) {
+        qCInfo(lcWD, "textures ready: EGL, count=%u, size=%ux%u, fourcc=0x%x",
+               t->count, t->tex_width, t->tex_height, t->fourcc);
+        self->m_eglImagesValid = true;
+        self->m_glTexturesCreated = false;
         self->m_glTextures.clear();
-        self->m_texturesValid = false;
-        self->setStatus(Idle);
+    } else if (t->backend == WAYWALLEN_BACKEND_VULKAN && t->vk_images) {
+        qCInfo(lcWD, "textures ready: Vulkan, count=%u, size=%ux%u, fourcc=0x%x",
+               t->count, t->tex_width, t->tex_height, t->fourcc);
+        self->m_vkImagesValid = true;
+        self->m_vkImages.resize(static_cast<int>(t->count));
+        for (uint32_t i = 0; i < t->count; i++)
+            self->m_vkImages[static_cast<int>(i)] = t->vk_images[i];
+    } else {
+        qCWarning(lcWD, "textures ready: backend=%d but no handles", t->backend);
+        self->m_eglImagesValid = false;
+        self->m_vkImagesValid = false;
     }
+    self->setStreamState(Active);
 }
 
 void WaywallenDisplay::c_on_textures_releasing(void *ud,
                                                const waywallen_textures_t *t) {
     auto *self = static_cast<WaywallenDisplay *>(ud);
     Q_UNUSED(t);
+    qCInfo(lcWD, "textures releasing");
     self->flushPendingRelease();
-    self->m_texturesValid = false;
+
+    // GL textures are owned by the C library (created via
+    // waywallen_display_create_gl_texture); the library's cleanup
+    // will delete them together with the EGLImages.
+    self->m_eglImagesValid = false;
+    self->m_glTexturesCreated = false;
     self->m_glTextures.clear();
+    self->m_vkImagesValid = false;
+    self->m_vkImages.clear();
     self->m_currentSlot = -1;
     self->m_textureCount = 0;
-    self->setStatus(Idle);
+    self->setStreamState(Inactive);
     self->update();
 }
 
@@ -58,7 +78,6 @@ void WaywallenDisplay::c_on_config(void *ud, const waywallen_config_t *c) {
         static_cast<qreal>(c->dest_rect.y),
         static_cast<qreal>(c->dest_rect.w),
         static_cast<qreal>(c->dest_rect.h));
-    // Pick up server-pushed clear color.
     self->m_clearColor = QColor::fromRgbF(
         static_cast<qreal>(c->clear_color[0]),
         static_cast<qreal>(c->clear_color[1]),
@@ -110,11 +129,15 @@ void WaywallenDisplay::cleanup() {
         m_display = nullptr;
     }
 
-    m_texturesValid = false;
+    m_eglImagesValid = false;
+    m_glTexturesCreated = false;
     m_glTextures.clear();
+    m_vkImagesValid = false;
+    m_vkImages.clear();
     m_currentSlot = -1;
     m_textureCount = 0;
     m_pendingRelease = false;
+    m_activeBackend = BackendNone;
 }
 
 // ---------------------------------------------------------------------------
@@ -161,10 +184,111 @@ void WaywallenDisplay::setAutoReconnect(bool enabled) {
     }
 }
 
-void WaywallenDisplay::setStatus(Status s) {
-    if (m_status == s) return;
-    m_status = s;
-    emit statusChanged();
+void WaywallenDisplay::setConnState(ConnState s) {
+    if (m_connState == s) return;
+    m_connState = s;
+    emit connStateChanged();
+}
+
+void WaywallenDisplay::setStreamState(StreamState s) {
+    if (m_streamState == s) return;
+    m_streamState = s;
+    emit streamStateChanged();
+}
+
+// ---------------------------------------------------------------------------
+// Backend binding helpers
+// ---------------------------------------------------------------------------
+
+bool WaywallenDisplay::bindEglBackend() {
+    auto *rif = window()->rendererInterface();
+    auto *glCtx = static_cast<QOpenGLContext *>(
+        rif ? rif->getResource(window(),
+                               QSGRendererInterface::OpenGLContextResource)
+            : nullptr);
+    if (!glCtx) {
+        qCWarning(lcWD, "OpenGL API but no QOpenGLContext");
+        return false;
+    }
+
+    auto *eglIface = glCtx->nativeInterface<QNativeInterface::QEGLContext>();
+    if (!eglIface) {
+        qCWarning(lcWD, "OpenGL context has no EGL interface (GLX?)");
+        return false;
+    }
+
+    waywallen_egl_ctx_t egl_ctx {};
+    egl_ctx.egl_display = eglIface->display();
+    egl_ctx.get_proc_address = nullptr;
+    int rc = waywallen_display_bind_egl(m_display, &egl_ctx);
+    if (rc != WAYWALLEN_OK) {
+        qCWarning(lcWD, "bind_egl failed: %d", rc);
+        return false;
+    }
+    qCInfo(lcWD, "bound EGL backend, display=%p",
+           static_cast<void *>(egl_ctx.egl_display));
+    return true;
+}
+
+bool WaywallenDisplay::bindVulkanBackend() {
+    auto *qvkInst = window()->vulkanInstance();
+    if (!qvkInst || !qvkInst->isValid()) {
+        qCWarning(lcWD, "no valid QVulkanInstance on window");
+        return false;
+    }
+
+    auto *rif = window()->rendererInterface();
+    if (!rif) return false;
+
+    // VulkanInstanceResource returns VkInstance (not QVulkanInstance*).
+    // Qt's getResource returns a pointer TO the Vulkan handle, not the
+    // handle itself. Dereference to get the actual VkPhysicalDevice / VkDevice.
+    auto *pPhysDev = static_cast<VkPhysicalDevice *>(
+        rif->getResource(window(), QSGRendererInterface::PhysicalDeviceResource));
+    auto *pDevice = static_cast<VkDevice *>(
+        rif->getResource(window(), QSGRendererInterface::DeviceResource));
+
+    if (!pPhysDev || !pDevice) {
+        qCWarning(lcWD, "Vulkan API but missing resources "
+                  "(phys=%p dev=%p)",
+                  static_cast<void *>(pPhysDev),
+                  static_cast<void *>(pDevice));
+        return false;
+    }
+
+    VkPhysicalDevice physDev = *pPhysDev;
+    VkDevice device = *pDevice;
+
+    auto *qfip = static_cast<uint32_t *>(rif->getResource(window(),
+        QSGRendererInterface::GraphicsQueueFamilyIndexResource));
+    uint32_t qfi = qfip ? *qfip : 0;
+
+    VkInstance vkInstance = qvkInst->vkInstance();
+
+    // Resolve the global vkGetInstanceProcAddr.
+    auto rawGIPA = reinterpret_cast<PFN_vkGetInstanceProcAddr>(
+        qvkInst->getInstanceProcAddr("vkGetInstanceProcAddr"));
+    if (!rawGIPA) {
+        qCWarning(lcWD, "failed to resolve vkGetInstanceProcAddr");
+        return false;
+    }
+
+    waywallen_vk_ctx_t vk_ctx {};
+    vk_ctx.instance = reinterpret_cast<void *>(vkInstance);
+    vk_ctx.physical_device = reinterpret_cast<void *>(physDev);
+    vk_ctx.device = reinterpret_cast<void *>(device);
+    vk_ctx.queue_family_index = qfi;
+    vk_ctx.vk_get_instance_proc_addr =
+        reinterpret_cast<void *(*)(void *, const char *)>(rawGIPA);
+
+    int rc = waywallen_display_bind_vulkan(m_display, &vk_ctx);
+    if (rc != WAYWALLEN_OK) {
+        qCWarning(lcWD, "bind_vulkan failed: %d", rc);
+        return false;
+    }
+    qCInfo(lcWD, "bound Vulkan backend, device=%p",
+           reinterpret_cast<void *>(device));
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -183,7 +307,27 @@ void WaywallenDisplay::componentComplete() {
 
 void WaywallenDisplay::onWindowReady() {
     if (!window() || m_display) return;
+
+    // Ensure cleanup before Qt destroys the Vulkan device / GL context.
+    connect(window(), &QQuickWindow::sceneGraphInvalidated,
+            this, &WaywallenDisplay::cleanup,
+            Qt::UniqueConnection);
+
     if (!window()->isSceneGraphInitialized()) {
+        // Inject Vulkan device extensions needed for DMA-BUF import
+        // before the scene graph creates the VkDevice.
+        auto config = window()->graphicsConfiguration();
+        config.setDeviceExtensions({
+            "VK_KHR_external_memory",
+            "VK_KHR_external_memory_fd",
+            "VK_EXT_external_memory_dma_buf",
+            "VK_EXT_image_drm_format_modifier",
+            "VK_KHR_external_semaphore",
+            "VK_KHR_external_semaphore_fd",
+        });
+        window()->setGraphicsConfiguration(config);
+        qCInfo(lcWD, "requested DMA-BUF Vulkan device extensions");
+
         connect(window(), &QQuickWindow::sceneGraphInitialized,
                 this, &WaywallenDisplay::tryConnect,
                 Qt::UniqueConnection);
@@ -194,7 +338,7 @@ void WaywallenDisplay::onWindowReady() {
 
 void WaywallenDisplay::tryConnect() {
     if (m_display) return;
-    setStatus(Connecting);
+    setConnState(Connecting);
 
     waywallen_display_callbacks_t cb {};
     cb.on_textures_ready = c_on_textures_ready;
@@ -206,24 +350,34 @@ void WaywallenDisplay::tryConnect() {
 
     m_display = waywallen_display_new(&cb);
     if (!m_display) {
-        qWarning("WaywallenDisplay: new() failed");
-        setStatus(Error);
+        qCWarning(lcWD, "waywallen_display_new() failed");
+        setConnState(Error);
         scheduleReconnect();
         return;
     }
 
-    // Bind EGL from Qt's scene graph.
+    // Auto-detect Qt's graphics API and bind the matching backend.
+    m_activeBackend = BackendNone;
     if (window()) {
         auto *rif = window()->rendererInterface();
         if (rif) {
-            void *eglDisplay = rif->getResource(window(), "eglDisplay");
-            if (eglDisplay) {
-                waywallen_egl_ctx_t egl_ctx {};
-                egl_ctx.egl_display = eglDisplay;
-                egl_ctx.get_proc_address = nullptr;
-                waywallen_display_bind_egl(m_display, &egl_ctx);
+            auto api = rif->graphicsApi();
+            qCInfo(lcWD, "Qt graphics API: %d", int(api));
+
+            if (api == QSGRendererInterface::OpenGL) {
+                if (bindEglBackend())
+                    m_activeBackend = BackendEGL;
+            } else if (api == QSGRendererInterface::Vulkan) {
+                if (bindVulkanBackend())
+                    m_activeBackend = BackendVulkan;
+            } else {
+                qCWarning(lcWD, "unsupported graphics API: %d", int(api));
             }
         }
+    }
+
+    if (m_activeBackend == BackendNone) {
+        qCWarning(lcWD, "no backend bound — textures will not be imported");
     }
 
     const QByteArray sockPath = m_socketPath.toUtf8();
@@ -237,19 +391,18 @@ void WaywallenDisplay::tryConnect() {
         60000);
 
     if (rc != WAYWALLEN_OK) {
-        qWarning("WaywallenDisplay: connect failed (rc=%d)", rc);
+        qCWarning(lcWD, "connect failed: %d", rc);
         waywallen_display_destroy(m_display);
         m_display = nullptr;
-        setStatus(Disconnected);
+        setConnState(Disconnected);
         scheduleReconnect();
         return;
     }
 
-    // Success — reset backoff.
     m_reconnectDelay = 1000;
-    m_connected = true;
-    emit connectedChanged();
-    setStatus(Idle);
+    setConnState(Connected);
+    setStreamState(Inactive);
+    qCInfo(lcWD, "connected to daemon");
 
     int fd = waywallen_display_get_fd(m_display);
     if (fd >= 0) {
@@ -267,19 +420,21 @@ void WaywallenDisplay::scheduleReconnect() {
         connect(m_reconnectTimer, &QTimer::timeout,
                 this, &WaywallenDisplay::onReconnectTimer);
     }
-    qDebug("WaywallenDisplay: reconnecting in %d ms", m_reconnectDelay);
+    qCInfo(lcWD, "reconnecting in %d ms", m_reconnectDelay);
     m_reconnectTimer->start(m_reconnectDelay);
-    // Exponential backoff: 1s → 2s → 4s → ... → 30s max.
     m_reconnectDelay = qMin(m_reconnectDelay * 2, kMaxReconnectDelay);
 }
 
 void WaywallenDisplay::onReconnectTimer() {
-    if (m_display) return;  // already reconnected
+    if (m_display) return;
     tryConnect();
 }
 
 void WaywallenDisplay::onSocketReadable() {
     if (!m_display) return;
+    // EGLImage creation (EGL path) and VkImage import (Vulkan path)
+    // do not require a GL context. GL textures are created lazily
+    // in updatePaintNode on the render thread.
     waywallen_display_dispatch(m_display);
 }
 
@@ -292,16 +447,41 @@ void WaywallenDisplay::flushPendingRelease() {
 }
 
 void WaywallenDisplay::handleDisconnect(int errCode, const char *msg) {
-    qWarning("WaywallenDisplay: disconnected (err=%d msg=%s)",
-             errCode, msg ? msg : "(null)");
+    qCWarning(lcWD, "disconnected (err=%d msg=%s)",
+              errCode, msg ? msg : "(null)");
     cleanup();
-    if (m_connected) {
-        m_connected = false;
-        emit connectedChanged();
-    }
-    setStatus(Disconnected);
+    setConnState(Disconnected);
+    setStreamState(Inactive);
     update();
     scheduleReconnect();
+}
+
+// ---------------------------------------------------------------------------
+// EGL: deferred GL texture creation (called on render thread)
+// ---------------------------------------------------------------------------
+
+void WaywallenDisplay::ensureGlTextures() {
+    if (m_glTexturesCreated || !m_eglImagesValid || !m_display) return;
+
+    m_glTextures.resize(static_cast<int>(m_textureCount));
+    bool ok = true;
+    for (uint32_t i = 0; i < m_textureCount; i++) {
+        uint32_t tex = 0;
+        int rc = waywallen_display_create_gl_texture(m_display, i, &tex);
+        if (rc != WAYWALLEN_OK) {
+            qCWarning(lcWD, "create_gl_texture[%u] failed: %d", i, rc);
+            ok = false;
+            break;
+        }
+        m_glTextures[static_cast<int>(i)] = tex;
+    }
+
+    if (ok) {
+        m_glTexturesCreated = true;
+        qCInfo(lcWD, "created %u GL textures on render thread", m_textureCount);
+    } else {
+        m_glTextures.clear();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -310,8 +490,19 @@ void WaywallenDisplay::handleDisconnect(int errCode, const char *msg) {
 
 QSGNode *WaywallenDisplay::updatePaintNode(QSGNode *oldNode,
                                            UpdatePaintNodeData *) {
-    if (!m_texturesValid || m_currentSlot < 0
-        || m_currentSlot >= m_glTextures.size() || !window()) {
+    // EGL path: create GL textures lazily on the render thread.
+    if (m_activeBackend == BackendEGL && m_eglImagesValid
+        && !m_glTexturesCreated) {
+        ensureGlTextures();
+    }
+
+    const bool hasTexture =
+        (m_activeBackend == BackendEGL && m_glTexturesCreated
+         && m_currentSlot >= 0 && m_currentSlot < m_glTextures.size())
+        || (m_activeBackend == BackendVulkan && m_vkImagesValid
+            && m_currentSlot >= 0 && m_currentSlot < m_vkImages.size());
+
+    if (!hasTexture || !window()) {
         delete oldNode;
         return nullptr;
     }
@@ -323,12 +514,23 @@ QSGNode *WaywallenDisplay::updatePaintNode(QSGNode *oldNode,
         node->setOwnsTexture(true);
     }
 
-    uint glTex = m_glTextures[m_currentSlot];
     QSize texSize(m_texWidth, m_texHeight);
+    QSGTexture *sgTex = nullptr;
 
-    QSGTexture *sgTex = QNativeInterface::QSGOpenGLTexture::fromNativeExternalOES(
-        glTex, window(), texSize,
-        QQuickWindow::TextureHasAlphaChannel);
+    if (m_activeBackend == BackendEGL) {
+        uint glTex = m_glTextures[m_currentSlot];
+        sgTex = QNativeInterface::QSGOpenGLTexture::fromNative(
+            glTex, window(), texSize,
+            QQuickWindow::TextureHasAlphaChannel);
+    } else if (m_activeBackend == BackendVulkan) {
+#if QT_CONFIG(vulkan)
+        auto vkImage = reinterpret_cast<VkImage>(m_vkImages[m_currentSlot]);
+        sgTex = QNativeInterface::QSGVulkanTexture::fromNative(
+            vkImage, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            window(), texSize,
+            QQuickWindow::TextureHasAlphaChannel);
+#endif
+    }
 
     if (sgTex) {
         node->setTexture(sgTex);

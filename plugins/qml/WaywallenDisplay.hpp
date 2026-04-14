@@ -30,24 +30,30 @@ class WaywallenDisplay : public QQuickItem {
                    NOTIFY displayWidthChanged)
     Q_PROPERTY(int displayHeight READ displayHeight WRITE setDisplayHeight
                    NOTIFY displayHeightChanged)
-    Q_PROPERTY(bool connected READ isConnected NOTIFY connectedChanged)
     Q_PROPERTY(int framesReceived READ framesReceived
                    NOTIFY framesReceivedChanged)
-    Q_PROPERTY(Status status READ status NOTIFY statusChanged)
+    Q_PROPERTY(ConnState connState READ connState NOTIFY connStateChanged)
+    Q_PROPERTY(StreamState streamState READ streamState
+                   NOTIFY streamStateChanged)
     Q_PROPERTY(QColor clearColor READ clearColor WRITE setClearColor
                    NOTIFY clearColorChanged)
     Q_PROPERTY(bool autoReconnect READ autoReconnect WRITE setAutoReconnect
                    NOTIFY autoReconnectChanged)
 
 public:
-    enum Status {
+    enum ConnState {
         Disconnected = 0,
         Connecting,
-        Idle,
-        Bound,
+        Connected,
         Error,
     };
-    Q_ENUM(Status)
+    Q_ENUM(ConnState)
+
+    enum StreamState {
+        Inactive = 0,
+        Active,
+    };
+    Q_ENUM(StreamState)
 
     explicit WaywallenDisplay(QQuickItem *parent = nullptr);
     ~WaywallenDisplay() override;
@@ -64,10 +70,10 @@ public:
     int displayHeight() const { return m_displayHeight; }
     void setDisplayHeight(int h);
 
-    bool isConnected() const { return m_connected; }
     int framesReceived() const { return m_framesReceived; }
 
-    Status status() const { return m_status; }
+    ConnState connState() const { return m_connState; }
+    StreamState streamState() const { return m_streamState; }
 
     QColor clearColor() const { return m_clearColor; }
     void setClearColor(const QColor &color);
@@ -80,9 +86,9 @@ signals:
     void displayNameChanged();
     void displayWidthChanged();
     void displayHeightChanged();
-    void connectedChanged();
     void framesReceivedChanged();
-    void statusChanged();
+    void connStateChanged();
+    void streamStateChanged();
     void clearColorChanged();
     void autoReconnectChanged();
 
@@ -101,8 +107,13 @@ private:
     void cleanup();
     void flushPendingRelease();
     void handleDisconnect(int errCode, const char *msg);
-    void setStatus(Status s);
+    void setConnState(ConnState s);
+    void setStreamState(StreamState s);
     void scheduleReconnect();
+
+    bool bindEglBackend();
+    bool bindVulkanBackend();
+    void ensureGlTextures();
 
     // C callback trampolines.
     static void c_on_textures_ready(void *ud, const waywallen_textures_t *t);
@@ -116,9 +127,9 @@ private:
     QString m_displayName { QStringLiteral("qml-display") };
     int m_displayWidth { 1920 };
     int m_displayHeight { 1080 };
-    bool m_connected { false };
     int m_framesReceived { 0 };
-    Status m_status { Disconnected };
+    ConnState m_connState { Disconnected };
+    StreamState m_streamState { Inactive };
     QColor m_clearColor { Qt::black };
     bool m_autoReconnect { true };
 
@@ -131,13 +142,22 @@ private:
     int m_reconnectDelay { 1000 };  // ms, exponential backoff
     static constexpr int kMaxReconnectDelay = 30000;
 
-    // Texture state.
-    bool m_texturesValid { false };
+    // Backend detected from Qt's scene graph.
+    enum ActiveBackend { BackendNone, BackendEGL, BackendVulkan };
+    ActiveBackend m_activeBackend { BackendNone };
+
+    // EGL texture state (GL textures created lazily on render thread).
+    bool m_eglImagesValid { false };
+    bool m_glTexturesCreated { false };
     QVector<uint> m_glTextures;
     int m_texWidth { 0 };
     int m_texHeight { 0 };
     uint32_t m_textureCount { 0 };
     int m_currentSlot { -1 };
+
+    // Vulkan texture state.
+    bool m_vkImagesValid { false };
+    QVector<void *> m_vkImages;
 
     // Config from on_config.
     QRectF m_sourceRect;

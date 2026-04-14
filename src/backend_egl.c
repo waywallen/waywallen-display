@@ -7,7 +7,7 @@
  * operations the dispatch path actually needs:
  *
  *   1. DMA-BUF → EGLImageKHR  (ww_egl_import_dmabuf)
- *   2. EGLImageKHR → GL_TEXTURE_EXTERNAL_OES  (ww_egl_texture_from_image)
+ *   2. EGLImageKHR → GL_TEXTURE_2D  (ww_egl_texture_from_image)
  *   3. dma_fence sync_fd → EGLSyncKHR wait  (ww_egl_wait_sync_fd)
  *
  * All operations are compile-only validated in this phase — the
@@ -323,21 +323,21 @@ int ww_egl_texture_from_image(const ww_egl_backend_t *backend,
     backend->glGenTextures(1, &tex);
     if (tex == 0) return -EIO;
 
-    /* GL_TEXTURE_EXTERNAL_OES is required by GL_OES_EGL_image_external
+    /* GL_TEXTURE_2D is required by GL_OES_EGL_image_external
      * and is the only binding target that accepts arbitrary DRM
      * formats (including YUV) without driver reinterpretation. */
-    backend->glBindTexture(GL_TEXTURE_EXTERNAL_OES, tex);
-    backend->glTexParameteri(GL_TEXTURE_EXTERNAL_OES,
+    backend->glBindTexture(GL_TEXTURE_2D, tex);
+    backend->glTexParameteri(GL_TEXTURE_2D,
                              GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    backend->glTexParameteri(GL_TEXTURE_EXTERNAL_OES,
+    backend->glTexParameteri(GL_TEXTURE_2D,
                              GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    backend->glTexParameteri(GL_TEXTURE_EXTERNAL_OES,
+    backend->glTexParameteri(GL_TEXTURE_2D,
                              GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    backend->glTexParameteri(GL_TEXTURE_EXTERNAL_OES,
+    backend->glTexParameteri(GL_TEXTURE_2D,
                              GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    backend->glEGLImageTargetTexture2DOES(GL_TEXTURE_EXTERNAL_OES,
+    backend->glEGLImageTargetTexture2DOES(GL_TEXTURE_2D,
                                           (GLeglImageOES)image);
-    backend->glBindTexture(GL_TEXTURE_EXTERNAL_OES, 0);
+    backend->glBindTexture(GL_TEXTURE_2D, 0);
 
     *out_tex = tex;
     return 0;

@@ -49,14 +49,21 @@ ApplicationWindow {
             // --- Status ---
             Label {
                 color: "#a6adc8"
-                text: "Status: " + statusText(wallpaper.status)
-                function statusText(st) {
+                text: "Conn: " + connText(wallpaper.connState)
+                      + "  Stream: " + streamText(wallpaper.streamState)
+                function connText(st) {
                     switch (st) {
                     case WaywallenDisplay.Disconnected: return "Disconnected"
                     case WaywallenDisplay.Connecting:   return "Connecting…"
-                    case WaywallenDisplay.Idle:         return "Idle"
-                    case WaywallenDisplay.Bound:        return "Bound"
+                    case WaywallenDisplay.Connected:    return "Connected"
                     case WaywallenDisplay.Error:        return "Error"
+                    }
+                    return "Unknown"
+                }
+                function streamText(st) {
+                    switch (st) {
+                    case WaywallenDisplay.Inactive: return "Inactive"
+                    case WaywallenDisplay.Active:   return "Active"
                     }
                     return "Unknown"
                 }
