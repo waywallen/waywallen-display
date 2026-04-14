@@ -71,6 +71,28 @@ typedef enum waywallen_err {
 typedef struct waywallen_display waywallen_display_t;
 
 /* -------------------------------------------------------------------------
+ * Logging
+ *
+ * By default the library logs to stderr. Call `set_log_callback` to
+ * redirect messages to the host's logging framework (e.g. Qt's
+ * QLoggingCategory, syslog, etc.).
+ * ------------------------------------------------------------------------- */
+
+typedef enum waywallen_log_level {
+    WAYWALLEN_LOG_DEBUG = 0,
+    WAYWALLEN_LOG_INFO  = 1,
+    WAYWALLEN_LOG_WARN  = 2,
+    WAYWALLEN_LOG_ERROR = 3,
+} waywallen_log_level_t;
+
+typedef void (*waywallen_log_callback_t)(waywallen_log_level_t level,
+                                         const char *msg,
+                                         void *user_data);
+
+void waywallen_display_set_log_callback(waywallen_log_callback_t cb,
+                                        void *user_data);
+
+/* -------------------------------------------------------------------------
  * Connection + stream state
  *
  * The display tracks two independent state dimensions:

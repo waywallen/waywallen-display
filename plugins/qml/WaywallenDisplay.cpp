@@ -14,6 +14,19 @@
 Q_LOGGING_CATEGORY(lcWD, "waywallen.display")
 
 // ---------------------------------------------------------------------------
+// C library log → Qt log category bridge
+// ---------------------------------------------------------------------------
+
+static void qtLogBridge(waywallen_log_level_t level, const char *msg, void *) {
+    switch (level) {
+    case WAYWALLEN_LOG_DEBUG: qCDebug(lcWD, "%s", msg); break;
+    case WAYWALLEN_LOG_INFO:  qCInfo(lcWD, "%s", msg); break;
+    case WAYWALLEN_LOG_WARN:  qCWarning(lcWD, "%s", msg); break;
+    case WAYWALLEN_LOG_ERROR: qCCritical(lcWD, "%s", msg); break;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // C callback trampolines
 // ---------------------------------------------------------------------------
 
@@ -102,6 +115,9 @@ void WaywallenDisplay::c_on_frame_ready(void *ud,
 void WaywallenDisplay::c_on_disconnected(void *ud, int err,
                                          const char *msg) {
     auto *self = static_cast<WaywallenDisplay *>(ud);
+    // If m_display was nulled (e.g. by sceneGraphInvalidated on the
+    // render thread), skip — we're already tearing down.
+    if (!self->m_display) return;
     self->handleDisconnect(err, msg);
 }
 
@@ -112,9 +128,12 @@ void WaywallenDisplay::c_on_disconnected(void *ud, int err,
 WaywallenDisplay::WaywallenDisplay(QQuickItem *parent)
     : QQuickItem(parent) {
     setFlag(ItemHasContents, true);
+    waywallen_display_set_log_callback(qtLogBridge, nullptr);
 }
 
 WaywallenDisplay::~WaywallenDisplay() {
+    // cleanup() may already have been called by sceneGraphInvalidated.
+    // It's safe to call again — it checks m_display for null.
     cleanup();
     delete m_reconnectTimer;
 }
@@ -308,10 +327,33 @@ void WaywallenDisplay::componentComplete() {
 void WaywallenDisplay::onWindowReady() {
     if (!window() || m_display) return;
 
-    // Ensure cleanup before Qt destroys the Vulkan device / GL context.
-    connect(window(), &QQuickWindow::sceneGraphInvalidated,
-            this, &WaywallenDisplay::cleanup,
-            Qt::UniqueConnection);
+    // Release GPU resources (VkImage, EGLImage, GL textures) before Qt
+    // destroys its Vulkan device / GL context. This signal fires on the
+    // render thread — only touch the C library handle, not Qt objects.
+    connect(window(), &QQuickWindow::sceneGraphInvalidated, this,
+            [this]() {
+                qCInfo(lcWD, "sceneGraphInvalidated: releasing GPU resources");
+                // Destroy the C library handle (which releases VkImage,
+                // EGLImage, semaphores etc.) while Qt's device is still alive.
+                // Null out the handle first so the on_disconnected callback
+                // (which fires from disconnect) becomes a no-op.
+                auto *d = m_display;
+                m_display = nullptr;
+                if (d) {
+                    waywallen_display_disconnect(d);
+                    waywallen_display_destroy(d);
+                }
+                m_eglImagesValid = false;
+                m_glTexturesCreated = false;
+                m_glTextures.clear();
+                m_vkImagesValid = false;
+                m_vkImages.clear();
+                m_currentSlot = -1;
+                m_textureCount = 0;
+                m_pendingRelease = false;
+                m_activeBackend = BackendNone;
+            },
+            Qt::DirectConnection);
 
     if (!window()->isSceneGraphInitialized()) {
         // Inject Vulkan device extensions needed for DMA-BUF import

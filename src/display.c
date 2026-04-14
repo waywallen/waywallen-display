@@ -25,6 +25,7 @@
 #endif
 
 #include <errno.h>
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,6 +35,35 @@
 #include <sys/types.h>
 #include <sys/un.h>
 #include <unistd.h>
+
+/* ------------------------------------------------------------------ */
+/*  Logging                                                            */
+/* ------------------------------------------------------------------ */
+
+static waywallen_log_callback_t s_log_cb = NULL;
+static void *s_log_ud = NULL;
+
+void waywallen_display_set_log_callback(waywallen_log_callback_t cb,
+                                        void *user_data) {
+    s_log_cb = cb;
+    s_log_ud = user_data;
+}
+
+__attribute__((format(printf, 2, 3)))
+static void ww_log(waywallen_log_level_t level, const char *fmt, ...) {
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (s_log_cb) {
+        s_log_cb(level, buf, s_log_ud);
+    } else {
+        static const char *tags[] = { "DEBUG", "INFO", "WARN", "ERROR" };
+        fprintf(stderr, "waywallen_display [%s] %s\n",
+                tags[level < 4 ? level : 3], buf);
+    }
+}
 
 /* Internal connection state (maps to public waywallen_conn_state_t). */
 typedef enum ww_conn_state {
@@ -205,10 +235,10 @@ int waywallen_display_bind_egl(waywallen_display_t *d,
      * without creating textures). */
     int rc = ww_egl_backend_load(&d->egl_backend, ctx->get_proc_address);
     if (rc != 0) {
+        ww_log(WAYWALLEN_LOG_WARN, "egl backend load failed: %d", rc);
         memset(&d->egl_backend, 0, sizeof(d->egl_backend));
-        /* Not an error from the public API's perspective: the host
-         * chose EGL but the runtime lacks required extensions. We'll
-         * deliver textures with backend=NONE and let the host notice. */
+    } else {
+        ww_log(WAYWALLEN_LOG_INFO, "egl backend loaded");
     }
 #endif
     return WAYWALLEN_OK;
@@ -230,7 +260,10 @@ int waywallen_display_bind_vulkan(waywallen_display_t *d,
         ctx->queue_family_index,
         (ww_vk_get_instance_proc_addr_fn)ctx->vk_get_instance_proc_addr);
     if (rc != 0) {
+        ww_log(WAYWALLEN_LOG_WARN, "vk backend load failed: %d", rc);
         memset(&d->vk_backend, 0, sizeof(d->vk_backend));
+    } else {
+        ww_log(WAYWALLEN_LOG_INFO, "vk backend loaded");
     }
 #endif
     return WAYWALLEN_OK;
@@ -672,11 +705,13 @@ static int handle_bind_buffers(waywallen_display_t *d,
         && d->egl_backend.loaded) {
         int ir = try_egl_import(d, &bb, fd_buf, n_fds);
         if (ir == 0) {
+            ww_log(WAYWALLEN_LOG_INFO, "EGL import: %u images, %ux%u fourcc=0x%x",
+                   bb.count, bb.width, bb.height, bb.fourcc);
             reported_backend = WAYWALLEN_BACKEND_EGL;
             reported_egl_images = d->egl_images;
-            /* gl_textures left NULL — host creates them on the render
-             * thread via waywallen_display_create_gl_texture(). */
             fds_consumed = 1;
+        } else {
+            ww_log(WAYWALLEN_LOG_WARN, "EGL import failed: %d", ir);
         }
     }
 #endif
@@ -685,6 +720,8 @@ static int handle_bind_buffers(waywallen_display_t *d,
         && d->vk_backend.loaded) {
         int ir = try_vk_import(d, &bb, fd_buf, n_fds);
         if (ir == 0) {
+            ww_log(WAYWALLEN_LOG_INFO, "Vulkan import: %u images, %ux%u fourcc=0x%x",
+                   bb.count, bb.width, bb.height, bb.fourcc);
             reported_backend = WAYWALLEN_BACKEND_VULKAN;
             /* Build void* arrays pointing into the imported image
              * structs so the callback payload matches the public API. */
@@ -697,10 +734,13 @@ static int handle_bind_buffers(waywallen_display_t *d,
                 }
             }
             fds_consumed = 1;
+        } else {
+            ww_log(WAYWALLEN_LOG_WARN, "Vulkan import failed: %d", ir);
         }
     }
 #endif
     if (!fds_consumed) {
+        ww_log(WAYWALLEN_LOG_WARN, "no backend imported buffers");
         close_all_fds(fd_buf, n_fds);
     }
 
@@ -998,8 +1038,12 @@ int waywallen_display_create_gl_texture(waywallen_display_t *d,
     int rc = ww_egl_texture_from_image(&d->egl_backend,
                                         (EGLImageKHR)d->egl_images[idx],
                                         &tex);
-    if (rc != 0) return WAYWALLEN_ERR_IO;
+    if (rc != 0) {
+        ww_log(WAYWALLEN_LOG_WARN, "GL texture creation failed for image %u: %d", idx, rc);
+        return WAYWALLEN_ERR_IO;
+    }
 
+    ww_log(WAYWALLEN_LOG_DEBUG, "created GL texture %u for image %u", tex, idx);
     d->egl_gl_textures[idx] = tex;
     *out_gl_texture = tex;
     return WAYWALLEN_OK;
