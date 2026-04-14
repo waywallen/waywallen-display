@@ -7,7 +7,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 
-find_package(Qt6 6.2 REQUIRED COMPONENTS Quick Gui Qml)
+find_package(Qt6 6.2 REQUIRED COMPONENTS Quick Gui Qml DBus)
 find_package(Vulkan QUIET)
 
 # The C display library lives two levels up.
@@ -31,6 +31,7 @@ if(TARGET waywallen_display_static)
     target_link_libraries(waywallen-display-qml PRIVATE
         Qt6::Quick
         Qt6::Gui
+        Qt6::DBus
         waywallen_display_static)
 else()
     set(WAYWALLEN_DISPLAY_BUILD_DIR "${WAYWALLEN_DISPLAY_DIR}/build"
@@ -38,6 +39,7 @@ else()
     target_link_libraries(waywallen-display-qml PRIVATE
         Qt6::Quick
         Qt6::Gui
+        Qt6::DBus
         ${WAYWALLEN_DISPLAY_BUILD_DIR}/libwaywallen_display.a)
     target_include_directories(waywallen-display-qml PRIVATE
         ${WAYWALLEN_DISPLAY_DIR}/include)

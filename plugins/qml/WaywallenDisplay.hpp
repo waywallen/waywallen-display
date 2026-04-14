@@ -81,6 +81,12 @@ public:
     bool autoReconnect() const { return m_autoReconnect; }
     void setAutoReconnect(bool enabled);
 
+    // Cancel any pending backoff and attempt to connect immediately.
+    // No-op when already Connected. Called automatically when the
+    // daemon appears on the session bus, but also useful for tests
+    // and manual triggers.
+    Q_INVOKABLE void requestReconnect();
+
 signals:
     void socketPathChanged();
     void displayNameChanged();
@@ -101,10 +107,15 @@ private slots:
     void onSocketReadable();
     void onWindowReady();
     void onReconnectTimer();
+    void onDaemonNameOwnerChanged(const QString &name,
+                                  const QString &oldOwner,
+                                  const QString &newOwner);
+    void onDaemonReadySignal();
 
 private:
     void tryConnect();
     void cleanup();
+    void setupDBusWatcher();
     void flushPendingRelease();
     void handleDisconnect(int errCode, const char *msg);
     void setConnState(ConnState s);

@@ -2,6 +2,8 @@
 
 #include <waywallen_display.h>
 
+#include <QDBusConnection>
+#include <QDBusMessage>
 #include <QDebug>
 #include <QLoggingCategory>
 #include <QQuickGraphicsConfiguration>
@@ -316,12 +318,79 @@ bool WaywallenDisplay::bindVulkanBackend() {
 
 void WaywallenDisplay::componentComplete() {
     QQuickItem::componentComplete();
+    setupDBusWatcher();
     if (window()) {
         onWindowReady();
     } else {
         connect(this, &QQuickItem::windowChanged,
                 this, &WaywallenDisplay::onWindowReady);
     }
+}
+
+void WaywallenDisplay::setupDBusWatcher() {
+    // Optional: if there is no session bus (headless, TTY, container
+    // without DBus), the exponential-backoff reconnect stays as the
+    // fallback and we simply don't get the fast path.
+    QDBusConnection bus = QDBusConnection::sessionBus();
+    if (!bus.isConnected()) {
+        qCInfo(lcWD, "session bus unavailable — DBus reconnect fast-path disabled");
+        return;
+    }
+
+    // NameOwnerChanged — fires when the daemon claims or releases
+    // org.waywallen.Daemon. The "new owner is non-empty" case means the
+    // daemon just (re)appeared; reconnect now instead of waiting for the
+    // local backoff timer.
+    const bool okNoc = bus.connect(
+        QStringLiteral("org.freedesktop.DBus"),
+        QStringLiteral("/org/freedesktop/DBus"),
+        QStringLiteral("org.freedesktop.DBus"),
+        QStringLiteral("NameOwnerChanged"),
+        QStringLiteral("sss"),
+        this,
+        SLOT(onDaemonNameOwnerChanged(QString, QString, QString)));
+    if (!okNoc) {
+        qCWarning(lcWD, "failed to subscribe to NameOwnerChanged");
+    }
+
+    // Also subscribe directly to the daemon's Ready signal as a second
+    // cue; on some timings NameOwnerChanged is delivered before the
+    // server is fully serving requests, and Ready is emitted only once
+    // the daemon is actually ready. Either trigger does the same thing.
+    const bool okReady = bus.connect(
+        QStringLiteral("org.waywallen.Daemon"),
+        QStringLiteral("/org/waywallen/Daemon"),
+        QStringLiteral("org.waywallen.Daemon1"),
+        QStringLiteral("Ready"),
+        this,
+        SLOT(onDaemonReadySignal()));
+    if (!okReady) {
+        qCWarning(lcWD, "failed to subscribe to org.waywallen.Daemon Ready");
+    }
+
+    qCInfo(lcWD, "DBus reconnect fast-path armed");
+}
+
+void WaywallenDisplay::onDaemonNameOwnerChanged(const QString &name,
+                                                const QString &oldOwner,
+                                                const QString &newOwner) {
+    Q_UNUSED(oldOwner);
+    if (name != QStringLiteral("org.waywallen.Daemon")) return;
+    if (newOwner.isEmpty()) return;  // daemon vanished — UDS disconnect handles it
+    qCInfo(lcWD, "daemon appeared on session bus — requesting reconnect");
+    requestReconnect();
+}
+
+void WaywallenDisplay::onDaemonReadySignal() {
+    qCInfo(lcWD, "daemon Ready signal — requesting reconnect");
+    requestReconnect();
+}
+
+void WaywallenDisplay::requestReconnect() {
+    if (m_connState == Connected) return;
+    if (m_reconnectTimer) m_reconnectTimer->stop();
+    m_reconnectDelay = 1000;
+    tryConnect();
 }
 
 void WaywallenDisplay::onWindowReady() {
