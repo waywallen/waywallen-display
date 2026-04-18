@@ -5,7 +5,6 @@
 #include <QRectF>
 #include <QSocketNotifier>
 #include <QString>
-#include <QTimer>
 #include <QVector>
 #include <qqml.h>
 
@@ -82,10 +81,11 @@ public:
     bool autoReconnect() const { return m_autoReconnect; }
     void setAutoReconnect(bool enabled);
 
-    // Cancel any pending backoff and attempt to connect immediately.
-    // No-op when already Connected. Called automatically when the
-    // daemon appears on the session bus, but also useful for tests
-    // and manual triggers.
+    // Attempt to connect now. No-op when already Connected. Triggered
+    // automatically by the DBus NameOwnerChanged / Daemon Ready signals
+    // (see setupDBusWatcher); also exposed for tests and manual cues.
+    // There is no internal retry timer — recovery relies entirely on
+    // DBus signals fired when the daemon re-appears.
     Q_INVOKABLE void requestReconnect();
 
 signals:
@@ -108,7 +108,6 @@ private slots:
     void onSocketReadable();
     void onHandshakeIO();
     void onWindowReady();
-    void onReconnectTimer();
     void onDaemonNameOwnerChanged(const QString &name,
                                   const QString &oldOwner,
                                   const QString &newOwner);
@@ -122,7 +121,6 @@ private:
     void handleDisconnect(int errCode, const char *msg);
     void setConnState(ConnState s);
     void setStreamState(StreamState s);
-    void scheduleReconnect();
 
     bool bindEglBackend();
     bool bindVulkanBackend();
@@ -150,11 +148,6 @@ private:
     waywallen_display_t *m_display { nullptr };
     QSocketNotifier *m_notifier { nullptr };
     QSocketNotifier *m_notifierWrite { nullptr };
-
-    // Reconnect.
-    QTimer *m_reconnectTimer { nullptr };
-    int m_reconnectDelay { 1000 };  // ms, exponential backoff
-    static constexpr int kMaxReconnectDelay = 30000;
 
     // Backend detected from Qt's scene graph.
     enum ActiveBackend { BackendNone, BackendEGL, BackendVulkan };

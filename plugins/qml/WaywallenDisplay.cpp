@@ -137,7 +137,6 @@ WaywallenDisplay::~WaywallenDisplay() {
     // cleanup() may already have been called by sceneGraphInvalidated.
     // It's safe to call again — it checks m_display for null.
     cleanup();
-    delete m_reconnectTimer;
 }
 
 void WaywallenDisplay::cleanup() {
@@ -202,9 +201,6 @@ void WaywallenDisplay::setAutoReconnect(bool enabled) {
     if (m_autoReconnect == enabled) return;
     m_autoReconnect = enabled;
     emit autoReconnectChanged();
-    if (!enabled && m_reconnectTimer) {
-        m_reconnectTimer->stop();
-    }
 }
 
 void WaywallenDisplay::setConnState(ConnState s) {
@@ -389,9 +385,8 @@ void WaywallenDisplay::onDaemonReadySignal() {
 }
 
 void WaywallenDisplay::requestReconnect() {
-    if (m_connState == Connected) return;
-    if (m_reconnectTimer) m_reconnectTimer->stop();
-    m_reconnectDelay = 1000;
+    if (m_connState == Connected || m_connState == Handshaking) return;
+    if (!m_autoReconnect) return;
     tryConnect();
 }
 
@@ -465,7 +460,8 @@ void WaywallenDisplay::tryConnect() {
     if (!m_display) {
         qCWarning(lcWD, "waywallen_display_new() failed");
         setConnState(Error);
-        scheduleReconnect();
+        // No internal retry — DBus NameOwnerChanged / Ready will drive
+        // the next attempt when the daemon (re-)appears.
         return;
     }
 
@@ -504,11 +500,10 @@ void WaywallenDisplay::tryConnect() {
         60000);
 
     if (rc != WAYWALLEN_OK) {
-        qCWarning(lcWD, "begin_connect failed: %d", rc);
+        qCWarning(lcWD, "begin_connect failed: %d (waiting for daemon DBus signal)", rc);
         waywallen_display_destroy(m_display);
         m_display = nullptr;
         setConnState(Disconnected);
-        scheduleReconnect();
         return;
     }
 
@@ -518,7 +513,6 @@ void WaywallenDisplay::tryConnect() {
         waywallen_display_destroy(m_display);
         m_display = nullptr;
         setConnState(Disconnected);
-        scheduleReconnect();
         return;
     }
 
@@ -559,7 +553,6 @@ void WaywallenDisplay::onHandshakeIO() {
                     this, &WaywallenDisplay::onSocketReadable);
             m_notifier->setEnabled(true);
         }
-        m_reconnectDelay = 1000;
         setStreamState(Inactive);
         setConnState(Connected);
         return;
@@ -571,24 +564,6 @@ void WaywallenDisplay::onHandshakeIO() {
     // NEED_READ / NEED_WRITE: arm the matching notifier, idle the other.
     if (m_notifier)      m_notifier     ->setEnabled(rc == WAYWALLEN_HS_NEED_READ);
     if (m_notifierWrite) m_notifierWrite->setEnabled(rc == WAYWALLEN_HS_NEED_WRITE);
-}
-
-void WaywallenDisplay::scheduleReconnect() {
-    if (!m_autoReconnect) return;
-    if (!m_reconnectTimer) {
-        m_reconnectTimer = new QTimer(this);
-        m_reconnectTimer->setSingleShot(true);
-        connect(m_reconnectTimer, &QTimer::timeout,
-                this, &WaywallenDisplay::onReconnectTimer);
-    }
-    qCInfo(lcWD, "reconnecting in %d ms", m_reconnectDelay);
-    m_reconnectTimer->start(m_reconnectDelay);
-    m_reconnectDelay = qMin(m_reconnectDelay * 2, kMaxReconnectDelay);
-}
-
-void WaywallenDisplay::onReconnectTimer() {
-    if (m_display) return;
-    tryConnect();
 }
 
 void WaywallenDisplay::onSocketReadable() {
@@ -608,13 +583,14 @@ void WaywallenDisplay::flushPendingRelease() {
 }
 
 void WaywallenDisplay::handleDisconnect(int errCode, const char *msg) {
-    qCWarning(lcWD, "disconnected (err=%d msg=%s)",
+    qCWarning(lcWD, "disconnected (err=%d msg=%s) — waiting for daemon DBus signal",
               errCode, msg ? msg : "(null)");
     cleanup();
     setConnState(Disconnected);
     setStreamState(Inactive);
     update();
-    scheduleReconnect();
+    // No retry timer — wait for org.waywallen.Daemon NameOwnerChanged
+    // / Ready signals to drive the next attempt (see setupDBusWatcher).
 }
 
 // ---------------------------------------------------------------------------
