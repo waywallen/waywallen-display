@@ -167,16 +167,34 @@ int main(int argc, char **argv) {
 
     fprintf(stderr, "connecting to %s...\n",
             a.socket_path ? a.socket_path : "$XDG_RUNTIME_DIR/waywallen/display.sock");
-    int rc = waywallen_display_connect(d, a.socket_path, a.name,
-                                       a.width, a.height, a.refresh_mhz);
+
+    /* Demonstrates event-loop-friendly handshake. For a one-shot CLI
+     * the legacy `waywallen_display_connect()` would do the same
+     * (blocking) thing in a single call. */
+    int rc = waywallen_display_begin_connect(d, a.socket_path, a.name,
+                                             a.width, a.height, a.refresh_mhz);
     if (rc != WAYWALLEN_OK) {
-        fprintf(stderr, "connect failed: %d\n", rc);
+        fprintf(stderr, "begin_connect failed: %d\n", rc);
         waywallen_display_destroy(d);
         return 1;
     }
-    fprintf(stderr, "connected; draining events...\n");
-
     int fd = waywallen_display_get_fd(d);
+    while (1) {
+        rc = waywallen_display_advance_handshake(d);
+        if (rc == WAYWALLEN_HS_DONE) break;
+        if (rc < 0) {
+            fprintf(stderr, "handshake failed: %d\n", rc);
+            waywallen_display_destroy(d);
+            return 1;
+        }
+        struct pollfd hp = { .fd = fd, .events = 0, .revents = 0 };
+        if (rc == WAYWALLEN_HS_NEED_READ)       hp.events = POLLIN;
+        else if (rc == WAYWALLEN_HS_NEED_WRITE) hp.events = POLLOUT;
+        else                                    hp.events = POLLIN | POLLOUT;
+        int pn = poll(&hp, 1, -1);
+        if (pn < 0 && errno != EINTR) { perror("poll handshake"); return 1; }
+    }
+    fprintf(stderr, "connected; draining events...\n");
     while (!rs.disconnected) {
         struct pollfd p = { .fd = fd, .events = POLLIN, .revents = 0 };
         int pr = poll(&p, 1, -1);

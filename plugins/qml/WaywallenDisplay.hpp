@@ -44,6 +44,7 @@ public:
     enum ConnState {
         Disconnected = 0,
         Connecting,
+        Handshaking,
         Connected,
         Error,
     };
@@ -105,6 +106,7 @@ protected:
 
 private slots:
     void onSocketReadable();
+    void onHandshakeIO();
     void onWindowReady();
     void onReconnectTimer();
     void onDaemonNameOwnerChanged(const QString &name,
@@ -147,6 +149,7 @@ private:
     // C library handle.
     waywallen_display_t *m_display { nullptr };
     QSocketNotifier *m_notifier { nullptr };
+    QSocketNotifier *m_notifierWrite { nullptr };
 
     // Reconnect.
     QTimer *m_reconnectTimer { nullptr };

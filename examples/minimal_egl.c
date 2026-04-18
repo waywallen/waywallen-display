@@ -20,6 +20,7 @@
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <gbm.h>
 #include <poll.h>
@@ -219,15 +220,34 @@ int main(int argc, char **argv) {
     fprintf(stderr, "connecting to %s...\n",
             socket_path ? socket_path
                         : "$XDG_RUNTIME_DIR/waywallen/display.sock");
-    rc = waywallen_display_connect(d, socket_path, name, 640, 480, 60000);
+
+    /* Async handshake — same shape as a GUI host using QSocketNotifier:
+     * begin_connect kicks things off non-blocking, advance_handshake is
+     * driven by poll readiness until DONE. The legacy waywallen_display_connect
+     * would do the same blockingly in one call. */
+    rc = waywallen_display_begin_connect(d, socket_path, name, 640, 480, 60000);
     if (rc != WAYWALLEN_OK) {
-        fprintf(stderr, "connect failed: %d\n", rc);
+        fprintf(stderr, "begin_connect failed: %d\n", rc);
         waywallen_display_destroy(d);
         goto cleanup_ctx;
     }
-    fprintf(stderr, "connected; dispatch loop...\n");
-
     int ww_fd = waywallen_display_get_fd(d);
+    while (1) {
+        rc = waywallen_display_advance_handshake(d);
+        if (rc == WAYWALLEN_HS_DONE) break;
+        if (rc < 0) {
+            fprintf(stderr, "handshake failed: %d\n", rc);
+            waywallen_display_destroy(d);
+            goto cleanup_ctx;
+        }
+        struct pollfd hp = { .fd = ww_fd, .events = 0, .revents = 0 };
+        if (rc == WAYWALLEN_HS_NEED_READ)       hp.events = POLLIN;
+        else if (rc == WAYWALLEN_HS_NEED_WRITE) hp.events = POLLOUT;
+        else                                    hp.events = POLLIN | POLLOUT;
+        int pn = poll(&hp, 1, -1);
+        if (pn < 0 && errno != EINTR) { perror("poll handshake"); goto cleanup_ctx; }
+    }
+    fprintf(stderr, "connected; dispatch loop...\n");
     while (!st.disconnected) {
         struct pollfd pfd = { .fd = ww_fd, .events = POLLIN, .revents = 0 };
         int pr = poll(&pfd, 1, 2000);

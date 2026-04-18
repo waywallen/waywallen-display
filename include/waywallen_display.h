@@ -5,13 +5,6 @@
  * This header is ABI-frozen for v0.1.x of the protocol. Backwards-
  * incompatible changes bump WAYWALLEN_DISPLAY_VERSION_MAJOR.
  *
- * Phase status (read before using):
- *   Phase 2: lifecycle + state machine + codec are wired. Backend
- *            binding is a stub — `bind_egl` / `bind_vulkan` only
- *            record the choice; no texture import happens yet.
- *            `on_textures_ready` always reports `backend = NONE`.
- *   Phase 3+: real EGL and Vulkan DMA-BUF import.
- *
  * Ownership rules:
  *   - All `waywallen_*` structs passed to callbacks are owned by the
  *     library. Host must not free them or the pointers they contain.
@@ -115,6 +108,29 @@ typedef enum waywallen_stream_state {
     WAYWALLEN_STREAM_INACTIVE = 0,
     WAYWALLEN_STREAM_ACTIVE,
 } waywallen_stream_state_t;
+
+/*
+ * Handshake state for the async connect path. Drives the explicit
+ * state machine exposed via waywallen_display_advance_handshake().
+ * Hosts that just want a one-shot connect should use the legacy
+ * waywallen_display_connect() (which wraps this internally).
+ */
+typedef enum waywallen_handshake_state {
+    WAYWALLEN_HS_IDLE          = 0, /* before begin_connect / after disconnect */
+    WAYWALLEN_HS_CONNECTING    = 1, /* connect(2) returned EINPROGRESS         */
+    WAYWALLEN_HS_HELLO_PENDING = 2, /* hello queued, partial sendmsg           */
+    WAYWALLEN_HS_WELCOME_WAIT  = 3, /* hello fully sent, waiting POLLIN        */
+    WAYWALLEN_HS_REGISTER_PEND = 4, /* welcome decoded, register queued        */
+    WAYWALLEN_HS_ACCEPTED_WAIT = 5, /* register fully sent, waiting POLLIN     */
+    WAYWALLEN_HS_READY         = 6, /* DISPLAY_ACCEPTED received, dispatch OK  */
+} waywallen_handshake_state_t;
+
+/* Return codes from waywallen_display_advance_handshake(). Negative
+ * values are propagated waywallen_err_t / -errno. */
+#define WAYWALLEN_HS_DONE       1   /* state transitioned to READY        */
+#define WAYWALLEN_HS_NEED_READ  2   /* arm POLLIN, call again on readable */
+#define WAYWALLEN_HS_NEED_WRITE 3   /* arm POLLOUT, call again on writable*/
+#define WAYWALLEN_HS_PROGRESS   4   /* state advanced, more I/O needed    */
 
 /* -------------------------------------------------------------------------
  * Backends (Phase 2: enum is recorded but not honoured beyond that)
@@ -229,14 +245,50 @@ int waywallen_display_bind_vulkan(waywallen_display_t *d,
                                   const waywallen_vk_ctx_t *ctx);
 
 /* -------------------------------------------------------------------------
+ * Async session (event-loop friendly)
+ *
+ * Modeled after libwayland's prepare_read / read_events split. Three
+ * primitives drive the handshake from the host's main event loop:
+ *
+ *   1. `begin_connect` opens the UDS non-blocking, queues the `hello`
+ *      request body in an internal buffer, and returns. The fd is then
+ *      available via `get_fd` for the host to attach to its poll loop.
+ *
+ *   2. `advance_handshake` is invoked whenever the fd becomes readable
+ *      and/or writable (per the previous return value). It runs the
+ *      non-blocking state machine one step. Hosts arm POLLIN / POLLOUT
+ *      based on the return value (NEED_READ / NEED_WRITE), then call
+ *      again. PROGRESS means the machine moved forward and the caller
+ *      should immediately call again (no I/O wait needed).
+ *
+ *   3. `handshake_state` is an introspection accessor.
+ *
+ * After a DONE return the connection is fully established and the host
+ * may drop the write notifier and treat the fd like the legacy blocking
+ * path: read-only QSocketNotifier driving `waywallen_display_dispatch`.
+ * ------------------------------------------------------------------------- */
+
+int waywallen_display_begin_connect(waywallen_display_t *d,
+                                    const char *socket_path,
+                                    const char *display_name,
+                                    uint32_t width,
+                                    uint32_t height,
+                                    uint32_t refresh_mhz);
+
+int waywallen_display_advance_handshake(waywallen_display_t *d);
+
+waywallen_handshake_state_t waywallen_display_handshake_state(waywallen_display_t *d);
+
+/* -------------------------------------------------------------------------
  * Session
  * ------------------------------------------------------------------------- */
 
 /*
- * Connect to `socket_path` (NULL = $XDG_RUNTIME_DIR/waywallen/display.sock),
- * perform the `hello` / `register_display` handshake, and return once the
- * server has accepted the registration. After success the caller is expected
- * to call `get_fd` and drive `dispatch` from its event loop.
+ * Convenience wrapper around begin_connect + a private poll loop +
+ * advance_handshake. Blocks the calling thread until the handshake
+ * completes (or fails). Suitable for one-shot CLI tools and tests;
+ * NEVER call from a thread that runs an event loop — use the async
+ * primitives above instead.
  */
 int waywallen_display_connect(waywallen_display_t *d,
                               const char *socket_path,

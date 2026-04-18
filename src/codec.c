@@ -257,3 +257,130 @@ int ww_codec_recv_event(int fd, uint16_t *op,
                         int *fd_buf, size_t fd_cap, size_t *n_fds) {
     return do_recv(fd, op, body_buf, body_cap, body_len, fd_buf, fd_cap, n_fds);
 }
+
+/* ------------------------------------------------------------------ */
+/*  Non-blocking partial-frame primitives                              */
+/* ------------------------------------------------------------------ */
+
+void ww_codec_recv_state_init(ww_codec_recv_state_t *st) {
+    memset(st, 0, sizeof(*st));
+    for (size_t i = 0; i < WW_CODEC_MAX_FDS_PER_MSG; i++) st->fds[i] = -1;
+}
+
+void ww_codec_recv_state_reset(ww_codec_recv_state_t *st) {
+    /* Close any unclaimed fds — caller owns harvested fds only after it
+     * explicitly copies them out before reset. */
+    close_all(st->fds, st->n_fds);
+    ww_codec_recv_state_init(st);
+}
+
+int ww_codec_recv_partial(int fd, ww_codec_recv_state_t *st) {
+    if (fd < 0) return -EBADF;
+    if (!st)    return -EINVAL;
+
+    /* Phase 1: header. SCM_RIGHTS rides the first byte of the frame
+     * per the kernel's UDS contract; we harvest cmsg on every recvmsg
+     * defensively (cf. do_recv comment in this file). */
+    while (st->hdr_filled < 4) {
+        struct iovec iov;
+        iov.iov_base = st->hdr + st->hdr_filled;
+        iov.iov_len  = 4 - st->hdr_filled;
+
+        union {
+            char raw[WW_CMSG_SPACE];
+            struct cmsghdr align;
+        } cmsg_store;
+        memset(&cmsg_store, 0, sizeof(cmsg_store));
+
+        struct msghdr msg;
+        memset(&msg, 0, sizeof(msg));
+        msg.msg_iov         = &iov;
+        msg.msg_iovlen      = 1;
+        msg.msg_control     = cmsg_store.raw;
+        msg.msg_controllen  = (socklen_t)sizeof(cmsg_store.raw);
+
+        ssize_t n = recvmsg(fd, &msg, MSG_CMSG_CLOEXEC | MSG_DONTWAIT);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) return WW_CODEC_FRAME_NEED;
+            return -errno;
+        }
+
+        for (struct cmsghdr *c = CMSG_FIRSTHDR(&msg); c != NULL;
+             c = CMSG_NXTHDR(&msg, c)) {
+            if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SCM_RIGHTS) {
+                size_t payload_len =
+                    (size_t)c->cmsg_len - (size_t)CMSG_LEN(0);
+                size_t nh = payload_len / sizeof(int);
+                const unsigned char *src = (const unsigned char *)CMSG_DATA(c);
+                for (size_t i = 0; i < nh; i++) {
+                    int got;
+                    memcpy(&got, src + i * sizeof(int), sizeof(int));
+                    if (st->n_fds < WW_CODEC_MAX_FDS_PER_MSG) {
+                        st->fds[st->n_fds++] = got;
+                    } else {
+                        close(got);
+                        for (size_t j = i + 1; j < nh; j++) {
+                            int extra;
+                            memcpy(&extra, src + j * sizeof(int), sizeof(int));
+                            close(extra);
+                        }
+                        ww_codec_recv_state_reset(st);
+                        return -EMSGSIZE;
+                    }
+                }
+            }
+        }
+
+        if (n == 0) {
+            ww_codec_recv_state_reset(st);
+            return -ECONNRESET;
+        }
+        st->hdr_filled += (size_t)n;
+    }
+
+    /* Header complete — (re-)parse op + body_len. Idempotent so it's
+     * safe to recompute on each entry. */
+    st->op = (uint16_t)(st->hdr[0] | ((uint16_t)st->hdr[1] << 8));
+    size_t total = (size_t)st->hdr[2] | ((size_t)st->hdr[3] << 8);
+    if (total < 4) {
+        ww_codec_recv_state_reset(st);
+        return -EBADMSG;
+    }
+    if (total - 4 > WW_CODEC_MAX_BODY_BYTES) {
+        ww_codec_recv_state_reset(st);
+        return -EMSGSIZE;
+    }
+    st->body_len = total - 4;
+
+    /* Phase 2: body. fds were already drained in phase 1; plain recv. */
+    while (st->body_filled < st->body_len) {
+        ssize_t n = recv(fd, st->body + st->body_filled,
+                         st->body_len - st->body_filled, MSG_DONTWAIT);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) return WW_CODEC_FRAME_NEED;
+            return -errno;
+        }
+        if (n == 0) {
+            ww_codec_recv_state_reset(st);
+            return -ECONNRESET;
+        }
+        st->body_filled += (size_t)n;
+    }
+
+    return WW_CODEC_FRAME_DONE;
+}
+
+ssize_t ww_codec_send_partial(int fd, const uint8_t *buf, size_t len) {
+    if (fd < 0) return -EBADF;
+    if (len > 0 && !buf) return -EINVAL;
+    if (len == 0) return 0;
+    for (;;) {
+        ssize_t n = send(fd, buf, len, MSG_NOSIGNAL | MSG_DONTWAIT);
+        if (n >= 0) return n;
+        if (errno == EINTR) continue;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
+        return -errno;
+    }
+}

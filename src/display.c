@@ -25,6 +25,8 @@
 #endif
 
 #include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -79,6 +81,24 @@ typedef enum ww_stream_state {
     WW_STREAM_ACTIVE,
 } ww_stream_state_t;
 
+/* Internal handshake state (maps to public waywallen_handshake_state_t).
+ * Numerically aligned with the public enum so the accessor is a cast. */
+typedef enum ww_handshake_state {
+    WW_HS_IDLE          = 0,
+    WW_HS_CONNECTING    = 1,
+    WW_HS_HELLO_PENDING = 2,
+    WW_HS_WELCOME_WAIT  = 3,
+    WW_HS_REGISTER_PEND = 4,
+    WW_HS_ACCEPTED_WAIT = 5,
+    WW_HS_READY         = 6,
+} ww_handshake_state_t;
+
+/* Sized to comfortably hold the largest plausible handshake message
+ * (hello: 3 short strings; register_display: name string + small
+ * scalars + empty kv_list). 1 KiB leaves headroom without bloating
+ * every display instance. */
+#define WW_HS_SEND_BUF_BYTES 1024
+
 struct waywallen_display {
     waywallen_display_callbacks_t cb;
 
@@ -89,6 +109,20 @@ struct waywallen_display {
 
     /* Whether the backend is actively pushing frames. */
     ww_stream_state_t stream;
+
+    /* Handshake state machine. Only meaningful while conn is
+     * CONNECTING; reset to IDLE on disconnect/dead. */
+    ww_handshake_state_t hs_state;
+    uint8_t  hs_send_buf[WW_HS_SEND_BUF_BYTES];
+    size_t   hs_send_len;       /* total bytes queued (header + body) */
+    size_t   hs_send_pos;       /* bytes flushed so far */
+    ww_codec_recv_state_t hs_recv;
+    /* Saved register_display params, captured in begin_connect and
+     * applied when WELCOME_WAIT transitions to REGISTER_PEND. */
+    char     hs_display_name[256];
+    uint32_t hs_display_width;
+    uint32_t hs_display_height;
+    uint32_t hs_display_refresh_mhz;
 
     /* Backend selection. */
     waywallen_backend_t backend;
@@ -125,6 +159,10 @@ static void fire_disconnected(waywallen_display_t *d, int err, const char *msg) 
     if (d->conn == WW_CONN_DEAD) return;
     d->conn = WW_CONN_DEAD;
     d->stream = WW_STREAM_INACTIVE;
+    d->hs_state = WW_HS_IDLE;
+    ww_codec_recv_state_reset(&d->hs_recv);
+    d->hs_send_len = 0;
+    d->hs_send_pos = 0;
     if (d->cb.on_disconnected) {
         d->cb.on_disconnected(d->cb.user_data, err, msg);
     }
@@ -210,6 +248,8 @@ waywallen_display_t *waywallen_display_new(const waywallen_display_callbacks_t *
     d->conn = WW_CONN_DISCONNECTED;
     d->stream = WW_STREAM_INACTIVE;
     d->backend = WAYWALLEN_BACKEND_NONE;
+    d->hs_state = WW_HS_IDLE;
+    ww_codec_recv_state_init(&d->hs_recv);
     return d;
 }
 
@@ -219,6 +259,7 @@ void waywallen_display_destroy(waywallen_display_t *d) {
         close(d->fd);
         d->fd = -1;
     }
+    ww_codec_recv_state_reset(&d->hs_recv);
     free(d);
 }
 
@@ -273,8 +314,11 @@ int waywallen_display_bind_vulkan(waywallen_display_t *d,
 /*  Connect + handshake                                                */
 /* ------------------------------------------------------------------ */
 
-static int open_uds(const char *path) {
-    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+/* Open a UDS in non-blocking mode. *out_in_progress is true when
+ * connect(2) returned EINPROGRESS (kernel will signal POLLOUT once
+ * the connect completes). Returns fd on success, -errno on failure. */
+static int open_uds_nonblock(const char *path, bool *out_in_progress) {
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
     if (fd < 0) return -errno;
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
@@ -285,7 +329,12 @@ static int open_uds(const char *path) {
         return -ENAMETOOLONG;
     }
     memcpy(addr.sun_path, path, pl);
+    *out_in_progress = false;
     if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        if (errno == EINPROGRESS) {
+            *out_in_progress = true;
+            return fd;
+        }
         int e = errno;
         close(fd);
         return -e;
@@ -293,12 +342,62 @@ static int open_uds(const char *path) {
     return fd;
 }
 
-int waywallen_display_connect(waywallen_display_t *d,
-                              const char *socket_path,
-                              const char *display_name,
-                              uint32_t width,
-                              uint32_t height,
-                              uint32_t refresh_mhz) {
+/* Encode `msg` via `encode` into a temp ww_buf_t, then frame
+ * (header + body) into d->hs_send_buf for the partial sender to drain. */
+static int hs_queue_request(waywallen_display_t *d, uint16_t opcode,
+                            int (*encode)(const void *, ww_buf_t *),
+                            const void *msg) {
+    ww_buf_t body;
+    ww_buf_init(&body);
+    int rc = encode(msg, &body);
+    if (rc != WW_OK) {
+        ww_buf_free(&body);
+        return WAYWALLEN_ERR_NOMEM;
+    }
+    size_t total = 4 + body.len;
+    if (total > sizeof(d->hs_send_buf)) {
+        /* Should never happen for a handshake message. */
+        ww_buf_free(&body);
+        return WAYWALLEN_ERR_NOMEM;
+    }
+    d->hs_send_buf[0] = (uint8_t)(opcode & 0xff);
+    d->hs_send_buf[1] = (uint8_t)((opcode >> 8) & 0xff);
+    d->hs_send_buf[2] = (uint8_t)(total & 0xff);
+    d->hs_send_buf[3] = (uint8_t)((total >> 8) & 0xff);
+    if (body.len > 0) memcpy(d->hs_send_buf + 4, body.data, body.len);
+    d->hs_send_len = total;
+    d->hs_send_pos = 0;
+    ww_buf_free(&body);
+    return WAYWALLEN_OK;
+}
+
+static int hs_queue_hello(waywallen_display_t *d) {
+    ww_req_hello_t hello;
+    memset(&hello, 0, sizeof(hello));
+    hello.protocol = (char *)WW_PROTOCOL_NAME;
+    hello.client_name = (char *)"libwaywallen_display";
+    hello.client_version = (char *)"0.1.0";
+    return hs_queue_request(d, WW_REQ_HELLO, enc_hello, &hello);
+}
+
+static int hs_queue_register(waywallen_display_t *d) {
+    ww_req_register_display_t reg;
+    memset(&reg, 0, sizeof(reg));
+    reg.name = d->hs_display_name;
+    reg.width = d->hs_display_width;
+    reg.height = d->hs_display_height;
+    reg.refresh_mhz = d->hs_display_refresh_mhz;
+    reg.properties.count = 0;
+    reg.properties.data = NULL;
+    return hs_queue_request(d, WW_REQ_REGISTER_DISPLAY, enc_register, &reg);
+}
+
+int waywallen_display_begin_connect(waywallen_display_t *d,
+                                    const char *socket_path,
+                                    const char *display_name,
+                                    uint32_t width,
+                                    uint32_t height,
+                                    uint32_t refresh_mhz) {
     if (!d || !display_name) return WAYWALLEN_ERR_INVAL;
     if (d->conn != WW_CONN_DISCONNECTED && d->conn != WW_CONN_DEAD) {
         return WAYWALLEN_ERR_STATE;
@@ -311,101 +410,250 @@ int waywallen_display_connect(waywallen_display_t *d,
         socket_path = path_buf;
     }
 
-    int rc = open_uds(socket_path);
-    if (rc < 0) {
+    /* Save register_display params for the WELCOME -> REGISTER transition. */
+    size_t name_len = strlen(display_name);
+    if (name_len + 1 > sizeof(d->hs_display_name)) return WAYWALLEN_ERR_INVAL;
+    memcpy(d->hs_display_name, display_name, name_len + 1);
+    d->hs_display_width = width;
+    d->hs_display_height = height;
+    d->hs_display_refresh_mhz = refresh_mhz;
+
+    bool in_progress = false;
+    int fd = open_uds_nonblock(socket_path, &in_progress);
+    if (fd < 0) {
         return WAYWALLEN_ERR_IO;
     }
-    d->fd = rc;
+    d->fd = fd;
     d->conn = WW_CONN_CONNECTING;
     d->stream = WW_STREAM_INACTIVE;
+    ww_codec_recv_state_reset(&d->hs_recv);
+    d->hs_send_len = 0;
+    d->hs_send_pos = 0;
 
-    /* ---- Step 1: hello ---- */
-    ww_req_hello_t hello;
-    memset(&hello, 0, sizeof(hello));
-    hello.protocol = (char *)WW_PROTOCOL_NAME;
-    hello.client_name = (char *)"libwaywallen_display";
-    hello.client_version = (char *)"0.1.0";
-    int srv = send_request_msg(d, WW_REQ_HELLO, enc_hello, &hello);
-    if (srv != WAYWALLEN_OK) {
-        fire_disconnected(d, srv, "send hello");
-        return srv;
+    if (in_progress) {
+        d->hs_state = WW_HS_CONNECTING;
+    } else {
+        /* connect(2) finished synchronously — queue hello so the very
+         * first advance call can flush it. */
+        int rc = hs_queue_hello(d);
+        if (rc != WAYWALLEN_OK) {
+            close(d->fd);
+            d->fd = -1;
+            d->conn = WW_CONN_DEAD;
+            d->hs_state = WW_HS_IDLE;
+            return rc;
+        }
+        d->hs_state = WW_HS_HELLO_PENDING;
     }
-    /* conn stays CONNECTING through the handshake */
+    return WAYWALLEN_OK;
+}
 
-    /* ---- Step 2: welcome ---- */
-    static uint8_t body_buf[WW_CODEC_MAX_BODY_BYTES];
-    uint16_t op;
-    size_t body_len;
-    int fd_buf[WW_CODEC_MAX_FDS_PER_MSG];
-    size_t n_fds;
-    rc = recv_event_frame(d, &op, body_buf, &body_len, fd_buf,
-                          WW_CODEC_MAX_FDS_PER_MSG, &n_fds);
-    close_all_fds(fd_buf, n_fds);
-    if (rc != WAYWALLEN_OK) {
-        fire_disconnected(d, rc, "recv welcome");
+waywallen_handshake_state_t waywallen_display_handshake_state(waywallen_display_t *d) {
+    if (!d) return WAYWALLEN_HS_IDLE;
+    return (waywallen_handshake_state_t)d->hs_state;
+}
+
+/* Internal: advance one logical step. May return PROGRESS, in which
+ * case advance_handshake() loops back into this function. */
+static int hs_advance_one(waywallen_display_t *d) {
+    switch (d->hs_state) {
+    case WW_HS_IDLE:
+    case WW_HS_READY:
+        return WAYWALLEN_ERR_STATE;
+
+    case WW_HS_CONNECTING: {
+        int err = 0;
+        socklen_t errlen = sizeof(err);
+        if (getsockopt(d->fd, SOL_SOCKET, SO_ERROR, &err, &errlen) < 0) {
+            fire_disconnected(d, WAYWALLEN_ERR_IO, "getsockopt SO_ERROR");
+            return WAYWALLEN_ERR_IO;
+        }
+        if (err == EINPROGRESS) return WAYWALLEN_HS_NEED_WRITE;
+        if (err != 0) {
+            fire_disconnected(d, WAYWALLEN_ERR_IO, "connect failed");
+            return WAYWALLEN_ERR_IO;
+        }
+        int rc = hs_queue_hello(d);
+        if (rc != WAYWALLEN_OK) {
+            fire_disconnected(d, rc, "queue hello");
+            return rc;
+        }
+        d->hs_state = WW_HS_HELLO_PENDING;
+        return WAYWALLEN_HS_PROGRESS;
+    }
+
+    case WW_HS_HELLO_PENDING:
+    case WW_HS_REGISTER_PEND: {
+        ssize_t n = ww_codec_send_partial(d->fd,
+                                          d->hs_send_buf + d->hs_send_pos,
+                                          d->hs_send_len - d->hs_send_pos);
+        if (n < 0) {
+            fire_disconnected(d, WAYWALLEN_ERR_IO, "send handshake");
+            return WAYWALLEN_ERR_IO;
+        }
+        if (n == 0) return WAYWALLEN_HS_NEED_WRITE;
+        d->hs_send_pos += (size_t)n;
+        if (d->hs_send_pos < d->hs_send_len) return WAYWALLEN_HS_NEED_WRITE;
+        if (d->hs_state == WW_HS_HELLO_PENDING) {
+            d->hs_state = WW_HS_WELCOME_WAIT;
+        } else {
+            d->hs_state = WW_HS_ACCEPTED_WAIT;
+        }
+        d->hs_send_len = 0;
+        d->hs_send_pos = 0;
+        return WAYWALLEN_HS_PROGRESS;
+    }
+
+    case WW_HS_WELCOME_WAIT: {
+        int rc = ww_codec_recv_partial(d->fd, &d->hs_recv);
+        if (rc == WW_CODEC_FRAME_NEED) return WAYWALLEN_HS_NEED_READ;
+        if (rc < 0) {
+            int werr = (rc == -ECONNRESET) ? WAYWALLEN_ERR_NOTCONN
+                                            : WAYWALLEN_ERR_IO;
+            fire_disconnected(d, werr, "recv welcome");
+            return werr;
+        }
+        /* No fds expected on welcome; defensively close any. */
+        close_all_fds(d->hs_recv.fds, d->hs_recv.n_fds);
+        d->hs_recv.n_fds = 0;
+        if (d->hs_recv.op == WW_EVT_ERROR) {
+            ww_evt_error_t er;
+            const char *msg = "server error";
+            if (ww_evt_error_decode(d->hs_recv.body, d->hs_recv.body_len, &er) == WW_OK) {
+                if (er.message) msg = er.message;
+                fire_disconnected(d, WAYWALLEN_ERR_PROTO, msg);
+                ww_evt_error_free(&er);
+            } else {
+                fire_disconnected(d, WAYWALLEN_ERR_PROTO,
+                                  "server error (decode failed)");
+            }
+            ww_codec_recv_state_reset(&d->hs_recv);
+            return WAYWALLEN_ERR_PROTO;
+        }
+        if (d->hs_recv.op != WW_EVT_WELCOME) {
+            fire_disconnected(d, WAYWALLEN_ERR_PROTO, "expected welcome");
+            ww_codec_recv_state_reset(&d->hs_recv);
+            return WAYWALLEN_ERR_PROTO;
+        }
+        ww_evt_welcome_t welcome;
+        if (ww_evt_welcome_decode(d->hs_recv.body, d->hs_recv.body_len,
+                                  &welcome) != WW_OK) {
+            fire_disconnected(d, WAYWALLEN_ERR_PROTO, "decode welcome");
+            ww_codec_recv_state_reset(&d->hs_recv);
+            return WAYWALLEN_ERR_PROTO;
+        }
+        bool has_explicit_sync = false;
+        for (uint32_t i = 0; i < welcome.features.count; i++) {
+            if (welcome.features.data[i]
+                && strcmp(welcome.features.data[i], "explicit_sync_fd") == 0) {
+                has_explicit_sync = true;
+                break;
+            }
+        }
+        ww_evt_welcome_free(&welcome);
+        ww_codec_recv_state_reset(&d->hs_recv);
+        if (!has_explicit_sync) {
+            fire_disconnected(d, WAYWALLEN_ERR_PROTO,
+                              "server missing explicit_sync_fd feature");
+            return WAYWALLEN_ERR_PROTO;
+        }
+        int rc2 = hs_queue_register(d);
+        if (rc2 != WAYWALLEN_OK) {
+            fire_disconnected(d, rc2, "queue register_display");
+            return rc2;
+        }
+        d->hs_state = WW_HS_REGISTER_PEND;
+        return WAYWALLEN_HS_PROGRESS;
+    }
+
+    case WW_HS_ACCEPTED_WAIT: {
+        int rc = ww_codec_recv_partial(d->fd, &d->hs_recv);
+        if (rc == WW_CODEC_FRAME_NEED) return WAYWALLEN_HS_NEED_READ;
+        if (rc < 0) {
+            int werr = (rc == -ECONNRESET) ? WAYWALLEN_ERR_NOTCONN
+                                            : WAYWALLEN_ERR_IO;
+            fire_disconnected(d, werr, "recv display_accepted");
+            return werr;
+        }
+        close_all_fds(d->hs_recv.fds, d->hs_recv.n_fds);
+        d->hs_recv.n_fds = 0;
+        if (d->hs_recv.op == WW_EVT_ERROR) {
+            ww_evt_error_t er;
+            const char *msg = "server error";
+            if (ww_evt_error_decode(d->hs_recv.body, d->hs_recv.body_len, &er) == WW_OK) {
+                if (er.message) msg = er.message;
+                fire_disconnected(d, WAYWALLEN_ERR_PROTO, msg);
+                ww_evt_error_free(&er);
+            } else {
+                fire_disconnected(d, WAYWALLEN_ERR_PROTO,
+                                  "server error (decode failed)");
+            }
+            ww_codec_recv_state_reset(&d->hs_recv);
+            return WAYWALLEN_ERR_PROTO;
+        }
+        if (d->hs_recv.op != WW_EVT_DISPLAY_ACCEPTED) {
+            fire_disconnected(d, WAYWALLEN_ERR_PROTO, "expected display_accepted");
+            ww_codec_recv_state_reset(&d->hs_recv);
+            return WAYWALLEN_ERR_PROTO;
+        }
+        ww_evt_display_accepted_t accepted;
+        if (ww_evt_display_accepted_decode(d->hs_recv.body,
+                                           d->hs_recv.body_len,
+                                           &accepted) != WW_OK) {
+            fire_disconnected(d, WAYWALLEN_ERR_PROTO, "decode display_accepted");
+            ww_codec_recv_state_reset(&d->hs_recv);
+            return WAYWALLEN_ERR_PROTO;
+        }
+        d->display_id = accepted.display_id;
+        ww_evt_display_accepted_free(&accepted);
+        d->conn = WW_CONN_CONNECTED;
+        d->hs_state = WW_HS_READY;
+        ww_codec_recv_state_reset(&d->hs_recv);
+        return WAYWALLEN_HS_DONE;
+    }
+    }
+    return WAYWALLEN_ERR_STATE;
+}
+
+int waywallen_display_advance_handshake(waywallen_display_t *d) {
+    if (!d) return WAYWALLEN_ERR_INVAL;
+    if (d->conn != WW_CONN_CONNECTING) return WAYWALLEN_ERR_NOTCONN;
+    /* Loop while the state machine reports PROGRESS so the caller only
+     * sees terminal codes (DONE / NEED_* / error). Bounded by the
+     * number of state transitions (≤4). */
+    for (;;) {
+        int rc = hs_advance_one(d);
+        if (rc == WAYWALLEN_HS_PROGRESS) continue;
         return rc;
     }
-    if (op != WW_EVT_WELCOME) {
-        fire_disconnected(d, WAYWALLEN_ERR_PROTO, "expected welcome");
-        return WAYWALLEN_ERR_PROTO;
-    }
-    ww_evt_welcome_t welcome;
-    if (ww_evt_welcome_decode(body_buf, body_len, &welcome) != WW_OK) {
-        fire_disconnected(d, WAYWALLEN_ERR_PROTO, "decode welcome");
-        return WAYWALLEN_ERR_PROTO;
-    }
-    /* Check for the mandatory explicit_sync_fd feature. */
-    bool has_explicit_sync = false;
-    for (uint32_t i = 0; i < welcome.features.count; i++) {
-        if (welcome.features.data[i]
-            && strcmp(welcome.features.data[i], "explicit_sync_fd") == 0) {
-            has_explicit_sync = true;
-            break;
+}
+
+int waywallen_display_connect(waywallen_display_t *d,
+                              const char *socket_path,
+                              const char *display_name,
+                              uint32_t width,
+                              uint32_t height,
+                              uint32_t refresh_mhz) {
+    int rc = waywallen_display_begin_connect(d, socket_path, display_name,
+                                             width, height, refresh_mhz);
+    if (rc != WAYWALLEN_OK) return rc;
+    int fd = waywallen_display_get_fd(d);
+    for (;;) {
+        rc = waywallen_display_advance_handshake(d);
+        if (rc == WAYWALLEN_HS_DONE) return WAYWALLEN_OK;
+        if (rc < 0) return rc;
+        struct pollfd pfd;
+        pfd.fd = fd;
+        pfd.revents = 0;
+        if (rc == WAYWALLEN_HS_NEED_READ)       pfd.events = POLLIN;
+        else if (rc == WAYWALLEN_HS_NEED_WRITE) pfd.events = POLLOUT;
+        else                                    pfd.events = POLLIN | POLLOUT;
+        int n = poll(&pfd, 1, -1);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return WAYWALLEN_ERR_IO;
         }
     }
-    ww_evt_welcome_free(&welcome);
-    if (!has_explicit_sync) {
-        fire_disconnected(d, WAYWALLEN_ERR_PROTO,
-                          "server missing explicit_sync_fd feature");
-        return WAYWALLEN_ERR_PROTO;
-    }
-    /* ---- Step 3: register_display ---- */
-    ww_req_register_display_t reg;
-    memset(&reg, 0, sizeof(reg));
-    reg.name = (char *)display_name;
-    reg.width = width;
-    reg.height = height;
-    reg.refresh_mhz = refresh_mhz;
-    reg.properties.count = 0;
-    reg.properties.data = NULL;
-    srv = send_request_msg(d, WW_REQ_REGISTER_DISPLAY, enc_register, &reg);
-    if (srv != WAYWALLEN_OK) {
-        fire_disconnected(d, srv, "send register_display");
-        return srv;
-    }
-    /* ---- Step 4: display_accepted ---- */
-    rc = recv_event_frame(d, &op, body_buf, &body_len, fd_buf,
-                          WW_CODEC_MAX_FDS_PER_MSG, &n_fds);
-    close_all_fds(fd_buf, n_fds);
-    if (rc != WAYWALLEN_OK) {
-        fire_disconnected(d, rc, "recv display_accepted");
-        return rc;
-    }
-    if (op != WW_EVT_DISPLAY_ACCEPTED) {
-        fire_disconnected(d, WAYWALLEN_ERR_PROTO, "expected display_accepted");
-        return WAYWALLEN_ERR_PROTO;
-    }
-    ww_evt_display_accepted_t accepted;
-    if (ww_evt_display_accepted_decode(body_buf, body_len, &accepted) != WW_OK) {
-        fire_disconnected(d, WAYWALLEN_ERR_PROTO, "decode display_accepted");
-        return WAYWALLEN_ERR_PROTO;
-    }
-    d->display_id = accepted.display_id;
-    ww_evt_display_accepted_free(&accepted);
-    d->conn = WW_CONN_CONNECTED;
-    d->stream = WW_STREAM_INACTIVE;
-
-    return WAYWALLEN_OK;
 }
 
 int waywallen_display_update_size(waywallen_display_t *d,
@@ -984,8 +1232,10 @@ int waywallen_display_release_frame(waywallen_display_t *d,
 void waywallen_display_disconnect(waywallen_display_t *d) {
     if (!d) return;
     if (d->fd >= 0) {
-        /* Best-effort bye; ignore errors. */
-        if (d->conn != WW_CONN_DISCONNECTED && d->conn != WW_CONN_DEAD) {
+        /* Best-effort bye; ignore errors. Only meaningful once the
+         * connection is fully established — sending bye mid-handshake
+         * would just confuse the server. */
+        if (d->conn == WW_CONN_CONNECTED) {
             ww_req_bye_t bye;
             memset(&bye, 0, sizeof(bye));
             (void)send_request_msg(d, WW_REQ_BYE, enc_bye, &bye);
@@ -996,6 +1246,10 @@ void waywallen_display_disconnect(waywallen_display_t *d) {
     fire_textures_releasing_if_any(d);
     d->conn = WW_CONN_DISCONNECTED;
     d->stream = WW_STREAM_INACTIVE;
+    d->hs_state = WW_HS_IDLE;
+    ww_codec_recv_state_reset(&d->hs_recv);
+    d->hs_send_len = 0;
+    d->hs_send_pos = 0;
 }
 
 /* ------------------------------------------------------------------ */

@@ -143,6 +143,8 @@ WaywallenDisplay::~WaywallenDisplay() {
 void WaywallenDisplay::cleanup() {
     delete m_notifier;
     m_notifier = nullptr;
+    delete m_notifierWrite;
+    m_notifierWrite = nullptr;
 
     if (m_display) {
         waywallen_display_disconnect(m_display);
@@ -493,7 +495,7 @@ void WaywallenDisplay::tryConnect() {
 
     const QByteArray sockPath = m_socketPath.toUtf8();
     const QByteArray name = m_displayName.toUtf8();
-    int rc = waywallen_display_connect(
+    int rc = waywallen_display_begin_connect(
         m_display,
         sockPath.isEmpty() ? nullptr : sockPath.constData(),
         name.constData(),
@@ -502,7 +504,7 @@ void WaywallenDisplay::tryConnect() {
         60000);
 
     if (rc != WAYWALLEN_OK) {
-        qCWarning(lcWD, "connect failed: %d", rc);
+        qCWarning(lcWD, "begin_connect failed: %d", rc);
         waywallen_display_destroy(m_display);
         m_display = nullptr;
         setConnState(Disconnected);
@@ -510,17 +512,65 @@ void WaywallenDisplay::tryConnect() {
         return;
     }
 
-    m_reconnectDelay = 1000;
-    setConnState(Connected);
-    setStreamState(Inactive);
-    qCInfo(lcWD, "connected to daemon");
-
     int fd = waywallen_display_get_fd(m_display);
-    if (fd >= 0) {
-        m_notifier = new QSocketNotifier(fd, QSocketNotifier::Read, this);
-        connect(m_notifier, &QSocketNotifier::activated,
-                this, &WaywallenDisplay::onSocketReadable);
+    if (fd < 0) {
+        qCWarning(lcWD, "begin_connect returned no fd");
+        waywallen_display_destroy(m_display);
+        m_display = nullptr;
+        setConnState(Disconnected);
+        scheduleReconnect();
+        return;
     }
+
+    setConnState(Handshaking);
+
+    // Two notifiers drive the async handshake until READY. Read fires on
+    // POLLIN (welcome / display_accepted), Write on POLLOUT (initial
+    // connect completion + hello / register_display sends). The state
+    // machine in advance_handshake decides which one to enable next.
+    m_notifier      = new QSocketNotifier(fd, QSocketNotifier::Read,  this);
+    m_notifierWrite = new QSocketNotifier(fd, QSocketNotifier::Write, this);
+    connect(m_notifier,      &QSocketNotifier::activated,
+            this, &WaywallenDisplay::onHandshakeIO);
+    connect(m_notifierWrite, &QSocketNotifier::activated,
+            this, &WaywallenDisplay::onHandshakeIO);
+
+    // First step always involves writing (either completing connect or
+    // sending hello). Read is armed in case the kernel completed connect
+    // already and a welcome arrives immediately.
+    m_notifier->setEnabled(true);
+    m_notifierWrite->setEnabled(true);
+}
+
+void WaywallenDisplay::onHandshakeIO() {
+    if (!m_display) return;
+    int rc = waywallen_display_advance_handshake(m_display);
+    if (rc == WAYWALLEN_HS_DONE) {
+        qCInfo(lcWD, "handshake complete");
+        // Tear down the write notifier; post-handshake dispatch is
+        // read-only. Reuse the existing read notifier but redirect it
+        // to onSocketReadable.
+        delete m_notifierWrite;
+        m_notifierWrite = nullptr;
+        if (m_notifier) {
+            disconnect(m_notifier, &QSocketNotifier::activated,
+                       this, &WaywallenDisplay::onHandshakeIO);
+            connect(m_notifier, &QSocketNotifier::activated,
+                    this, &WaywallenDisplay::onSocketReadable);
+            m_notifier->setEnabled(true);
+        }
+        m_reconnectDelay = 1000;
+        setStreamState(Inactive);
+        setConnState(Connected);
+        return;
+    }
+    if (rc < 0) {
+        handleDisconnect(rc, "handshake");
+        return;
+    }
+    // NEED_READ / NEED_WRITE: arm the matching notifier, idle the other.
+    if (m_notifier)      m_notifier     ->setEnabled(rc == WAYWALLEN_HS_NEED_READ);
+    if (m_notifierWrite) m_notifierWrite->setEnabled(rc == WAYWALLEN_HS_NEED_WRITE);
 }
 
 void WaywallenDisplay::scheduleReconnect() {
