@@ -7,6 +7,8 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 
+include(GNUInstallDirs)
+
 find_package(Qt6 6.2 REQUIRED COMPONENTS Quick Gui Qml DBus)
 find_package(Vulkan QUIET)
 
@@ -53,7 +55,7 @@ target_compile_options(waywallen-display-qml PRIVATE
     -Wall -Wextra -Wpedantic)
 
 # Install the plugin + qmldir into the Qt QML import tree.
-set(QML_INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/lib/qt6/qml"
+set(QML_INSTALL_DIR "${CMAKE_INSTALL_FULL_LIBDIR}/qt6/qml"
     CACHE PATH "QML plugin install directory")
 
 install(

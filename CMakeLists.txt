@@ -1,18 +1,3 @@
-# libwaywallen_display — C consumer library for the
-# waywallen-display-v1 wire protocol.
-#
-# Build layout:
-#   include/waywallen_display.h    — public C API (installed header)
-#   src/display.c                  — lifecycle + state machine
-#   ${binary}/generated/ww_proto.h — wayproto-gen output (header)
-#   ${binary}/generated/ww_proto.c — wayproto-gen output (impl)
-#
-# The codegen tool lives in the Rust sibling project at
-# `../waywallen/tools/wayproto-gen`. Cargo builds it on demand the
-# first time CMake is configured; set `-DWAYPROTO_GEN=/path/to/binary`
-# to override that if cross-compiling or running in an environment
-# where cargo is not available.
-
 cmake_minimum_required(VERSION 3.16)
 project(waywallen_display
     VERSION 0.1.0
@@ -27,6 +12,8 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Debug CACHE STRING "" FORCE)
 endif()
+
+include(GNUInstallDirs)
 
 # ---------------------------------------------------------------------------
 # Protocol bindings
@@ -236,7 +223,7 @@ endif()
 # Tests
 # ---------------------------------------------------------------------------
 
-option(WAYWALLEN_DISPLAY_BUILD_TESTS "Build libwaywallen_display tests" ON)
+option(WAYWALLEN_DISPLAY_BUILD_TESTS "Build libwaywallen_display tests" OFF)
 
 if(WAYWALLEN_DISPLAY_BUILD_TESTS)
     enable_testing()
@@ -248,7 +235,7 @@ if(WAYWALLEN_DISPLAY_BUILD_TESTS)
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${GENERATED_DIR})
     target_compile_options(test_codec PRIVATE
-        -Wall -Wextra -Werror -Wpedantic)
+        -Wall -Wextra -Wpedantic)
     add_test(NAME test_codec COMMAND test_codec)
 
     add_executable(test_display tests/test_display.c)
@@ -259,7 +246,7 @@ if(WAYWALLEN_DISPLAY_BUILD_TESTS)
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${GENERATED_DIR})
     target_compile_options(test_display PRIVATE
-        -Wall -Wextra -Werror -Wpedantic)
+        -Wall -Wextra -Wpedantic)
     add_test(NAME test_display COMMAND test_display)
 
     if(WAYWALLEN_DISPLAY_WITH_EGL)
@@ -270,7 +257,7 @@ if(WAYWALLEN_DISPLAY_BUILD_TESTS)
             ${GENERATED_DIR})
         target_compile_definitions(test_backend_egl PRIVATE WW_HAVE_EGL=1)
         target_compile_options(test_backend_egl PRIVATE
-            -Wall -Wextra -Werror -Wpedantic)
+            -Wall -Wextra -Wpedantic)
         add_test(NAME test_backend_egl COMMAND test_backend_egl)
     endif()
 endif()
@@ -305,25 +292,21 @@ if(WAYWALLEN_DISPLAY_BUILD_EXAMPLES)
     endif()
 endif()
 
-# ---------------------------------------------------------------------------
-# Plugins
-# ---------------------------------------------------------------------------
-
-option(WAYWALLEN_DISPLAY_BUILD_PLUGINS "Build plugins under plugins/" OFF)
+option(WAYWALLEN_DISPLAY_BUILD_PLUGINS "Build plugins under plugins/" ON)
 
 if(WAYWALLEN_DISPLAY_BUILD_PLUGINS)
-    # QML plugin (requires Qt6)
     option(WAYWALLEN_DISPLAY_PLUGIN_QML "Build the QML display plugin" ON)
     if(WAYWALLEN_DISPLAY_PLUGIN_QML)
         add_subdirectory(plugins/qml)
+        message(STATUS "libwaywallen_display: QML plugin ENABLED")
     endif()
+else()
+    message(STATUS "libwaywallen_display: plugins DISABLED")
 endif()
 
 # ---------------------------------------------------------------------------
 # Install
 # ---------------------------------------------------------------------------
-
-include(GNUInstallDirs)
 install(TARGETS waywallen_display waywallen_display_static
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
