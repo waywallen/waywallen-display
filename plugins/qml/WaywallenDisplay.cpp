@@ -336,7 +336,7 @@ void WaywallenDisplay::setupDBusWatcher() {
     }
 
     // NameOwnerChanged — fires when the daemon claims or releases
-    // org.waywallen.Daemon. The "new owner is non-empty" case means the
+    // org.waywallen.waywallen.Daemon. The "new owner is non-empty" case means the
     // daemon just (re)appeared; reconnect now instead of waiting for the
     // local backoff timer.
     const bool okNoc = bus.connect(
@@ -356,14 +356,14 @@ void WaywallenDisplay::setupDBusWatcher() {
     // server is fully serving requests, and Ready is emitted only once
     // the daemon is actually ready. Either trigger does the same thing.
     const bool okReady = bus.connect(
-        QStringLiteral("org.waywallen.Daemon"),
-        QStringLiteral("/org/waywallen/Daemon"),
-        QStringLiteral("org.waywallen.Daemon1"),
+        QStringLiteral("org.waywallen.waywallen.Daemon"),
+        QStringLiteral("/org/waywallen/waywallen/Daemon"),
+        QStringLiteral("org.waywallen.waywallen.Daemon1"),
         QStringLiteral("Ready"),
         this,
         SLOT(onDaemonReadySignal()));
     if (!okReady) {
-        qCWarning(lcWD, "failed to subscribe to org.waywallen.Daemon Ready");
+        qCWarning(lcWD, "failed to subscribe to org.waywallen.waywallen.Daemon Ready");
     }
 
     qCInfo(lcWD, "DBus reconnect fast-path armed");
@@ -373,7 +373,7 @@ void WaywallenDisplay::onDaemonNameOwnerChanged(const QString &name,
                                                 const QString &oldOwner,
                                                 const QString &newOwner) {
     Q_UNUSED(oldOwner);
-    if (name != QStringLiteral("org.waywallen.Daemon")) return;
+    if (name != QStringLiteral("org.waywallen.waywallen.Daemon")) return;
     if (newOwner.isEmpty()) return;  // daemon vanished — UDS disconnect handles it
     qCInfo(lcWD, "daemon appeared on session bus — requesting reconnect");
     requestReconnect();
@@ -589,7 +589,7 @@ void WaywallenDisplay::handleDisconnect(int errCode, const char *msg) {
     setConnState(Disconnected);
     setStreamState(Inactive);
     update();
-    // No retry timer — wait for org.waywallen.Daemon NameOwnerChanged
+    // No retry timer — wait for org.waywallen.waywallen.Daemon NameOwnerChanged
     // / Ready signals to drive the next attempt (see setupDBusWatcher).
 }
 
