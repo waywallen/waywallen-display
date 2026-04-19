@@ -17,7 +17,7 @@ cmake_minimum_required(VERSION 3.16)
 project(waywallen_display
     VERSION 0.1.0
     LANGUAGES C
-    DESCRIPTION "C consumer library for the waywallen-display-v1 protocol")
+    DESCRIPTION "C library for the waywallen-display-v1 protocol")
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -29,62 +29,78 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 # ---------------------------------------------------------------------------
-# wayproto-gen: locate or build
+# Protocol bindings
+#
+# The C bindings for waywallen-display-v1 are pre-generated and checked
+# in under `src/generated/`, so an end-user build needs neither cargo
+# nor the wayproto-gen tool from the sibling Rust project.
+#
+# Protocol maintainers who change `waywallen_display_v1.xml` should
+# configure with `-DWAYWALLEN_DISPLAY_REGEN_PROTO=ON` to rewrite the
+# checked-in files; that path still uses the sibling project's
+# wayproto-gen (optionally override with `-DWAYPROTO_GEN=/path/to/bin`).
 # ---------------------------------------------------------------------------
 
-set(WAYPROTO_GEN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../waywallen/tools/wayproto-gen")
-set(PROTOCOL_XML "${CMAKE_CURRENT_SOURCE_DIR}/../waywallen/protocol/waywallen_display_v1.xml")
-
-if(NOT EXISTS "${PROTOCOL_XML}")
-    message(FATAL_ERROR "waywallen-display-v1.xml not found at ${PROTOCOL_XML}")
-endif()
-
-set(WAYPROTO_GEN "" CACHE FILEPATH "Path to pre-built wayproto-gen binary (optional)")
-
-if(NOT WAYPROTO_GEN)
-    set(_candidate "${WAYPROTO_GEN_DIR}/target/debug/wayproto-gen")
-    if(NOT EXISTS "${_candidate}")
-        message(STATUS "wayproto-gen binary not found; building via cargo...")
-        find_program(CARGO cargo REQUIRED)
-        execute_process(
-            COMMAND ${CARGO} build
-            WORKING_DIRECTORY ${WAYPROTO_GEN_DIR}
-            RESULT_VARIABLE _cargo_rc
-            OUTPUT_VARIABLE _cargo_stdout
-            ERROR_VARIABLE _cargo_stderr)
-        if(NOT _cargo_rc EQUAL 0)
-            message(FATAL_ERROR
-                "cargo build wayproto-gen failed (rc=${_cargo_rc})\n"
-                "stdout:\n${_cargo_stdout}\n"
-                "stderr:\n${_cargo_stderr}")
-        endif()
-    endif()
-    set(WAYPROTO_GEN "${_candidate}")
-endif()
-
-message(STATUS "Using wayproto-gen: ${WAYPROTO_GEN}")
-
-# ---------------------------------------------------------------------------
-# Code generation
-# ---------------------------------------------------------------------------
-
-set(GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+set(GENERATED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/generated")
 set(GENERATED_H   "${GENERATED_DIR}/ww_proto.h")
 set(GENERATED_C   "${GENERATED_DIR}/ww_proto.c")
 
-add_custom_command(
-    OUTPUT ${GENERATED_H} ${GENERATED_C}
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${GENERATED_DIR}
-    COMMAND ${WAYPROTO_GEN}
-        --in ${PROTOCOL_XML}
-        --out-c-header ${GENERATED_H}
-        --out-c-source ${GENERATED_C}
-    DEPENDS ${PROTOCOL_XML} ${WAYPROTO_GEN}
-    COMMENT "Generating waywallen-display-v1 C bindings"
-    VERBATIM)
+if(NOT EXISTS "${GENERATED_H}" OR NOT EXISTS "${GENERATED_C}")
+    message(FATAL_ERROR
+        "Pre-generated protocol bindings missing under ${GENERATED_DIR}. "
+        "Run with -DWAYWALLEN_DISPLAY_REGEN_PROTO=ON from a checkout that "
+        "also contains ../waywallen/tools/wayproto-gen.")
+endif()
 
-add_custom_target(waywallen_display_proto_gen
-    DEPENDS ${GENERATED_H} ${GENERATED_C})
+option(WAYWALLEN_DISPLAY_REGEN_PROTO
+    "Regenerate src/generated/ww_proto.{h,c} from the XML (maintainer only)"
+    OFF)
+
+if(WAYWALLEN_DISPLAY_REGEN_PROTO)
+    set(WAYPROTO_GEN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../waywallen/tools/wayproto-gen")
+    set(PROTOCOL_XML "${CMAKE_CURRENT_SOURCE_DIR}/../waywallen/protocol/waywallen_display_v1.xml")
+
+    if(NOT EXISTS "${PROTOCOL_XML}")
+        message(FATAL_ERROR "waywallen-display-v1.xml not found at ${PROTOCOL_XML}")
+    endif()
+
+    set(WAYPROTO_GEN "" CACHE FILEPATH "Path to pre-built wayproto-gen binary (optional)")
+
+    if(NOT WAYPROTO_GEN)
+        set(_candidate "${WAYPROTO_GEN_DIR}/target/debug/wayproto-gen")
+        if(NOT EXISTS "${_candidate}")
+            message(STATUS "wayproto-gen binary not found; building via cargo...")
+            find_program(CARGO cargo REQUIRED)
+            execute_process(
+                COMMAND ${CARGO} build
+                WORKING_DIRECTORY ${WAYPROTO_GEN_DIR}
+                RESULT_VARIABLE _cargo_rc
+                OUTPUT_VARIABLE _cargo_stdout
+                ERROR_VARIABLE _cargo_stderr)
+            if(NOT _cargo_rc EQUAL 0)
+                message(FATAL_ERROR
+                    "cargo build wayproto-gen failed (rc=${_cargo_rc})\n"
+                    "stdout:\n${_cargo_stdout}\n"
+                    "stderr:\n${_cargo_stderr}")
+            endif()
+        endif()
+        set(WAYPROTO_GEN "${_candidate}")
+    endif()
+
+    message(STATUS "Regenerating protocol bindings with: ${WAYPROTO_GEN}")
+
+    add_custom_target(waywallen_display_proto_gen ALL
+        COMMAND ${WAYPROTO_GEN}
+            --in ${PROTOCOL_XML}
+            --out-c-header ${GENERATED_H}
+            --out-c-source ${GENERATED_C}
+        BYPRODUCTS ${GENERATED_H} ${GENERATED_C}
+        DEPENDS ${PROTOCOL_XML}
+        COMMENT "Regenerating waywallen-display-v1 C bindings"
+        VERBATIM)
+else()
+    add_custom_target(waywallen_display_proto_gen)
+endif()
 
 # ---------------------------------------------------------------------------
 # Optional: EGL backend
