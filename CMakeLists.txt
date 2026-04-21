@@ -266,7 +266,7 @@ endif()
 # Examples
 # ---------------------------------------------------------------------------
 
-option(WAYWALLEN_DISPLAY_BUILD_EXAMPLES "Build libwaywallen_display examples" ON)
+option(WAYWALLEN_DISPLAY_BUILD_EXAMPLES "Build libwaywallen_display examples" OFF)
 
 if(WAYWALLEN_DISPLAY_BUILD_EXAMPLES)
     add_executable(minimal_headless examples/minimal_headless.c)
@@ -292,16 +292,16 @@ if(WAYWALLEN_DISPLAY_BUILD_EXAMPLES)
     endif()
 endif()
 
-option(WAYWALLEN_DISPLAY_BUILD_PLUGINS "Build plugins under plugins/" ON)
+option(WAYWALLEN_DISPLAY_PLUGIN_QML "Build the QML display plugin" OFF)
+if(WAYWALLEN_DISPLAY_PLUGIN_QML)
+    add_subdirectory(plugins/qml)
+    message(STATUS "libwaywallen_display: QML plugin ENABLED")
+endif()
 
-if(WAYWALLEN_DISPLAY_BUILD_PLUGINS)
-    option(WAYWALLEN_DISPLAY_PLUGIN_QML "Build the QML display plugin" ON)
-    if(WAYWALLEN_DISPLAY_PLUGIN_QML)
-        add_subdirectory(plugins/qml)
-        message(STATUS "libwaywallen_display: QML plugin ENABLED")
-    endif()
-else()
-    message(STATUS "libwaywallen_display: plugins DISABLED")
+option(WAYWALLEN_DISPLAY_PLUGIN_GOBJECT "Build the GObject Introspection plugin" OFF)
+if(WAYWALLEN_DISPLAY_PLUGIN_GOBJECT)
+    add_subdirectory(plugins/gobject)
+    message(STATUS "libwaywallen_display: GObject plugin ENABLED")
 endif()
 
 # ---------------------------------------------------------------------------
