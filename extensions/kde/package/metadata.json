@@ -1,0 +1,18 @@
+{
+    "KPackageStructure": "Plasma/Wallpaper",
+    "KPlugin": {
+        "Authors": [
+            {
+                "Name": "Waywallen Contributors"
+            }
+        ],
+        "Category": "",
+        "Description": "Display-side plugin for the waywallen daemon",
+        "Icon": "preferences-desktop-wallpaper",
+        "Id": "org.waywallen.kde",
+        "License": "GPL-2.0-or-later",
+        "Name": "Waywallen",
+        "Website": "https://github.com/waywallen"
+    },
+    "X-KDE-ParentApp": "org.kde.plasmashell"
+}
