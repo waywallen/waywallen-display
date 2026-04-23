@@ -27,11 +27,9 @@ socket path: $XDG_RUNTIME_DIR/waywallen/display.sock
 | Qt 6 | optional | QML plugin |
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -DWAYWALLEN_DISPLAY_PLUGIN_QML=ON
 cmake --build build
-
-# with qml
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DWAYWALLEN_DISPLAY_PLUGIN_QML=ON
+sudo cmake --install build
 ```
 
 ## Extensions
