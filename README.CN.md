@@ -31,6 +31,13 @@ cmake --build build
 sudo cmake --install build
 ```
 
+> [!TIP]
+> KDE Plasma 用户安装/升级 QML 插件后需要重启 shell 才会被识别：
+>
+> ```sh
+> systemctl --user restart plasma-plasmashell.service
+> ```
+
 ## 扩展
 | 扩展 | 说明 |
 |------------|----------|

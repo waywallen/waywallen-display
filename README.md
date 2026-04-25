@@ -32,6 +32,13 @@ cmake --build build
 sudo cmake --install build
 ```
 
+> [!TIP]
+> On KDE Plasma, restart the shell so the freshly installed QML plugin is picked up:
+>
+> ```sh
+> systemctl --user restart plasma-plasmashell.service
+> ```
+
 ## Extensions
 | Extension | Notes |
 |------------|----------|
