@@ -38,11 +38,14 @@ jobs:
           echo "path=$path" >> "$GITHUB_OUTPUT"
           echo "name=$(basename "$path")" >> "$GITHUB_OUTPUT"
 
+      # archive: false (v7+) skips the wrapper-zip that upload-artifact
+      # otherwise puts around uploaded files, so the kpackage zip is
+      # served as-is. The artifact name is taken from the file name.
       - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: ${{ steps.zip.outputs.name }}
           path: ${{ steps.zip.outputs.path }}
+          archive: false
 
       - name: Attach zip to release
         if: github.event_name == 'release'
