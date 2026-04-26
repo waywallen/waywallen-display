@@ -510,43 +510,6 @@ uint32_t ww_req_update_display_expected_fds(const ww_req_update_display_t *m) {
     return 0;
 }
 
-int ww_req_buffer_release_encode(const ww_req_buffer_release_t *m, ww_buf_t *out) {
-    int rc;
-    (void)m;
-    if ((rc = w_u64(out, m->buffer_generation))) return rc;
-    if ((rc = w_u32(out, m->buffer_index))) return rc;
-    if ((rc = w_u64(out, m->seq))) return rc;
-    return WW_OK;
-}
-
-int ww_req_buffer_release_decode(const uint8_t *buf, size_t len, ww_req_buffer_release_t *out) {
-    memset(out, 0, sizeof(*out));
-    ww_rd_t r = { buf, 0, len };
-    int rc;
-    if ((rc = rd_u64(&r, &out->buffer_generation))) goto fail;
-    if ((rc = rd_u32(&r, &out->buffer_index))) goto fail;
-    if ((rc = rd_u64(&r, &out->seq))) goto fail;
-    if (r.pos != r.len) {
-        int rc2 = WW_ERR_TRAILING;
-        (void)rc2;
-        ww_req_buffer_release_free(out);
-        return WW_ERR_TRAILING;
-    }
-    return WW_OK;
-fail:
-    ww_req_buffer_release_free(out);
-    return rc;
-}
-
-void ww_req_buffer_release_free(ww_req_buffer_release_t *m) {
-    (void)m;
-}
-
-uint32_t ww_req_buffer_release_expected_fds(const ww_req_buffer_release_t *m) {
-    (void)m;
-    return 0;
-}
-
 int ww_req_bye_encode(const ww_req_bye_t *m, ww_buf_t *out) {
     (void)m; (void)out;
     return WW_OK;
@@ -774,7 +737,7 @@ void ww_evt_frame_ready_free(ww_evt_frame_ready_t *m) {
 
 uint32_t ww_evt_frame_ready_expected_fds(const ww_evt_frame_ready_t *m) {
     (void)m;
-    return 1;
+    return 2;
 }
 
 int ww_evt_unbind_encode(const ww_evt_unbind_t *m, ww_buf_t *out) {

@@ -200,11 +200,19 @@ typedef struct waywallen_config {
 typedef struct waywallen_frame {
     uint32_t buffer_index;
     uint64_t seq;
-    /* Phase 2: always NULL. The library wait-imports nothing and
-     * just closes the incoming acquire sync_fd. When the Vulkan
-     * backend lands this will carry the imported `VkSemaphore` that
-     * the host must attach to its next `VkQueueSubmit`'s wait list. */
+    /* Imported acquire semaphore (VkSemaphore). NULL if the library
+     * could not import (e.g. EGL backend, or VK import failed); the
+     * acquire sync_fd was closed in that case. The host must attach
+     * this to its next `VkQueueSubmit`'s wait list. */
     void *vk_acquire_semaphore;
+    /* Raw drm_syncobj fd (binary, unsignaled). Ownership transfers
+     * to the host: the host MUST signal it from its release GPU work
+     * (typically via `vkImportSemaphoreFdKHR(OPAQUE_FD)` on a binary
+     * semaphore signaled by the consume submit, then `close(2)`).
+     * If the host cannot signal it, `close(2)` it anyway — the daemon
+     * will time out the corresponding frame. -1 means the library
+     * could not extract a release_syncobj fd from this frame_ready. */
+    int release_syncobj_fd;
 } waywallen_frame_t;
 
 /* -------------------------------------------------------------------------
@@ -337,13 +345,36 @@ int waywallen_display_get_fd(waywallen_display_t *d);
 int waywallen_display_dispatch(waywallen_display_t *d);
 
 /*
- * Send a buffer_release for the given `(buffer_index, seq)`. Phase 2
- * is synchronous: the caller must guarantee its GPU has finished
- * reading the buffer before calling this function.
+ * DEPRECATED — v1 dropped the BufferRelease wire request. Release is
+ * now signaled by the host flipping the `release_syncobj_fd` that
+ * arrived on the matching frame_ready. This function is a no-op kept
+ * for ABI compatibility during the transition; new hosts should not
+ * call it.
  */
 int waywallen_display_release_frame(waywallen_display_t *d,
                                     uint32_t buffer_index,
                                     uint64_t seq);
+
+/*
+ * Convenience: SIGNAL the binary drm_syncobj at `fd` and close it.
+ *
+ * Use this from hosts that don't own a real GPU release fence
+ * (e.g. blit-only consumers, headless probes) once they've finished
+ * reading the dma-buf for the matching frame. The daemon's reaper is
+ * waiting on this fd; signaling it lets the producer reuse the
+ * buffer slot.
+ *
+ * Hosts with a Vulkan release fence should NOT call this — instead
+ * import `release_syncobj_fd` as a binary VkSemaphore via
+ * `vkImportSemaphoreFdKHR(VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT)`
+ * and add it to the signal-semaphore list of the consume submit.
+ *
+ * `fd` ownership transfers in: closed on every return path.
+ * Returns 0 on success or a negative `waywallen_err_t` on failure
+ * (DRM render node missing, ioctl error). On error the fd has still
+ * been closed.
+ */
+int waywallen_display_signal_release_syncobj(int fd);
 
 void waywallen_display_disconnect(waywallen_display_t *d);
 

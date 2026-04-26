@@ -92,7 +92,6 @@ typedef enum ww_request_op {
     WW_REQ_HELLO = 1,
     WW_REQ_REGISTER_DISPLAY = 2,
     WW_REQ_UPDATE_DISPLAY = 3,
-    WW_REQ_BUFFER_RELEASE = 4,
     WW_REQ_BYE = 5,
 } ww_request_op_t;
 
@@ -127,12 +126,6 @@ typedef struct ww_req_update_display_t {
     uint32_t height;
     ww_kv_list_t properties;
 } ww_req_update_display_t;
-
-typedef struct ww_req_buffer_release_t {
-    uint64_t buffer_generation;
-    uint32_t buffer_index;
-    uint64_t seq;
-} ww_req_buffer_release_t;
 
 typedef struct ww_req_bye_t {
     int _empty; /* C forbids empty structs */
@@ -207,11 +200,6 @@ int  ww_req_update_display_encode(const ww_req_update_display_t *m, ww_buf_t *ou
 int  ww_req_update_display_decode(const uint8_t *buf, size_t len, ww_req_update_display_t *out);
 void ww_req_update_display_free(ww_req_update_display_t *m);
 uint32_t ww_req_update_display_expected_fds(const ww_req_update_display_t *m);
-
-int  ww_req_buffer_release_encode(const ww_req_buffer_release_t *m, ww_buf_t *out);
-int  ww_req_buffer_release_decode(const uint8_t *buf, size_t len, ww_req_buffer_release_t *out);
-void ww_req_buffer_release_free(ww_req_buffer_release_t *m);
-uint32_t ww_req_buffer_release_expected_fds(const ww_req_buffer_release_t *m);
 
 int  ww_req_bye_encode(const ww_req_bye_t *m, ww_buf_t *out);
 int  ww_req_bye_decode(const uint8_t *buf, size_t len, ww_req_bye_t *out);

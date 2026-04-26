@@ -33,6 +33,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -226,9 +227,9 @@ static int enc_register(const void *m, ww_buf_t *out) {
 static int enc_update(const void *m, ww_buf_t *out) {
     return ww_req_update_display_encode((const ww_req_update_display_t *)m, out);
 }
-static int enc_release(const void *m, ww_buf_t *out) {
-    return ww_req_buffer_release_encode((const ww_req_buffer_release_t *)m, out);
-}
+/* enc_release was removed when v1 dropped the BufferRelease request.
+ * Release is now signaled by the host on the per-frame
+ * release_syncobj fd that arrives with frame_ready. */
 static int enc_bye(const void *m, ww_buf_t *out) {
     return ww_req_bye_encode((const ww_req_bye_t *)m, out);
 }
@@ -1146,15 +1147,19 @@ static int handle_frame_ready(waywallen_display_t *d,
         fire_disconnected(d, WAYWALLEN_ERR_PROTO, "decode frame_ready");
         return WAYWALLEN_ERR_PROTO;
     }
-    if (n_fds != 1) {
+    /* v1: 2 fds — [0] acquire sync_fd, [1] release_syncobj fd. */
+    if (n_fds != 2) {
         close_all_fds(fd_buf, n_fds);
         ww_evt_frame_ready_free(&fr);
         fire_disconnected(d, WAYWALLEN_ERR_PROTO,
-                          "frame_ready expected 1 sync_fd");
+                          "frame_ready expected 2 fds");
         return WAYWALLEN_ERR_PROTO;
     }
+    int acquire_fd = fd_buf[0];
+    int release_syncobj_fd = fd_buf[1];
     if (d->stream != WW_STREAM_ACTIVE) {
-        close_all_fds(fd_buf, n_fds);
+        close(acquire_fd);
+        close(release_syncobj_fd);
         ww_evt_frame_ready_free(&fr);
         fire_disconnected(d, WAYWALLEN_ERR_PROTO,
                           "frame_ready in wrong state");
@@ -1162,7 +1167,8 @@ static int handle_frame_ready(waywallen_display_t *d,
     }
     /* Drop stale-generation frames silently. */
     if (fr.buffer_generation != d->current_buffer_generation) {
-        close_all_fds(fd_buf, n_fds);
+        close(acquire_fd);
+        close(release_syncobj_fd);
         ww_evt_frame_ready_free(&fr);
         return WAYWALLEN_OK;
     }
@@ -1174,9 +1180,9 @@ static int handle_frame_ready(waywallen_display_t *d,
     if (!fd_handled && d->backend == WAYWALLEN_BACKEND_EGL
         && d->egl_backend.loaded) {
         int rc = ww_egl_wait_sync_fd(&d->egl_backend, d->egl.egl_display,
-                                     fd_buf[0]);
+                                     acquire_fd);
         if (rc != 0) {
-            close(fd_buf[0]);
+            close(acquire_fd);
         }
         fd_handled = 1;
     }
@@ -1188,30 +1194,37 @@ static int handle_frame_ready(waywallen_display_t *d,
         if (slot < d->vk_import_count && d->vk_semaphores[slot] != VK_NULL_HANDLE) {
             int rc = ww_vk_import_sync_fd(&d->vk_backend,
                                           d->vk_semaphores[slot],
-                                          fd_buf[0]);
+                                          acquire_fd);
             if (rc == 0) {
                 acquire_semaphore = (void *)d->vk_semaphores[slot];
             } else {
-                close(fd_buf[0]);
+                close(acquire_fd);
             }
         } else {
-            close(fd_buf[0]);
+            close(acquire_fd);
         }
         fd_handled = 1;
     }
 #endif
     if (!fd_handled) {
-        close_all_fds(fd_buf, n_fds);
+        close(acquire_fd);
     }
 
     waywallen_frame_t frame;
     frame.buffer_index = fr.buffer_index;
     frame.seq = fr.seq;
     frame.vk_acquire_semaphore = acquire_semaphore;
+    /* Hand the raw release_syncobj fd to the host. Ownership transfers:
+     * the host MUST signal it from its release GPU work and then close. */
+    frame.release_syncobj_fd = release_syncobj_fd;
     ww_evt_frame_ready_free(&fr);
 
     if (d->cb.on_frame_ready) {
         d->cb.on_frame_ready(d->cb.user_data, &frame);
+    } else {
+        /* No callback to consume the release fd: close it so the daemon
+         * eventually times out the frame instead of leaking the fd. */
+        close(release_syncobj_fd);
     }
     return WAYWALLEN_OK;
 }
@@ -1299,17 +1312,103 @@ int waywallen_display_dispatch(waywallen_display_t *d) {
 int waywallen_display_release_frame(waywallen_display_t *d,
                                     uint32_t buffer_index,
                                     uint64_t seq) {
+    /* DEPRECATED — v1 dropped the BufferRelease wire request. Release
+     * is now signaled via the per-frame `release_syncobj_fd` on the
+     * frame_ready callback. This stub remains so existing callers
+     * link, but it does not communicate with the daemon. */
+    (void)buffer_index;
+    (void)seq;
     if (!d) return WAYWALLEN_ERR_INVAL;
-    if (d->stream != WW_STREAM_ACTIVE) return WAYWALLEN_ERR_STATE;
-    ww_req_buffer_release_t rel;
-    memset(&rel, 0, sizeof(rel));
-    rel.buffer_generation = d->current_buffer_generation;
-    rel.buffer_index = buffer_index;
-    rel.seq = seq;
-    int rc = send_request_msg(d, WW_REQ_BUFFER_RELEASE, enc_release, &rel);
-    if (rc != WAYWALLEN_OK) {
-        fire_disconnected(d, rc, "send buffer_release");
+    return WAYWALLEN_OK;
+}
+
+/* ------------------------------------------------------------------ */
+/*  CPU-side release_syncobj signal helper                            */
+/* ------------------------------------------------------------------ */
+
+/* Minimal redefinitions of the kernel drm_syncobj uAPI so we don't
+ * pull <libdrm/drm.h> or <drm/drm.h> as a build dependency on every
+ * consumer host. These match the layouts in <linux/drm.h>. */
+struct ww_drm_syncobj_handle {
+    uint32_t handle;
+    uint32_t flags;
+    int32_t  fd;
+    uint32_t pad;
+};
+struct ww_drm_syncobj_destroy {
+    uint32_t handle;
+    uint32_t pad;
+};
+struct ww_drm_syncobj_array {
+    uint64_t handles;
+    uint32_t count_handles;
+    uint32_t pad;
+};
+
+#ifndef DRM_IOCTL_BASE
+#define DRM_IOCTL_BASE 'd'
+#endif
+#define WW_DRM_IOCTL_SYNCOBJ_DESTROY \
+    _IOWR(DRM_IOCTL_BASE, 0xC0, struct ww_drm_syncobj_destroy)
+#define WW_DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE \
+    _IOWR(DRM_IOCTL_BASE, 0xC2, struct ww_drm_syncobj_handle)
+#define WW_DRM_IOCTL_SYNCOBJ_SIGNAL \
+    _IOWR(DRM_IOCTL_BASE, 0xC5, struct ww_drm_syncobj_array)
+
+/* Cached render-node fd. Opened lazily on first call; never closed
+ * (process-lifetime). The kernel allows many concurrent open()s and
+ * the file is small. */
+static int ww_drm_node_fd(void) {
+    static int cached = -1;
+    if (cached >= 0) return cached;
+    for (int minor = 128; minor <= 192; ++minor) {
+        char path[64];
+        if (snprintf(path, sizeof(path), "/dev/dri/renderD%d", minor) <= 0) continue;
+        int fd = open(path, O_RDWR | O_CLOEXEC);
+        if (fd >= 0) {
+            cached = fd;
+            return cached;
+        }
     }
+    return -1;
+}
+
+int waywallen_display_signal_release_syncobj(int fd) {
+    if (fd < 0) return WAYWALLEN_ERR_INVAL;
+    int drm_fd = ww_drm_node_fd();
+    if (drm_fd < 0) {
+        close(fd);
+        return WAYWALLEN_ERR_IO;
+    }
+    /* Import fd → handle on this process's DRM device. */
+    struct ww_drm_syncobj_handle imp = {
+        .handle = 0,
+        .flags  = 0,
+        .fd     = fd,
+        .pad    = 0,
+    };
+    if (ioctl(drm_fd, WW_DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE, &imp) != 0) {
+        close(fd);
+        return WAYWALLEN_ERR_IO;
+    }
+    int rc = WAYWALLEN_OK;
+    /* Signal the handle. */
+    uint32_t handles[1] = { imp.handle };
+    struct ww_drm_syncobj_array sig = {
+        .handles = (uintptr_t)handles,
+        .count_handles = 1,
+        .pad = 0,
+    };
+    if (ioctl(drm_fd, WW_DRM_IOCTL_SYNCOBJ_SIGNAL, &sig) != 0) {
+        rc = WAYWALLEN_ERR_IO;
+    }
+    /* Drop the handle on this device's side. The kernel keeps the
+     * syncobj alive as long as any other fd or handle still refs it
+     * (the daemon's handle, in our case — that's what the reaper
+     * waits on). */
+    struct ww_drm_syncobj_destroy dst = { .handle = imp.handle, .pad = 0 };
+    (void)ioctl(drm_fd, WW_DRM_IOCTL_SYNCOBJ_DESTROY, &dst);
+    close(fd);
     return rc;
 }
 
