@@ -10,9 +10,11 @@
  *   VK_EXT_image_drm_format_modifier
  *   VK_KHR_external_semaphore_fd
  *
- * All Vulkan entry points are resolved at runtime via the host-provided
- * vkGetInstanceProcAddr; the library never links libvulkan.so directly.
- * Compiled only when WW_HAVE_VULKAN is defined.
+ * All Vulkan entry points are resolved at runtime: the loader prefers a
+ * host-provided vkGetInstanceProcAddr callback when available, and
+ * otherwise falls back to dlopen("libvulkan.so.1"). The library never
+ * links libvulkan.so directly. Compiled only when WW_HAVE_VULKAN is
+ * defined.
  */
 
 #ifndef WAYWALLEN_DISPLAY_BACKEND_VULKAN_H

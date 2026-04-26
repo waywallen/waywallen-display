@@ -15,6 +15,7 @@ endif()
 
 include(GNUInstallDirs)
 
+
 # ---------------------------------------------------------------------------
 # Protocol bindings
 #
@@ -95,35 +96,31 @@ endif()
 
 find_package(PkgConfig QUIET)
 
-set(_egl_found FALSE)
-if(PkgConfig_FOUND)
-    pkg_check_modules(EGL IMPORTED_TARGET egl)
-    pkg_check_modules(GLESV2 IMPORTED_TARGET glesv2)
-    if(EGL_FOUND AND GLESV2_FOUND)
-        set(_egl_found TRUE)
-    endif()
-endif()
-
 option(WAYWALLEN_DISPLAY_WITH_EGL
     "Build the EGL backend (DMA-BUF import via EGL_EXT_image_dma_buf_import)"
-    ${_egl_found})
+    ON)
 
 set(_backend_sources "")
 set(_backend_private_libs "")
+set(_backend_include_dirs "")
 set(_backend_defines "")
 
 if(WAYWALLEN_DISPLAY_WITH_EGL)
-    if(NOT _egl_found)
+    if(NOT PkgConfig_FOUND)
         message(FATAL_ERROR
-            "WAYWALLEN_DISPLAY_WITH_EGL=ON but egl/glesv2 pkg-config entries not found")
+            "WAYWALLEN_DISPLAY_WITH_EGL=ON but PkgConfig is required to locate egl/glesv2 headers")
     endif()
+    pkg_check_modules(EGL REQUIRED IMPORTED_TARGET egl)
+    pkg_check_modules(GLESV2 REQUIRED IMPORTED_TARGET glesv2)
     list(APPEND _backend_sources src/backend_egl.c)
-    list(APPEND _backend_private_libs
-        PkgConfig::EGL
-        PkgConfig::GLESV2
-        ${CMAKE_DL_LIBS})
+    # Headers only: the backend resolves libEGL.so.1 / libGLESv2.so.2
+    # via dlopen at runtime so libwaywallen_display never pulls them
+    # into the consumer's link graph.
+    list(APPEND _backend_include_dirs
+        ${EGL_INCLUDE_DIRS}
+        ${GLESV2_INCLUDE_DIRS})
     list(APPEND _backend_defines WW_HAVE_EGL=1)
-    message(STATUS "libwaywallen_display: EGL backend ENABLED")
+    message(STATUS "libwaywallen_display: EGL backend ENABLED (dlopen at runtime)")
 else()
     message(STATUS "libwaywallen_display: EGL backend DISABLED (stub NONE only)")
 endif()
@@ -147,11 +144,17 @@ if(WAYWALLEN_DISPLAY_WITH_VULKAN)
             "WAYWALLEN_DISPLAY_WITH_VULKAN=ON but vulkan pkg-config not found")
     endif()
     list(APPEND _backend_sources src/backend_vulkan.c)
-    list(APPEND _backend_private_libs PkgConfig::VULKAN)
+    # Headers only: backend resolves libvulkan.so.1 via dlopen at runtime.
+    list(APPEND _backend_include_dirs ${VULKAN_INCLUDE_DIRS})
     list(APPEND _backend_defines WW_HAVE_VULKAN=1)
-    message(STATUS "libwaywallen_display: Vulkan backend ENABLED")
+    message(STATUS "libwaywallen_display: Vulkan backend ENABLED (dlopen at runtime)")
 else()
     message(STATUS "libwaywallen_display: Vulkan backend DISABLED")
+endif()
+
+# Either backend needs libdl for dlopen/dlsym.
+if(WAYWALLEN_DISPLAY_WITH_EGL OR WAYWALLEN_DISPLAY_WITH_VULKAN)
+    list(APPEND _backend_private_libs ${CMAKE_DL_LIBS})
 endif()
 
 # ---------------------------------------------------------------------------
@@ -176,7 +179,8 @@ target_include_directories(waywallen_display
         $<INSTALL_INTERFACE:include>
     PRIVATE
         ${GENERATED_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${_backend_include_dirs})
 
 target_compile_options(waywallen_display PRIVATE
     -Wall
@@ -206,14 +210,18 @@ target_include_directories(waywallen_display_static
         $<INSTALL_INTERFACE:include>
     PRIVATE
         ${GENERATED_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${_backend_include_dirs})
 target_compile_options(waywallen_display_static PRIVATE
     -Wall
     -Wextra
     -Werror
     -Wpedantic
     -Wconversion
-    -Wsign-conversion)
+    -Wsign-conversion
+    PUBLIC
+    -include ${CMAKE_CURRENT_SOURCE_DIR}/glibc-2.17.h
+    )
 target_compile_definitions(waywallen_display_static PRIVATE ${_backend_defines})
 if(_backend_private_libs)
     target_link_libraries(waywallen_display_static PUBLIC ${_backend_private_libs})

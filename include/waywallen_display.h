@@ -152,7 +152,9 @@ typedef struct waywallen_vk_ctx {
     void *physical_device;                    /* VkPhysicalDevice */
     void *device;                             /* VkDevice */
     uint32_t queue_family_index;
-    /* PFN_vkGetInstanceProcAddr; required, never NULL */
+    /* PFN_vkGetInstanceProcAddr. May be NULL — the backend will then
+     * dlopen("libvulkan.so.1") and resolve vkGetInstanceProcAddr from
+     * there. The library never links libvulkan.so directly. */
     void *(*vk_get_instance_proc_addr)(void *instance, const char *name);
 } waywallen_vk_ctx_t;
 

@@ -29,30 +29,26 @@ qt_add_qml_module(waywallen-display-qml
 # When built as a subdirectory of the top-level waywallen_display project,
 # the CMake target is already available — link it directly.
 # Otherwise fall back to a pre-built static archive.
-if(TARGET waywallen_display_static)
-    target_link_libraries(waywallen-display-qml PRIVATE
-        Qt6::Quick
-        Qt6::Gui
-        Qt6::DBus
-        waywallen_display_static)
-else()
-    set(WAYWALLEN_DISPLAY_BUILD_DIR "${WAYWALLEN_DISPLAY_DIR}/build"
-        CACHE PATH "Build directory of libwaywallen_display")
-    target_link_libraries(waywallen-display-qml PRIVATE
-        Qt6::Quick
-        Qt6::Gui
-        Qt6::DBus
-        ${WAYWALLEN_DISPLAY_BUILD_DIR}/libwaywallen_display.a)
-    target_include_directories(waywallen-display-qml PRIVATE
-        ${WAYWALLEN_DISPLAY_DIR}/include)
-endif()
-
+target_link_libraries(waywallen-display-qml PRIVATE
+    Qt6::Quick
+    Qt6::Gui
+    Qt6::DBus
+    waywallen_display_static)
+        
 if(Vulkan_FOUND)
     target_link_libraries(waywallen-display-qml PRIVATE Vulkan::Headers)
 endif()
 
 target_compile_options(waywallen-display-qml PRIVATE
     -Wall -Wextra -Wpedantic)
+
+# Strip libGLX/libOpenGL/libEGL etc. from NEEDED entries when the
+# plugin doesn't actually reference their symbols. Qt6Gui's link
+# interface drags these in unconditionally; --as-needed lets the
+# linker drop the ones we don't use, so the resulting .so doesn't
+# pin libGLX.so.0 / libOpenGL.so.0 into the consumer's load graph.
+target_link_options(waywallen-display-qml PRIVATE
+    -Wl,--as-needed)
 
 # Install the plugin + qmldir into the Qt QML import tree.
 set(QML_INSTALL_DIR "${CMAKE_INSTALL_FULL_LIBDIR}/qt6/qml"

@@ -21,11 +21,17 @@ WallpaperItem {
         color: root.configuration.ClearColor
     }
 
+    readonly property var surfaceSources: [
+        "WaywallenSurface.qml",
+        "WaywallenSurfaceEmbed.qml"
+    ]
+    property int surfaceSourceIndex: 0
+
     Loader {
         id: surfaceLoader
         anchors.fill: parent
         asynchronous: false
-        source: "WaywallenSurface.qml"
+        source: root.surfaceSources[root.surfaceSourceIndex]
 
         onLoaded: {
             item.displayNameBinding    = Qt.binding(() =>
@@ -43,6 +49,7 @@ WallpaperItem {
         anchors.centerIn: parent
         width: Math.min(parent.width - 80, 720)
         active: surfaceLoader.status === Loader.Error
+                && root.surfaceSourceIndex >= root.surfaceSources.length - 1
         visible: active
         sourceComponent: Rectangle {
             color: Qt.rgba(0, 0, 0, 0.7)
@@ -110,9 +117,15 @@ WallpaperItem {
     Connections {
         target: surfaceLoader
         function onStatusChanged() {
-            if (surfaceLoader.status === Loader.Error) {
-                console.warn("waywallen-kde: failed to load Waywallen.Display —",
-                             surfaceLoader.sourceComponent);
+            if (surfaceLoader.status !== Loader.Error) return;
+            const failed = root.surfaceSources[root.surfaceSourceIndex];
+            if (root.surfaceSourceIndex < root.surfaceSources.length - 1) {
+                console.warn("waywallen-kde: failed to load", failed,
+                             "— trying next fallback");
+                root.surfaceSourceIndex += 1;
+            } else {
+                console.warn("waywallen-kde: failed to load", failed,
+                             "— no more fallbacks");
             }
         }
     }

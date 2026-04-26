@@ -2,12 +2,20 @@
  * libwaywallen_display — Vulkan backend.
  *
  * Compiled only when WW_HAVE_VULKAN is defined.
+ *
+ * The library never links libvulkan.so directly; the loader either
+ * uses a host-provided vkGetInstanceProcAddr callback or, if that is
+ * NULL, dlopen()s libvulkan.so.1 itself and pulls vkGetInstanceProcAddr
+ * out of it.
  */
 
 #ifdef WW_HAVE_VULKAN
 
+#define _GNU_SOURCE
+
 #include "backend_vulkan.h"
 
+#include <dlfcn.h>
 #include <errno.h>
 #include <string.h>
 
@@ -15,13 +23,21 @@
 /*  Loader                                                             */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Process-global handle for the dlopen()ed libvulkan.so.1. Left alive
+ * across ww_vk_backend_unload() so re-loading is idempotent and we
+ * don't race any other component in the same process that holds a
+ * resolved fn pointer.
+ */
+static void *s_libvulkan = NULL;
+
 int ww_vk_backend_load(ww_vk_backend_t *backend,
                        VkInstance instance,
                        VkPhysicalDevice physical_device,
                        VkDevice device,
                        uint32_t queue_family_index,
                        ww_vk_get_instance_proc_addr_fn host_get_proc) {
-    if (!backend || !host_get_proc) return -EINVAL;
+    if (!backend) return -EINVAL;
     memset(backend, 0, sizeof(*backend));
 
     backend->instance = instance;
@@ -29,13 +45,40 @@ int ww_vk_backend_load(ww_vk_backend_t *backend,
     backend->device = device;
     backend->queue_family_index = queue_family_index;
 
-    /* Step 1: resolve vkGetDeviceProcAddr from the instance.
-     * The host callback returns void*; use a union to convert
-     * to a function pointer without -Wpedantic warnings. */
-    union { void *obj; PFN_vkGetDeviceProcAddr fn; } cvt;
-    cvt.obj = host_get_proc(instance, "vkGetDeviceProcAddr");
-    if (!cvt.obj) return -ENOSYS;
-    PFN_vkGetDeviceProcAddr gdpa = cvt.fn;
+    /* POSIX.1 §dlsym: object/function pointer conversion through a
+     * union to keep -Wpedantic happy. */
+    union { void *obj; void (*func)(void); } cvt;
+
+    /* Step 1: obtain a vkGetDeviceProcAddr.
+     *
+     * Priority:
+     *   host_get_proc(instance, "vkGetDeviceProcAddr")
+     *     — preferred when the host has already resolved the loader;
+     *   dlopen("libvulkan.so.1") + dlsym("vkGetInstanceProcAddr")
+     *     followed by gipa(instance, "vkGetDeviceProcAddr")
+     *     — fallback, so consumers don't need to link libvulkan. */
+    PFN_vkGetDeviceProcAddr gdpa = NULL;
+
+    if (host_get_proc) {
+        cvt.obj = host_get_proc(instance, "vkGetDeviceProcAddr");
+        if (cvt.obj) gdpa = (PFN_vkGetDeviceProcAddr)cvt.func;
+    }
+
+    if (!gdpa) {
+        if (!s_libvulkan) {
+            s_libvulkan = dlopen("libvulkan.so.1", RTLD_LAZY | RTLD_LOCAL);
+        }
+        if (!s_libvulkan) return -ENOENT;
+        cvt.obj = dlsym(s_libvulkan, "vkGetInstanceProcAddr");
+        if (!cvt.obj) return -ENOSYS;
+        PFN_vkGetInstanceProcAddr gipa = (PFN_vkGetInstanceProcAddr)cvt.func;
+        /* gipa returns PFN_vkVoidFunction (a function pointer); cast
+         * directly to PFN_vkGetDeviceProcAddr — function-to-function
+         * pointer conversion is permitted, function-to-object is not. */
+        PFN_vkVoidFunction vf = gipa(instance, "vkGetDeviceProcAddr");
+        if (!vf) return -ENOSYS;
+        gdpa = (PFN_vkGetDeviceProcAddr)vf;
+    }
     backend->vkGetDeviceProcAddr = gdpa;
 
 /* Convenience: resolve a device-level function or fail. */

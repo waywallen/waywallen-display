@@ -21,6 +21,7 @@
 #define _GNU_SOURCE
 
 #include "backend_egl.h"
+#include "log_internal.h"
 
 #include <dlfcn.h>
 #include <errno.h>
@@ -113,13 +114,18 @@ int ww_egl_backend_load(ww_egl_backend_t *backend,
     }
     if (!egl_getproc) {
         if (!load_from_dl("libEGL.so.1", &s_libegl)) {
+            ww_log(WAYWALLEN_LOG_WARN,
+                   "egl: dlopen(libEGL.so.1) failed: %s", dlerror());
             return -ENOENT;
         }
         ww_ptr_cvt_t c;
         c.obj = dlsym(s_libegl, "eglGetProcAddress");
         if (c.obj) egl_getproc = (PFNEGLGETPROCADDRESSPROC)c.func;
     }
-    if (!egl_getproc) return -ENOSYS;
+    if (!egl_getproc) {
+        ww_log(WAYWALLEN_LOG_WARN, "egl: cannot resolve eglGetProcAddress");
+        return -ENOSYS;
+    }
     backend->eglGetProcAddress = egl_getproc;
 
     /* Step 2: open libGLESv2.so.2 as a symbol source for core GLES
@@ -131,12 +137,16 @@ int ww_egl_backend_load(ww_egl_backend_t *backend,
 
 /* Convenience macro: resolve `name` via host / eglGetProcAddress /
  * dlsym(libhandle). Assign to the matching function-pointer slot in
- * `backend`. On NULL, return -ENOSYS. */
+ * `backend`. On NULL, log the missing symbol and return -ENOSYS. */
 #define RESOLVE_REQUIRED(SLOT, TYPE, NAME, DL) do {                 \
         void (*f)(void) = resolve_symbol(host_get_proc_address,     \
                                          backend->eglGetProcAddress,\
                                          (DL), NAME);               \
-        if (!f) return -ENOSYS;                                     \
+        if (!f) {                                                   \
+            ww_log(WAYWALLEN_LOG_WARN,                              \
+                   "egl: cannot resolve symbol %s", NAME);          \
+            return -ENOSYS;                                         \
+        }                                                           \
         backend->SLOT = (TYPE)f;                                    \
     } while (0)
 

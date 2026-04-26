@@ -219,6 +219,17 @@ void WaywallenDisplay::setStreamState(StreamState s) {
 // Backend binding helpers
 // ---------------------------------------------------------------------------
 
+// Trampoline so the C library can call QOpenGLContext::getProcAddress
+// without needing a Qt include. The QOpenGLContext is process-scoped
+// for our purposes (Qt's QSG renderer reuses a single context); we
+// stash it here when bindEglBackend runs.
+static QOpenGLContext *s_qtGlCtxForProcAddr = nullptr;
+static void *qtEglGetProcAddress(const char *name) {
+    if (!s_qtGlCtxForProcAddr) return nullptr;
+    auto fn = s_qtGlCtxForProcAddr->getProcAddress(name);
+    return reinterpret_cast<void *>(fn);
+}
+
 bool WaywallenDisplay::bindEglBackend() {
     auto *rif = window()->rendererInterface();
     auto *glCtx = static_cast<QOpenGLContext *>(
@@ -236,9 +247,11 @@ bool WaywallenDisplay::bindEglBackend() {
         return false;
     }
 
+    s_qtGlCtxForProcAddr = glCtx;
+
     waywallen_egl_ctx_t egl_ctx {};
     egl_ctx.egl_display = eglIface->display();
-    egl_ctx.get_proc_address = nullptr;
+    egl_ctx.get_proc_address = &qtEglGetProcAddress;
     int rc = waywallen_display_bind_egl(m_display, &egl_ctx);
     if (rc != WAYWALLEN_OK) {
         qCWarning(lcWD, "bind_egl failed: %d", rc);
@@ -278,9 +291,13 @@ bool WaywallenDisplay::bindVulkanBackend() {
     VkPhysicalDevice physDev = *pPhysDev;
     VkDevice device = *pDevice;
 
+#if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
     auto *qfip = static_cast<uint32_t *>(rif->getResource(window(),
         QSGRendererInterface::GraphicsQueueFamilyIndexResource));
     uint32_t qfi = qfip ? *qfip : 0;
+#else
+    uint32_t qfi = 0;
+#endif
 
     VkInstance vkInstance = qvkInst->vkInstance();
 

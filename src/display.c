@@ -51,8 +51,8 @@ void waywallen_display_set_log_callback(waywallen_log_callback_t cb,
     s_log_ud = user_data;
 }
 
-__attribute__((format(printf, 2, 3)))
-static void ww_log(waywallen_log_level_t level, const char *fmt, ...) {
+__attribute__((format(printf, 2, 3), visibility("hidden")))
+void ww_log(waywallen_log_level_t level, const char *fmt, ...) {
     char buf[512];
     va_list ap;
     va_start(ap, fmt);
@@ -289,7 +289,8 @@ int waywallen_display_bind_vulkan(waywallen_display_t *d,
                                   const waywallen_vk_ctx_t *ctx) {
     if (!d || !ctx) return WAYWALLEN_ERR_INVAL;
     if (d->conn != WW_CONN_DISCONNECTED) return WAYWALLEN_ERR_STATE;
-    if (!ctx->vk_get_instance_proc_addr) return WAYWALLEN_ERR_INVAL;
+    /* vk_get_instance_proc_addr may be NULL: the backend will dlopen
+     * libvulkan.so.1 and pull vkGetInstanceProcAddr from it directly. */
     d->backend = WAYWALLEN_BACKEND_VULKAN;
     d->vk = *ctx;
 #ifdef WW_HAVE_VULKAN
