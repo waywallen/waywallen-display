@@ -128,6 +128,29 @@ int ww_egl_texture_from_image(const ww_egl_backend_t *backend,
                               GLuint *out_tex);
 
 /* ------------------------------------------------------------------ */
+/*  DRM render-node introspection                                      */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Look up the DRM render-node major/minor of the GPU backing
+ * `egl_display`. Uses `EGL_EXT_device_query` to map the EGLDisplay to
+ * an `EGLDeviceEXT`, then `EGL_DRM_DEVICE_FILE_EXT` to a path under
+ * `/dev/dri/` whose `st_rdev` carries the (major, minor) we report on
+ * the wire as `register_display.drm_render_*`.
+ *
+ * Returns 0 on success and writes the values into `*out_major` /
+ * `*out_minor`. Returns -ENOSYS if the runtime EGL driver doesn't
+ * advertise the necessary extensions, or any other negative errno on
+ * lookup failure. Callers should treat any non-zero return as
+ * "unknown" and report `(0, 0)` so the daemon falls back to the
+ * cross-GPU host-visible path.
+ */
+int ww_egl_query_drm_render_node(const ww_egl_backend_t *backend,
+                                 EGLDisplay egl_display,
+                                 uint32_t *out_major,
+                                 uint32_t *out_minor);
+
+/* ------------------------------------------------------------------ */
 /*  Acquire sync fence                                                 */
 /* ------------------------------------------------------------------ */
 

@@ -117,6 +117,8 @@ typedef struct ww_req_register_display_t {
     uint32_t width;
     uint32_t height;
     uint32_t refresh_mhz;
+    uint32_t drm_render_major;
+    uint32_t drm_render_minor;
     ww_kv_list_t properties;
 } ww_req_register_display_t;
 

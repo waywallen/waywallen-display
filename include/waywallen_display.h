@@ -246,6 +246,24 @@ int waywallen_display_bind_egl(waywallen_display_t *d,
 int waywallen_display_bind_vulkan(waywallen_display_t *d,
                                   const waywallen_vk_ctx_t *ctx);
 
+/*
+ * Override the DRM render-node id reported during register_display.
+ * Pass `(0, 0)` to mark "unknown" — the daemon will then conservatively
+ * force HOST_VISIBLE buffer placement so the dmabuf can be PRIME-imported
+ * across GPUs.
+ *
+ * Hosts normally don't need to call this: bind_egl / bind_vulkan
+ * introspect the bound EGLDisplay / VkPhysicalDevice and populate the
+ * id automatically (via `EGL_EXT_device_query` / `VK_EXT_physical_device_drm`).
+ * Explicit overrides are useful for tests or for hosts that pick a render
+ * node out of band.
+ *
+ * Must be called before `begin_connect` / `connect`.
+ */
+int waywallen_display_set_drm_render_node(waywallen_display_t *d,
+                                          uint32_t major,
+                                          uint32_t minor);
+
 /* -------------------------------------------------------------------------
  * Async session (event-loop friendly)
  *

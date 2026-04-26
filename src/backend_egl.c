@@ -393,6 +393,66 @@ int ww_egl_wait_sync_fd(const ww_egl_backend_t *backend,
     return 0;
 }
 
+/* ------------------------------------------------------------------ */
+/*  DRM render-node introspection                                      */
+/* ------------------------------------------------------------------ */
+
+/* EGL_EXT_device_query / EGL_EXT_device_drm — runtime-resolved here so
+ * we don't add unconditional dependencies on any specific EGL version. */
+typedef EGLBoolean (EGLAPIENTRYP PFNEGLQUERYDISPLAYATTRIBEXTPROC)(
+    EGLDisplay dpy, EGLint attribute, EGLAttrib *value);
+typedef const char *(EGLAPIENTRYP PFNEGLQUERYDEVICESTRINGEXTPROC)(
+    EGLDeviceEXT device, EGLint name);
+
+#ifndef EGL_DEVICE_EXT
+#define EGL_DEVICE_EXT 0x322C
+#endif
+#ifndef EGL_DRM_DEVICE_FILE_EXT
+#define EGL_DRM_DEVICE_FILE_EXT 0x3233
+#endif
+#ifndef EGL_DRM_RENDER_NODE_FILE_EXT
+#define EGL_DRM_RENDER_NODE_FILE_EXT 0x3377
+#endif
+
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
+
+int ww_egl_query_drm_render_node(const ww_egl_backend_t *backend,
+                                 EGLDisplay egl_display,
+                                 uint32_t *out_major,
+                                 uint32_t *out_minor) {
+    if (!backend || !backend->loaded || !out_major || !out_minor) return -EINVAL;
+    if (egl_display == EGL_NO_DISPLAY) return -EINVAL;
+
+    PFNEGLQUERYDISPLAYATTRIBEXTPROC qda =
+        (PFNEGLQUERYDISPLAYATTRIBEXTPROC)backend->eglGetProcAddress("eglQueryDisplayAttribEXT");
+    PFNEGLQUERYDEVICESTRINGEXTPROC qds =
+        (PFNEGLQUERYDEVICESTRINGEXTPROC)backend->eglGetProcAddress("eglQueryDeviceStringEXT");
+    if (!qda || !qds) return -ENOSYS;
+
+    EGLAttrib dev_attr = 0;
+    if (!qda(egl_display, EGL_DEVICE_EXT, &dev_attr)) {
+        return -ENOSYS;
+    }
+    EGLDeviceEXT dev = (EGLDeviceEXT)(uintptr_t)dev_attr;
+
+    /* Prefer the render-node path if the driver advertises it; fall
+     * back to the primary node and let the caller stat() to identify
+     * the GPU. Both paths land in /dev/dri and st_rdev gives us the
+     * (major, minor) pair the daemon needs. */
+    const char *path = qds(dev, EGL_DRM_RENDER_NODE_FILE_EXT);
+    if (!path) {
+        path = qds(dev, EGL_DRM_DEVICE_FILE_EXT);
+    }
+    if (!path) return -ENOSYS;
+
+    struct stat st;
+    if (stat(path, &st) != 0) return -errno;
+    *out_major = major(st.st_rdev);
+    *out_minor = minor(st.st_rdev);
+    return 0;
+}
+
 #else /* !WW_HAVE_EGL */
 
 /* Silence -Wempty-translation-unit when the backend is disabled. */

@@ -123,6 +123,16 @@ struct waywallen_display {
     uint32_t hs_display_width;
     uint32_t hs_display_height;
     uint32_t hs_display_refresh_mhz;
+    /* DRM render-node id of the GPU this display will sample dmabufs on.
+     * Populated by waywallen_display_bind_egl/bind_vulkan via the
+     * backend's introspection helpers (`ww_egl_query_drm_render_node` /
+     * `ww_vk_query_drm_render_node`). `(0, 0)` if no backend is bound or
+     * the driver lacks the relevant extension; the daemon then
+     * conservatively assumes a cross-GPU consumer and forces
+     * HOST_VISIBLE on every connected renderer. May also be set
+     * explicitly via `waywallen_display_set_drm_render_node`. */
+    uint32_t hs_drm_render_major;
+    uint32_t hs_drm_render_minor;
 
     /* Backend selection. */
     waywallen_backend_t backend;
@@ -280,6 +290,26 @@ int waywallen_display_bind_egl(waywallen_display_t *d,
         memset(&d->egl_backend, 0, sizeof(d->egl_backend));
     } else {
         ww_log(WAYWALLEN_LOG_INFO, "egl backend loaded");
+        /* Auto-introspect the render node so we don't need an explicit
+         * waywallen_display_set_drm_render_node call from the host. If
+         * the driver lacks EGL_EXT_device_query we leave the slot at
+         * (0,0) — daemon will then assume cross-GPU and force
+         * HOST_VISIBLE on every renderer. */
+        if (d->hs_drm_render_major == 0 && d->hs_drm_render_minor == 0) {
+            uint32_t major = 0, minor = 0;
+            int qrc = ww_egl_query_drm_render_node(
+                &d->egl_backend, (EGLDisplay)ctx->egl_display, &major, &minor);
+            if (qrc == 0) {
+                d->hs_drm_render_major = major;
+                d->hs_drm_render_minor = minor;
+                ww_log(WAYWALLEN_LOG_INFO,
+                       "egl drm render node = %u:%u", major, minor);
+            } else {
+                ww_log(WAYWALLEN_LOG_INFO,
+                       "egl drm render node lookup failed (%d); reporting 0:0",
+                       qrc);
+            }
+        }
     }
 #endif
     return WAYWALLEN_OK;
@@ -306,8 +336,33 @@ int waywallen_display_bind_vulkan(waywallen_display_t *d,
         memset(&d->vk_backend, 0, sizeof(d->vk_backend));
     } else {
         ww_log(WAYWALLEN_LOG_INFO, "vk backend loaded");
+        if (d->hs_drm_render_major == 0 && d->hs_drm_render_minor == 0) {
+            uint32_t major = 0, minor = 0;
+            int qrc = ww_vk_query_drm_render_node(
+                &d->vk_backend, &major, &minor);
+            if (qrc == 0) {
+                d->hs_drm_render_major = major;
+                d->hs_drm_render_minor = minor;
+                ww_log(WAYWALLEN_LOG_INFO,
+                       "vk drm render node = %u:%u", major, minor);
+            } else {
+                ww_log(WAYWALLEN_LOG_INFO,
+                       "vk drm render node lookup failed (%d); reporting 0:0",
+                       qrc);
+            }
+        }
     }
 #endif
+    return WAYWALLEN_OK;
+}
+
+int waywallen_display_set_drm_render_node(waywallen_display_t *d,
+                                          uint32_t major,
+                                          uint32_t minor) {
+    if (!d) return WAYWALLEN_ERR_INVAL;
+    if (d->conn != WW_CONN_DISCONNECTED) return WAYWALLEN_ERR_STATE;
+    d->hs_drm_render_major = major;
+    d->hs_drm_render_minor = minor;
     return WAYWALLEN_OK;
 }
 
@@ -388,6 +443,8 @@ static int hs_queue_register(waywallen_display_t *d) {
     reg.width = d->hs_display_width;
     reg.height = d->hs_display_height;
     reg.refresh_mhz = d->hs_display_refresh_mhz;
+    reg.drm_render_major = d->hs_drm_render_major;
+    reg.drm_render_minor = d->hs_drm_render_minor;
     reg.properties.count = 0;
     reg.properties.data = NULL;
     return hs_queue_request(d, WW_REQ_REGISTER_DISPLAY, enc_register, &reg);

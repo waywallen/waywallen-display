@@ -37,6 +37,13 @@ extern "C" {
 typedef struct ww_vk_backend {
     /* Resolved from the host's vkGetInstanceProcAddr. */
     PFN_vkGetDeviceProcAddr vkGetDeviceProcAddr;
+    /* Kept for instance-level lookups beyond the initial backend load
+     * (e.g. `ww_vk_query_drm_render_node` resolving
+     * vkGetPhysicalDeviceProperties2). May be NULL if the loader path
+     * never went through the host's get_instance_proc_addr — but in
+     * practice we always end up with it because the dlopen fallback
+     * resolves it from libvulkan.so.1 too. */
+    PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr;
 
     /* Device-level functions. */
     PFN_vkCreateImage             vkCreateImage;
@@ -51,6 +58,18 @@ typedef struct ww_vk_backend {
     /* Extension functions. */
     PFN_vkGetMemoryFdPropertiesKHR  vkGetMemoryFdPropertiesKHR;
     PFN_vkImportSemaphoreFdKHR     vkImportSemaphoreFdKHR;
+
+    /* Instance-level functions used for diagnostics. Resolved via
+     * vkGetInstanceProcAddr(instance, ...). */
+    PFN_vkGetPhysicalDeviceMemoryProperties vkGetPhysicalDeviceMemoryProperties;
+
+    /* VK_EXT_debug_utils — only resolved when the host enabled the
+     * instance extension at vkCreateInstance time. NULL otherwise; in
+     * that case `debug_messenger` stays VK_NULL_HANDLE and the driver
+     * never invokes our callback. */
+    PFN_vkCreateDebugUtilsMessengerEXT  vkCreateDebugUtilsMessengerEXT;
+    PFN_vkDestroyDebugUtilsMessengerEXT vkDestroyDebugUtilsMessengerEXT;
+    VkDebugUtilsMessengerEXT            debug_messenger;
 
     /* Host-provided handles; NOT owned by the backend. */
     VkInstance       instance;
@@ -70,6 +89,22 @@ int  ww_vk_backend_load(ww_vk_backend_t *backend,
                         uint32_t queue_family_index,
                         ww_vk_get_instance_proc_addr_fn host_get_proc);
 void ww_vk_backend_unload(ww_vk_backend_t *backend);
+
+/*
+ * Look up the DRM render-node major/minor of `physical_device` via
+ * `VK_EXT_physical_device_drm` + `VkPhysicalDeviceDrmPropertiesEXT`.
+ * The instance must have been created with the property2 extension
+ * (Vulkan 1.1+ exposes it as core).
+ *
+ * Returns 0 on success and writes the values into `*out_major` /
+ * `*out_minor`. Returns -ENOSYS if `vkGetPhysicalDeviceProperties2`
+ * cannot be resolved or the device doesn't actually carry render-node
+ * info (drm property struct's `hasRender` bit is false). Callers should
+ * treat any non-zero return as "unknown" and report `(0, 0)`.
+ */
+int ww_vk_query_drm_render_node(const ww_vk_backend_t *backend,
+                                uint32_t *out_major,
+                                uint32_t *out_minor);
 
 /* ------------------------------------------------------------------ */
 

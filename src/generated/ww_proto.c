@@ -434,6 +434,8 @@ int ww_req_register_display_encode(const ww_req_register_display_t *m, ww_buf_t 
     if ((rc = w_u32(out, m->width))) return rc;
     if ((rc = w_u32(out, m->height))) return rc;
     if ((rc = w_u32(out, m->refresh_mhz))) return rc;
+    if ((rc = w_u32(out, m->drm_render_major))) return rc;
+    if ((rc = w_u32(out, m->drm_render_minor))) return rc;
     if ((rc = w_kv_list(out, &m->properties))) return rc;
     return WW_OK;
 }
@@ -446,6 +448,8 @@ int ww_req_register_display_decode(const uint8_t *buf, size_t len, ww_req_regist
     if ((rc = rd_u32(&r, &out->width))) goto fail;
     if ((rc = rd_u32(&r, &out->height))) goto fail;
     if ((rc = rd_u32(&r, &out->refresh_mhz))) goto fail;
+    if ((rc = rd_u32(&r, &out->drm_render_major))) goto fail;
+    if ((rc = rd_u32(&r, &out->drm_render_minor))) goto fail;
     if ((rc = rd_kv_list(&r, &out->properties))) goto fail;
     if (r.pos != r.len) {
         int rc2 = WW_ERR_TRAILING;
