@@ -54,6 +54,11 @@ typedef struct ww_vk_backend {
     PFN_vkBindImageMemory         vkBindImageMemory;
     PFN_vkCreateSemaphore         vkCreateSemaphore;
     PFN_vkDestroySemaphore        vkDestroySemaphore;
+    /* Drained before tearing down imported VkImages / VkDeviceMemory
+     * so the consumer's in-flight command buffers can't outlive their
+     * resources (VUID-vkBindImageMemory-image-01445 /
+     * BoundResourceFreedMemoryAccess). */
+    PFN_vkDeviceWaitIdle          vkDeviceWaitIdle;
 
     /* Extension functions. */
     PFN_vkGetMemoryFdPropertiesKHR  vkGetMemoryFdPropertiesKHR;

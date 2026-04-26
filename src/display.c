@@ -26,6 +26,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <poll.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -785,6 +786,22 @@ static void vk_release_current_pool(waywallen_display_t *d) {
         d->vk_import_count = 0;
         return;
     }
+    /* Drain the device before tearing down imported VkImages /
+     * VkDeviceMemory. Consumers (e.g. the QML plugin) clear their
+     * pointer caches in on_textures_releasing but do not synchronize
+     * with their own render thread, so without this barrier in-flight
+     * descriptor writes / command buffers reference freed memory
+     * (UNASSIGNED-VkDescriptorImageInfo-BoundResourceFreedMemoryAccess
+     * and VUID-VkImageMemoryBarrier-image-parameter). */
+    if (d->vk_backend.vkDeviceWaitIdle) {
+        VkResult wr = d->vk_backend.vkDeviceWaitIdle(d->vk_backend.device);
+        if (wr != VK_SUCCESS) {
+            ww_log(WAYWALLEN_LOG_WARN,
+                   "vk_release_current_pool: vkDeviceWaitIdle returned %d; "
+                   "destroying anyway",
+                   (int)wr);
+        }
+    }
     if (d->vk_images) {
         for (uint32_t i = 0; i < d->vk_import_count; i++) {
             ww_vk_destroy_imported_image(&d->vk_backend, &d->vk_images[i]);
@@ -990,6 +1007,15 @@ static int handle_bind_buffers(waywallen_display_t *d,
         fire_disconnected(d, WAYWALLEN_ERR_PROTO, "decode bind_buffers");
         return WAYWALLEN_ERR_PROTO;
     }
+    /* NB: the daemon→display bind_buffers protocol does NOT carry the
+     * producer's `flags` field (HOST_VISIBLE etc.) — that's only on the
+     * producer↔daemon bridge protocol. So the placement-mode story
+     * has to be inferred from the producer's logs + the import outcome. */
+    ww_log(WAYWALLEN_LOG_INFO,
+           "bind_buffers received gen=%" PRIu64 " count=%u %ux%u "
+           "fourcc=0x%08x modifier=0x%" PRIx64 " planes_per_buffer=%u",
+           bb.buffer_generation, bb.count, bb.width, bb.height,
+           bb.fourcc, bb.modifier, bb.planes_per_buffer);
     uint32_t expected = bb.count * bb.planes_per_buffer;
     if ((size_t)expected != n_fds) {
         close_all_fds(fd_buf, n_fds);

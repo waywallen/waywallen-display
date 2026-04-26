@@ -227,6 +227,7 @@ int ww_vk_backend_load(ww_vk_backend_t *backend,
     RESOLVE(vkBindImageMemory,         PFN_vkBindImageMemory,         "vkBindImageMemory");
     RESOLVE(vkCreateSemaphore,         PFN_vkCreateSemaphore,         "vkCreateSemaphore");
     RESOLVE(vkDestroySemaphore,        PFN_vkDestroySemaphore,        "vkDestroySemaphore");
+    RESOLVE(vkDeviceWaitIdle,          PFN_vkDeviceWaitIdle,          "vkDeviceWaitIdle");
 
     /* Extension: VK_KHR_external_memory_fd. */
     RESOLVE(vkGetMemoryFdPropertiesKHR, PFN_vkGetMemoryFdPropertiesKHR,
@@ -512,8 +513,20 @@ int ww_vk_import_dmabuf(const ww_vk_backend_t *backend,
             }
         }
 
+        /* Imported dmabuf images often report
+         * VkMemoryDedicatedRequirements::requiresDedicatedAllocation = TRUE
+         * (driver wants the allocation tied 1:1 to the VkImage so it
+         * can apply per-image tiling/modifier metadata). For
+         * VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF imports it is always
+         * safe to provide the dedicated info — and required when the
+         * driver demands it (VUID-vkBindImageMemory-image-01445). */
+        VkMemoryDedicatedAllocateInfo dedicated_info = {
+            .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
+            .image = out->image,
+        };
         VkImportMemoryFdInfoKHR import_fd = {
             .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,
+            .pNext = &dedicated_info,
             .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
             .fd = try_fd,
         };
