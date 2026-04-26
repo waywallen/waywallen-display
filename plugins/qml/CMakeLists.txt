@@ -22,9 +22,15 @@ qt_add_qml_module(waywallen-display-qml
     SOURCES
         WaywallenDisplay.hpp
         WaywallenDisplay.cpp
+        VkBlitter.hpp
+        VkBlitter.cpp
     OUTPUT_DIRECTORY
         ${CMAKE_CURRENT_BINARY_DIR}/Waywallen/Display
 )
+
+if(Vulkan_FOUND)
+    target_compile_definitions(waywallen-display-qml PRIVATE WW_HAVE_VULKAN=1)
+endif()
 
 # When built as a subdirectory of the top-level waywallen_display project,
 # the CMake target is already available — link it directly.

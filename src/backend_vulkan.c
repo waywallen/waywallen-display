@@ -394,7 +394,16 @@ int ww_vk_import_dmabuf(const ww_vk_backend_t *backend,
         .arrayLayers = 1,
         .samples = VK_SAMPLE_COUNT_1_BIT,
         .tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT,
-        .usage = VK_IMAGE_USAGE_SAMPLED_BIT,
+        /* The consumer does NOT sample this image directly. With
+         * DRM_FORMAT_MODIFIER_EXT tiling, per-modifier format features
+         * decide which usages are legal — and SAMPLED_IMAGE_BIT often
+         * isn't part of the supported set (esp. for non-LINEAR vendor
+         * modifiers). Importing as TRANSFER_SRC only matches what the
+         * producer guarantees (it allocated the dmabuf for TRANSFER_DST,
+         * and TRANSFER_SRC is the symmetric capability). The host then
+         * blits this into a sampler-friendly OPTIMAL VkImage of its
+         * own creation. See plugins/qml/VkBlitter.{hpp,cpp}. */
+        .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
         .queueFamilyIndexCount = 1,
         .pQueueFamilyIndices = &backend->queue_family_index,

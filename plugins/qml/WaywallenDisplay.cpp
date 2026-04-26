@@ -13,6 +13,11 @@
 #include <QtGui/qopenglcontext_platform.h>
 #include <QtQuick/qsgtexture_platform.h>
 
+#ifdef WW_HAVE_VULKAN
+#include "VkBlitter.hpp"
+#include <unistd.h>
+#endif
+
 Q_LOGGING_CATEGORY(lcWD, "waywallen.display")
 
 // ---------------------------------------------------------------------------
@@ -52,6 +57,7 @@ void WaywallenDisplay::c_on_textures_ready(void *ud,
         self->m_vkImages.resize(static_cast<int>(t->count));
         for (uint32_t i = 0; i < t->count; i++)
             self->m_vkImages[static_cast<int>(i)] = t->vk_images[i];
+        self->m_vkFourcc = t->fourcc;
     } else {
         qCWarning(lcWD, "textures ready: backend=%d but no handles", t->backend);
         self->m_eglImagesValid = false;
@@ -77,6 +83,19 @@ void WaywallenDisplay::c_on_textures_releasing(void *ud,
     self->m_vkImages.clear();
     self->m_currentSlot = -1;
     self->m_textureCount = 0;
+
+#ifdef WW_HAVE_VULKAN
+    {
+        QMutexLocker lk(&self->m_pendingMutex);
+        if (self->m_pendingVk.valid && self->m_pendingVk.releaseSyncobjFd >= 0) {
+            ::close(self->m_pendingVk.releaseSyncobjFd);
+        }
+        self->m_pendingVk = PendingVkFrame{};
+    }
+    // Blitter teardown happens on the render thread (sceneGraphInvalidated
+    // or cleanup()) — it owns Vulkan handles bound to a specific device.
+#endif
+
     self->setStreamState(Inactive);
     self->update();
 }
@@ -110,6 +129,23 @@ void WaywallenDisplay::c_on_frame_ready(void *ud,
     self->m_pendingReleaseIdx = f->buffer_index;
     self->m_pendingReleaseSeq = f->seq;
     self->m_pendingRelease = true;
+
+#ifdef WW_HAVE_VULKAN
+    if (self->m_activeBackend == BackendVulkan) {
+        // Hand-off to render thread. Drop any prior unblitted frame —
+        // close its release_syncobj_fd so the daemon's reaper times the
+        // slot out instead of waiting forever. Better than leaking the fd.
+        QMutexLocker lk(&self->m_pendingMutex);
+        if (self->m_pendingVk.valid && self->m_pendingVk.releaseSyncobjFd >= 0) {
+            ::close(self->m_pendingVk.releaseSyncobjFd);
+        }
+        self->m_pendingVk.valid = true;
+        self->m_pendingVk.slot = static_cast<int>(f->buffer_index);
+        self->m_pendingVk.acquireSem = f->vk_acquire_semaphore;
+        self->m_pendingVk.releaseSyncobjFd = f->release_syncobj_fd;
+    }
+#endif
+
     emit self->framesReceivedChanged();
     self->update();
 }
@@ -160,6 +196,17 @@ void WaywallenDisplay::cleanup() {
     m_textureCount = 0;
     m_pendingRelease = false;
     m_activeBackend = BackendNone;
+
+#ifdef WW_HAVE_VULKAN
+    {
+        QMutexLocker lk(&m_pendingMutex);
+        if (m_pendingVk.valid && m_pendingVk.releaseSyncobjFd >= 0) {
+            ::close(m_pendingVk.releaseSyncobjFd);
+        }
+        m_pendingVk = PendingVkFrame{};
+    }
+    m_vkBlitter.reset();
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -322,6 +369,40 @@ bool WaywallenDisplay::bindVulkanBackend() {
         qCWarning(lcWD, "bind_vulkan failed: %d", rc);
         return false;
     }
+
+#ifdef WW_HAVE_VULKAN
+    m_vkInstance = reinterpret_cast<void *>(vkInstance);
+    m_vkPhys = reinterpret_cast<void *>(physDev);
+    m_vkDevice = reinterpret_cast<void *>(device);
+    m_vkQfi = qfi;
+    m_vkGipa = reinterpret_cast<void *(*)(void *, const char *)>(rawGIPA);
+
+    // VkQueue for our blit submits. Use the same queue Qt uses so
+    // submission order on a single queue gives us implicit ordering
+    // against Qt's later sample. CommandQueueResource returns a
+    // pointer-to-VkQueue, same convention as Device/PhysicalDevice
+    // resources.
+    auto *pQueue = static_cast<VkQueue *>(rif->getResource(window(),
+        QSGRendererInterface::CommandQueueResource));
+    if (pQueue && *pQueue != VK_NULL_HANDLE) {
+        m_vkQueue = reinterpret_cast<void *>(*pQueue);
+    } else {
+        // Fallback: ask the device for the family's queue 0. Most Qt
+        // setups use index 0; if Qt uses a different index, this races
+        // with Qt's own submits and we'd need a semaphore handshake.
+        auto vkGetDeviceQueue = reinterpret_cast<PFN_vkGetDeviceQueue>(
+            qvkInst->getInstanceProcAddr("vkGetDeviceQueue"));
+        if (vkGetDeviceQueue) {
+            VkQueue q = VK_NULL_HANDLE;
+            vkGetDeviceQueue(device, qfi, 0, &q);
+            m_vkQueue = reinterpret_cast<void *>(q);
+        }
+        qCInfo(lcWD, "Qt did not expose CommandQueueResource; using "
+                     "vkGetDeviceQueue(qfi=%u, idx=0)=%p",
+               qfi, m_vkQueue);
+    }
+#endif
+
     qCInfo(lcWD, "bound Vulkan backend, device=%p",
            reinterpret_cast<void *>(device));
     return true;
@@ -435,6 +516,16 @@ void WaywallenDisplay::onWindowReady() {
                 m_textureCount = 0;
                 m_pendingRelease = false;
                 m_activeBackend = BackendNone;
+#ifdef WW_HAVE_VULKAN
+                {
+                    QMutexLocker lk(&m_pendingMutex);
+                    if (m_pendingVk.valid && m_pendingVk.releaseSyncobjFd >= 0) {
+                        ::close(m_pendingVk.releaseSyncobjFd);
+                    }
+                    m_pendingVk = PendingVkFrame{};
+                }
+                m_vkBlitter.reset();
+#endif
             },
             Qt::DirectConnection);
 
@@ -650,11 +741,88 @@ QSGNode *WaywallenDisplay::updatePaintNode(QSGNode *oldNode,
         ensureGlTextures();
     }
 
+#ifdef WW_HAVE_VULKAN
+    // Vulkan path: lazy-init blitter and blit any pending frame into
+    // the shadow image. The shadow is what Qt actually samples.
+    if (m_activeBackend == BackendVulkan && m_vkImagesValid
+        && m_textureCount > 0 && m_texWidth > 0 && m_texHeight > 0) {
+        if (!m_vkBlitter) {
+            m_vkBlitter = std::make_unique<VkBlitter>();
+        }
+        if (!m_vkBlitter->initialized()) {
+            // Resolve vkGetDeviceProcAddr lazily here so we have it on
+            // the render thread.
+            PFN_vkGetDeviceProcAddr gdpa = nullptr;
+            if (m_vkGipa && m_vkInstance) {
+                auto gipa = reinterpret_cast<PFN_vkGetInstanceProcAddr>(m_vkGipa);
+                gdpa = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
+                    gipa(reinterpret_cast<VkInstance>(m_vkInstance),
+                         "vkGetDeviceProcAddr"));
+            }
+            const bool ok = m_vkBlitter->init(
+                reinterpret_cast<VkInstance>(m_vkInstance),
+                reinterpret_cast<VkPhysicalDevice>(m_vkPhys),
+                reinterpret_cast<VkDevice>(m_vkDevice),
+                m_vkQfi,
+                reinterpret_cast<VkQueue>(m_vkQueue),
+                reinterpret_cast<PFN_vkGetInstanceProcAddr>(m_vkGipa),
+                gdpa);
+            if (!ok) {
+                qCWarning(lcWD, "VkBlitter init failed; Vulkan path disabled this session");
+                m_vkBlitter.reset();
+                delete oldNode;
+                return nullptr;
+            }
+        }
+
+        // VkFormat must match the imported image's format. Library maps
+        // DRM_FORMAT_ABGR8888/XBGR8888 -> R8G8B8A8_UNORM, ARGB/XRGB ->
+        // B8G8R8A8_UNORM. Mirror that here.
+        VkFormat shadowFmt = VK_FORMAT_UNDEFINED;
+        switch (m_vkFourcc) {
+        case 0x34325241: case 0x34325258: shadowFmt = VK_FORMAT_B8G8R8A8_UNORM; break;
+        case 0x34324241: case 0x34324258: shadowFmt = VK_FORMAT_R8G8B8A8_UNORM; break;
+        default:
+            qCWarning(lcWD, "VkBlitter: unsupported fourcc 0x%08x; skipping frame",
+                      m_vkFourcc);
+            delete oldNode;
+            return nullptr;
+        }
+        if (!m_vkBlitter->ensureShadow(static_cast<uint32_t>(m_texWidth),
+                                       static_cast<uint32_t>(m_texHeight),
+                                       shadowFmt)) {
+            delete oldNode;
+            return nullptr;
+        }
+
+        PendingVkFrame frame;
+        {
+            QMutexLocker lk(&m_pendingMutex);
+            frame = m_pendingVk;
+            m_pendingVk = PendingVkFrame{};
+        }
+        if (frame.valid && frame.slot >= 0
+            && frame.slot < m_vkImages.size()) {
+            auto imported = reinterpret_cast<VkImage>(m_vkImages[frame.slot]);
+            auto acquireSem = reinterpret_cast<VkSemaphore>(frame.acquireSem);
+            // blit() consumes ownership of releaseSyncobjFd unconditionally.
+            m_vkBlitter->blit(imported,
+                              static_cast<uint32_t>(m_texWidth),
+                              static_cast<uint32_t>(m_texHeight),
+                              acquireSem,
+                              frame.releaseSyncobjFd);
+        }
+    }
+#endif
+
     const bool hasTexture =
         (m_activeBackend == BackendEGL && m_glTexturesCreated
          && m_currentSlot >= 0 && m_currentSlot < m_glTextures.size())
-        || (m_activeBackend == BackendVulkan && m_vkImagesValid
-            && m_currentSlot >= 0 && m_currentSlot < m_vkImages.size());
+#ifdef WW_HAVE_VULKAN
+        || (m_activeBackend == BackendVulkan && m_vkBlitter
+            && m_vkBlitter->shadow() != VK_NULL_HANDLE)
+#endif
+        ;
 
     if (!hasTexture || !window()) {
         delete oldNode;
@@ -677,10 +845,10 @@ QSGNode *WaywallenDisplay::updatePaintNode(QSGNode *oldNode,
             glTex, window(), texSize,
             QQuickWindow::TextureHasAlphaChannel);
     } else if (m_activeBackend == BackendVulkan) {
-#if QT_CONFIG(vulkan)
-        auto vkImage = reinterpret_cast<VkImage>(m_vkImages[m_currentSlot]);
+#ifdef WW_HAVE_VULKAN
         sgTex = QNativeInterface::QSGVulkanTexture::fromNative(
-            vkImage, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            m_vkBlitter->shadow(),
+            m_vkBlitter->shadowLayout(),
             window(), texSize,
             QQuickWindow::TextureHasAlphaChannel);
 #endif

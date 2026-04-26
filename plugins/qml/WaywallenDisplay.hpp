@@ -1,12 +1,18 @@
 #pragma once
 
 #include <QColor>
+#include <QMutex>
 #include <QQuickItem>
 #include <QRectF>
 #include <QSocketNotifier>
 #include <QString>
 #include <QVector>
+#include <memory>
 #include <qqml.h>
+
+#ifdef WW_HAVE_VULKAN
+class VkBlitter;
+#endif
 
 struct waywallen_display;
 typedef struct waywallen_display waywallen_display_t;
@@ -165,6 +171,35 @@ private:
     // Vulkan texture state.
     bool m_vkImagesValid { false };
     QVector<void *> m_vkImages;
+    uint32_t m_vkFourcc { 0 };
+
+#ifdef WW_HAVE_VULKAN
+    // Owned by render thread; created on first updatePaintNode after
+    // a Vulkan textures_ready. Copies imported dmabuf images into a
+    // sampler-friendly OPTIMAL VkImage Qt actually samples.
+    std::unique_ptr<VkBlitter> m_vkBlitter;
+
+    // Cached on bindVulkanBackend.
+    void *m_vkInstance { nullptr };
+    void *m_vkPhys     { nullptr };
+    void *m_vkDevice   { nullptr };
+    void *m_vkQueue    { nullptr };
+    uint32_t m_vkQfi   { 0 };
+    void *(*m_vkGipa)(void *, const char *) { nullptr };
+
+    // Most-recent unblitted frame, populated on the main thread by
+    // c_on_frame_ready and consumed on the render thread by
+    // updatePaintNode. Older pending frame is dropped (its
+    // release_syncobj_fd is closed; daemon times out the slot).
+    struct PendingVkFrame {
+        bool valid { false };
+        int slot { -1 };
+        void *acquireSem { nullptr }; // VkSemaphore (lib-imported sync_fd)
+        int releaseSyncobjFd { -1 };
+    };
+    QMutex m_pendingMutex;
+    PendingVkFrame m_pendingVk;
+#endif
 
     // Config from on_config.
     QRectF m_sourceRect;
