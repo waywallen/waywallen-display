@@ -11,36 +11,49 @@ import org.kde.kquickcontrols as KQuickControls
 ColumnLayout {
     id: root
 
+    spacing: Kirigami.Units.largeSpacing
+
     property string cfg_DisplayName
     property color  cfg_ClearColor
     property string cfg_SurfaceMode
     property bool   cfg_ShowDiagnostics
 
-    property bool   _displayModuleAvailable: false
+    property string _probeError: ""
 
-    Component.onCompleted: {
-        // Probe Waywallen.Display without making a hard parse-time dependency.
-        const probe = Qt.createQmlObject(
-            'import QtQuick; import Waywallen.Display 1.0; QtObject {}',
-            root, "waywallenProbe");
-        _displayModuleAvailable = (probe !== null);
-        if (probe) probe.destroy();
+    // Try to compile a tiny stub QML for the currently selected mode and
+    // surface any import error to the user. The stubs (ImportTest.qml /
+    // ImportTestEmbed.qml) are empty Items that exist solely to exercise
+    // the import — instantiating the real surface QML here would create
+    // sockets / connections we don't want at config-time.
+    function _probeSurface(mode) {
+        const src = (mode === "system")
+            ? "ImportTest.qml"
+            : "ImportTestEmbed.qml";
+        const c = Qt.createComponent(src, Component.PreferSynchronous, root);
+        if (!c) {
+            root._probeError = "Failed to create QML component for " + src;
+            return;
+        }
+        const finish = () => {
+            if (c.status === Component.Error) {
+                root._probeError = c.errorString();
+            } else if (c.status === Component.Ready) {
+                root._probeError = "";
+            }
+        };
+        if (c.status === Component.Loading) {
+            c.statusChanged.connect(finish);
+        } else {
+            finish();
+        }
     }
 
-    Kirigami.InlineMessage {
-        Layout.fillWidth: true
-        visible: cfg_SurfaceMode === "system" && !root._displayModuleAvailable
-        type: Kirigami.MessageType.Warning
-        text: i18nd("plasma_wallpaper_org.waywallen.kde",
-                    "<b>waywallen-display</b> is not installed system-wide. " +
-                    "Switch to <i>Embedded</i> mode or install the module from " +
-                    "<a href=\"https://github.com/waywallen/waywallen-display\">" +
-                    "github.com/waywallen/waywallen-display</a>.")
-        onLinkActivated: Qt.openUrlExternally(link)
-    }
+    Component.onCompleted: root._probeSurface(cfg_SurfaceMode)
+    onCfg_SurfaceModeChanged: root._probeSurface(cfg_SurfaceMode)
 
     Kirigami.FormLayout {
         Layout.fillWidth: true
+        Layout.alignment: Qt.AlignTop
         twinFormLayouts: parentLayout
 
         QQC2.TextField {
@@ -63,8 +76,7 @@ ColumnLayout {
             textRole: "label"
             valueRole: "value"
             model: [
-                { value: "embed",  label: i18nd("plasma_wallpaper_org.waywallen.kde",
-                                                "Embedded (bundled with this wallpaper)") },
+                { value: "embed",  label: i18nd("plasma_wallpaper_org.waywallen.kde", "Embedded") },
                 { value: "system", label: i18nd("plasma_wallpaper_org.waywallen.kde",
                                                 "System (requires waywallen-display installed)") }
             ]
@@ -77,6 +89,42 @@ ColumnLayout {
             checked: cfg_ShowDiagnostics
             onToggled: cfg_ShowDiagnostics = checked
         }
+    }
+
+    // Spacer pushes the error block down and keeps the form anchored to
+    // the top regardless of how the surrounding config view sizes us.
+    Item {
+        Layout.fillHeight: true
+        Layout.fillWidth: true
+    }
+
+    Kirigami.InlineMessage {
+        Layout.fillWidth: true
+        Layout.leftMargin: Kirigami.Units.largeSpacing
+        Layout.rightMargin: Kirigami.Units.largeSpacing
+        visible: root._probeError.length > 0
+        type: Kirigami.MessageType.Error
+        text: i18nd("plasma_wallpaper_org.waywallen.kde",
+                    "<b>Failed to load the %1 display module.</b><br/>" +
+                    "Please report at <a href=\"https://github.com/waywallen/waywallen-display/issues\">" +
+                    "github.com/waywallen/waywallen-display/issues</a>")
+              .arg(root.cfg_SurfaceMode === "system" ? "system" : "embedded")
+        onLinkActivated: (link) => Qt.openUrlExternally(link)
+    }
+
+    QQC2.TextArea {
+        Layout.fillWidth: true
+        Layout.leftMargin: Kirigami.Units.largeSpacing
+        Layout.rightMargin: Kirigami.Units.largeSpacing
+        Layout.bottomMargin: Kirigami.Units.largeSpacing
+        visible: root._probeError.length > 0
+        readOnly: true
+        wrapMode: TextEdit.Wrap
+        textFormat: TextEdit.PlainText
+        font.family: "monospace"
+        font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+        selectByMouse: true
+        text: root._probeError
     }
 
 }
