@@ -21,17 +21,15 @@ WallpaperItem {
         color: root.configuration.ClearColor
     }
 
-    readonly property var surfaceSources: [
-        "WaywallenSurface.qml",
-        "WaywallenSurfaceEmbed.qml"
-    ]
-    property int surfaceSourceIndex: 0
+    readonly property string surfaceSource: root.configuration.SurfaceMode === "system"
+        ? "WaywallenSurface.qml"
+        : "WaywallenSurfaceEmbed.qml"
 
     Loader {
         id: surfaceLoader
         anchors.fill: parent
         asynchronous: false
-        source: root.surfaceSources[root.surfaceSourceIndex]
+        source: root.surfaceSource
 
         onLoaded: {
             item.displayNameBinding    = Qt.binding(() =>
@@ -39,7 +37,6 @@ WallpaperItem {
                     ? root.configuration.DisplayName
                     : root.defaultDisplayName);
             item.clearColorBinding     = Qt.binding(() => root.configuration.ClearColor);
-            item.autoReconnectBinding  = Qt.binding(() => root.configuration.AutoReconnect);
             item.displayWidthBinding   = Qt.binding(() => Math.round(root.width  * Screen.devicePixelRatio));
             item.displayHeightBinding  = Qt.binding(() => Math.round(root.height * Screen.devicePixelRatio));
         }
@@ -49,7 +46,6 @@ WallpaperItem {
         anchors.centerIn: parent
         width: Math.min(parent.width - 80, 720)
         active: surfaceLoader.status === Loader.Error
-                && root.surfaceSourceIndex >= root.surfaceSources.length - 1
         visible: active
         sourceComponent: Rectangle {
             color: Qt.rgba(0, 0, 0, 0.7)
@@ -68,16 +64,21 @@ WallpaperItem {
                     font.bold: true
                     font.pixelSize: 18
                     wrapMode: Text.WordWrap
-                    text: i18nd("plasma_wallpaper_org.waywallen.kde",
+                    text: root.configuration.SurfaceMode === "system"
+                        ? i18nd("plasma_wallpaper_org.waywallen.kde",
                                 "waywallen-display is not installed")
+                        : i18nd("plasma_wallpaper_org.waywallen.kde",
+                                "Embedded waywallen-display module failed to load")
                 }
                 QQC2.Label {
                     Layout.fillWidth: true
                     color: "white"
                     wrapMode: Text.WordWrap
-                    text: i18nd("plasma_wallpaper_org.waywallen.kde",
-                                "This wallpaper needs the waywallen-display library. " +
-                                "Please install it first:")
+                    text: root.configuration.SurfaceMode === "system"
+                        ? i18nd("plasma_wallpaper_org.waywallen.kde",
+                                "Install waywallen-display, or switch to Embedded mode in the wallpaper settings:")
+                        : i18nd("plasma_wallpaper_org.waywallen.kde",
+                                "The bundled module could not be loaded. Try switching to System mode after installing:")
                 }
                 QQC2.Label {
                     Layout.fillWidth: true
@@ -112,21 +113,5 @@ WallpaperItem {
         // and a slow/missing daemon would freeze the whole session.
         // The clear-color rectangle is always visible while we wait.
         root.loading = false;
-    }
-
-    Connections {
-        target: surfaceLoader
-        function onStatusChanged() {
-            if (surfaceLoader.status !== Loader.Error) return;
-            const failed = root.surfaceSources[root.surfaceSourceIndex];
-            if (root.surfaceSourceIndex < root.surfaceSources.length - 1) {
-                console.warn("waywallen-kde: failed to load", failed,
-                             "— trying next fallback");
-                root.surfaceSourceIndex += 1;
-            } else {
-                console.warn("waywallen-kde: failed to load", failed,
-                             "— no more fallbacks");
-            }
-        }
     }
 }

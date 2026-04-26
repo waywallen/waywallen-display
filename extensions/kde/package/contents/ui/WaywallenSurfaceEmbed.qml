@@ -6,13 +6,12 @@ WW.WaywallenDisplay {
 
     property string displayNameBinding
     property color  clearColorBinding
-    property bool   autoReconnectBinding
     property int    displayWidthBinding
     property int    displayHeightBinding
 
     displayName:   displayNameBinding
     clearColor:    clearColorBinding
-    autoReconnect: autoReconnectBinding
+    autoReconnect: true
     displayWidth:  displayWidthBinding
     displayHeight: displayHeightBinding
 

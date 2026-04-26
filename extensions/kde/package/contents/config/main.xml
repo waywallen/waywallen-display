@@ -11,8 +11,8 @@
         <entry name="ClearColor" type="Color">
             <default>0,0,0</default>
         </entry>
-        <entry name="AutoReconnect" type="Bool">
-            <default>true</default>
+        <entry name="SurfaceMode" type="String">
+            <default>embed</default>
         </entry>
         <entry name="ShowDiagnostics" type="Bool">
             <default>false</default>

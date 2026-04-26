@@ -13,7 +13,7 @@ ColumnLayout {
 
     property string cfg_DisplayName
     property color  cfg_ClearColor
-    property bool   cfg_AutoReconnect
+    property string cfg_SurfaceMode
     property bool   cfg_ShowDiagnostics
 
     property bool   _displayModuleAvailable: false
@@ -29,11 +29,11 @@ ColumnLayout {
 
     Kirigami.InlineMessage {
         Layout.fillWidth: true
-        visible: !root._displayModuleAvailable
+        visible: cfg_SurfaceMode === "system" && !root._displayModuleAvailable
         type: Kirigami.MessageType.Warning
         text: i18nd("plasma_wallpaper_org.waywallen.kde",
-                    "<b>waywallen-display</b> is not installed. " +
-                    "The wallpaper cannot render until you install it from " +
+                    "<b>waywallen-display</b> is not installed system-wide. " +
+                    "Switch to <i>Embedded</i> mode or install the module from " +
                     "<a href=\"https://github.com/waywallen/waywallen-display\">" +
                     "github.com/waywallen/waywallen-display</a>.")
         onLinkActivated: Qt.openUrlExternally(link)
@@ -58,10 +58,18 @@ ColumnLayout {
             dialogTitle: i18nd("plasma_wallpaper_org.waywallen.kde", "Select clear color")
         }
 
-        QQC2.CheckBox {
-            Kirigami.FormData.label: i18nd("plasma_wallpaper_org.waywallen.kde", "Reconnect automatically")
-            checked: cfg_AutoReconnect
-            onToggled: cfg_AutoReconnect = checked
+        QQC2.ComboBox {
+            Kirigami.FormData.label: i18nd("plasma_wallpaper_org.waywallen.kde", "Display module:")
+            textRole: "label"
+            valueRole: "value"
+            model: [
+                { value: "embed",  label: i18nd("plasma_wallpaper_org.waywallen.kde",
+                                                "Embedded (bundled with this wallpaper)") },
+                { value: "system", label: i18nd("plasma_wallpaper_org.waywallen.kde",
+                                                "System (requires waywallen-display installed)") }
+            ]
+            currentIndex: cfg_SurfaceMode === "system" ? 1 : 0
+            onActivated: cfg_SurfaceMode = currentValue
         }
 
         QQC2.CheckBox {
