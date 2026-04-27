@@ -230,6 +230,222 @@ static int enc_update(const void *m, ww_buf_t *out) {
 /* enc_release was removed when v1 dropped the BufferRelease request.
  * Release is now signaled by the host on the per-frame
  * release_syncobj fd that arrives with frame_ready. */
+static int enc_consumer_caps(const void *m, ww_buf_t *out) {
+    return ww_req_consumer_caps_encode((const ww_req_consumer_caps_t *)m, out);
+}
+
+/* Modifier-negotiation v2 — bit constants. Mirrored from
+ * waywallen/src/negotiate.rs; keep in sync.
+ *
+ * The daemon advertises "modifier_negotiation_v1" in welcome.features
+ * to indicate it understands these messages. */
+#define WW_USAGE_SAMPLED          (1u << 0)
+#define WW_MEM_HINT_HOST_VISIBLE  (1u << 1)
+#define WW_SYNC_SYNCOBJ_BINARY    (1u << 1)
+#define WW_SYNC_SYNCOBJ_TIMELINE  (1u << 2)
+#define WW_COLOR_ENC_SRGB         (1u << 0)
+#define WW_COLOR_RANGE_LIMITED    (1u << 6)
+#define WW_COLOR_ALPHA_PREMUL     (1u << 7)
+#define WW_DRM_FORMAT_ABGR8888    0x34324241u
+#define WW_DRM_FORMAT_XRGB8888    0x34325258u
+#define WW_DRM_FORMAT_MOD_LINEAR  0ULL
+
+/* Per-(fourcc, modifier) accumulator used while probing the active
+ * backend. Grows by doubling. */
+typedef struct ww_caps_buf {
+    uint32_t *fourccs;       /* one entry per modifier (flattened) */
+    uint64_t *modifiers;
+    uint32_t *plane_counts;
+    uint32_t *usages;
+    size_t    n;
+    size_t    cap;
+    int       oom;
+} ww_caps_buf_t;
+
+static int ww_caps_buf_grow(ww_caps_buf_t *b) {
+    size_t n = b->cap ? b->cap * 2 : 16;
+    uint32_t *f = (uint32_t *)realloc(b->fourccs, n * sizeof(*f));
+    uint64_t *m = (uint64_t *)realloc(b->modifiers, n * sizeof(*m));
+    uint32_t *p = (uint32_t *)realloc(b->plane_counts, n * sizeof(*p));
+    uint32_t *u = (uint32_t *)realloc(b->usages, n * sizeof(*u));
+    if (!f || !m || !p || !u) {
+        free(f); free(m); free(p); free(u);
+        b->oom = 1;
+        return -ENOMEM;
+    }
+    b->fourccs = f; b->modifiers = m; b->plane_counts = p; b->usages = u;
+    b->cap = n;
+    return 0;
+}
+
+static void ww_caps_buf_emit(uint32_t fourcc, uint64_t modifier,
+                             uint32_t plane_count, uint32_t usage,
+                             void *user_data) {
+    ww_caps_buf_t *b = (ww_caps_buf_t *)user_data;
+    if (b->oom) return;
+    if (b->n >= b->cap && ww_caps_buf_grow(b) != 0) return;
+    b->fourccs[b->n]      = fourcc;
+    b->modifiers[b->n]    = modifier;
+    b->plane_counts[b->n] = plane_count;
+    b->usages[b->n]       = usage;
+    b->n++;
+}
+
+static void ww_caps_buf_free(ww_caps_buf_t *b) {
+    free(b->fourccs);
+    free(b->modifiers);
+    free(b->plane_counts);
+    free(b->usages);
+    memset(b, 0, sizeof(*b));
+}
+
+/* Group the flattened (fourcc, modifier) pairs into the wire encoding
+ * the protocol expects: distinct fourccs, with mod_counts[i] giving
+ * the number of modifiers attached to fourccs[i]. Stable iteration
+ * order: first occurrence of a fourcc wins. Returns 0 on success.
+ * Allocates `*out_fourccs` / `*out_mod_counts`; caller frees. */
+static int ww_caps_group_fourccs(const ww_caps_buf_t *flat,
+                                 uint32_t **out_fourccs,
+                                 uint32_t **out_mod_counts,
+                                 size_t *out_n_fourccs) {
+    uint32_t *fourccs = (uint32_t *)calloc(flat->n, sizeof(*fourccs));
+    uint32_t *counts  = (uint32_t *)calloc(flat->n, sizeof(*counts));
+    if (!fourccs || !counts) {
+        free(fourccs); free(counts);
+        return -ENOMEM;
+    }
+    size_t k = 0;
+    for (size_t i = 0; i < flat->n; ++i) {
+        uint32_t f = flat->fourccs[i];
+        size_t found = SIZE_MAX;
+        for (size_t j = 0; j < k; ++j) {
+            if (fourccs[j] == f) { found = j; break; }
+        }
+        if (found == SIZE_MAX) {
+            fourccs[k] = f;
+            counts[k]  = 1;
+            k++;
+        } else {
+            counts[found]++;
+        }
+    }
+    *out_fourccs    = fourccs;
+    *out_mod_counts = counts;
+    *out_n_fourccs  = k;
+    return 0;
+}
+
+/* Build + send a `consumer_caps` request to the daemon. Called from
+ * the handshake state machine right after `display_accepted` and
+ * before transitioning to READY. Synchronous; uses the same blocking
+ * codec path as `send_request_msg`.
+ *
+ * Probes the active backend (EGL or Vulkan) for its real
+ * (fourcc, modifier) import set + device UUID. Falls back to a
+ * hardcoded ABGR/XRGB + LINEAR set with zero UUIDs only if the
+ * probe fails or no backend is bound (the daemon's picker then
+ * forces HOST_VISIBLE and treats this peer as cross-GPU). */
+static int send_consumer_caps_blocking(waywallen_display_t *d) {
+    ww_caps_buf_t buf = {0};
+    uint8_t dev_uuid_bytes[16] = {0};
+    uint8_t drv_uuid_bytes[16] = {0};
+
+    int probe_rc = -ENOSYS;
+    switch (d->backend) {
+#ifdef WW_HAVE_EGL
+    case WAYWALLEN_BACKEND_EGL:
+        if (d->egl_backend.loaded) {
+            probe_rc = ww_egl_query_format_caps(
+                &d->egl_backend, (EGLDisplay)d->egl.egl_display,
+                ww_caps_buf_emit, &buf);
+        }
+        break;
+#endif
+#ifdef WW_HAVE_VULKAN
+    case WAYWALLEN_BACKEND_VULKAN:
+        if (d->vk_backend.loaded) {
+            probe_rc = ww_vk_query_format_caps(
+                &d->vk_backend, ww_caps_buf_emit, &buf);
+            if (probe_rc == 0) {
+                /* Best-effort UUIDs; ignore failure → leave zeros. */
+                (void)ww_vk_query_device_uuid(
+                    &d->vk_backend, dev_uuid_bytes, drv_uuid_bytes);
+            }
+        }
+        break;
+#endif
+    default:
+        break;
+    }
+    if (probe_rc != 0 || buf.n == 0 || buf.oom) {
+        ww_caps_buf_free(&buf);
+        ww_log(WAYWALLEN_LOG_INFO,
+               "consumer_caps: backend probe unavailable (rc=%d, n=%zu); "
+               "falling back to ABGR/XRGB + LINEAR",
+               probe_rc, buf.n);
+        ww_caps_buf_emit(WW_DRM_FORMAT_ABGR8888, WW_DRM_FORMAT_MOD_LINEAR,
+                         1, WW_USAGE_SAMPLED, &buf);
+        ww_caps_buf_emit(WW_DRM_FORMAT_XRGB8888, WW_DRM_FORMAT_MOD_LINEAR,
+                         1, WW_USAGE_SAMPLED, &buf);
+    } else {
+        ww_log(WAYWALLEN_LOG_INFO,
+               "consumer_caps: backend probe yielded %zu (fourcc, modifier) entries",
+               buf.n);
+    }
+    if (buf.oom) {
+        ww_caps_buf_free(&buf);
+        return -ENOMEM;
+    }
+
+    uint32_t *grp_fourccs = NULL;
+    uint32_t *grp_counts  = NULL;
+    size_t    grp_n       = 0;
+    int gr = ww_caps_group_fourccs(&buf, &grp_fourccs, &grp_counts, &grp_n);
+    if (gr != 0) {
+        ww_caps_buf_free(&buf);
+        return gr;
+    }
+
+    /* Pack the 16-byte UUIDs as 4×u32 little-endian for the wire. */
+    uint32_t dev_uuid_w[4];
+    uint32_t drv_uuid_w[4];
+    for (int i = 0; i < 4; ++i) {
+        memcpy(&dev_uuid_w[i], dev_uuid_bytes + i * 4, 4);
+        memcpy(&drv_uuid_w[i], drv_uuid_bytes + i * 4, 4);
+    }
+
+    ww_req_consumer_caps_t m;
+    memset(&m, 0, sizeof(m));
+    m.fourccs.count       = (uint32_t)grp_n;
+    m.fourccs.data        = grp_fourccs;
+    m.mod_counts.count    = (uint32_t)grp_n;
+    m.mod_counts.data     = grp_counts;
+    m.modifiers.count     = (uint32_t)buf.n;
+    m.modifiers.data      = buf.modifiers;
+    m.usages.count        = (uint32_t)buf.n;
+    m.usages.data         = buf.usages;
+    m.plane_counts.count  = (uint32_t)buf.n;
+    m.plane_counts.data   = buf.plane_counts;
+    m.device_uuid.count   = 4;
+    m.device_uuid.data    = dev_uuid_w;
+    m.driver_uuid.count   = 4;
+    m.driver_uuid.data    = drv_uuid_w;
+    m.drm_render_major    = d->hs_drm_render_major;
+    m.drm_render_minor    = d->hs_drm_render_minor;
+    m.mem_hints           = WW_MEM_HINT_HOST_VISIBLE;
+    m.sync_caps           = WW_SYNC_SYNCOBJ_TIMELINE | WW_SYNC_SYNCOBJ_BINARY;
+    m.color_caps          = WW_COLOR_ENC_SRGB | WW_COLOR_RANGE_LIMITED
+                          | WW_COLOR_ALPHA_PREMUL;
+    m.extent_max_w        = 16384;
+    m.extent_max_h        = 16384;
+
+    int rc = send_request_msg(d, WW_REQ_CONSUMER_CAPS, enc_consumer_caps, &m);
+    free(grp_fourccs);
+    free(grp_counts);
+    ww_caps_buf_free(&buf);
+    return rc;
+}
+
 static int enc_bye(const void *m, ww_buf_t *out) {
     return ww_req_bye_encode((const ww_req_bye_t *)m, out);
 }
@@ -667,6 +883,17 @@ static int hs_advance_one(waywallen_display_t *d) {
         d->display_id = accepted.display_id;
         ww_evt_display_accepted_free(&accepted);
         d->conn = WW_CONN_CONNECTED;
+        // Modifier-negotiation v2 — ship a hardcoded LINEAR-only
+        // ConsumerCaps before transitioning to READY. Real probing
+        // (eglQueryDmaBufModifiersEXT / vkGetPhysicalDeviceFormatProperties2)
+        // is a follow-up; LINEAR is the cross-vendor floor every backend
+        // can import, so this is correct (if conservative). The
+        // daemon's picker collapses to LINEAR cross-vendor anyway.
+        if (send_consumer_caps_blocking(d) != WAYWALLEN_OK) {
+            // Don't fail the handshake — the daemon falls back to
+            // legacy behavior for displays without caps. The error is
+            // surfaced via fire_disconnected if it was fatal.
+        }
         d->hs_state = WW_HS_READY;
         ww_codec_recv_state_reset(&d->hs_recv);
         return WAYWALLEN_HS_DONE;

@@ -62,6 +62,13 @@ typedef struct ww_egl_backend {
     /* GL_OES_EGL_image entry point. */
     PFNGLEGLIMAGETARGETTEXTURE2DOESPROC glEGLImageTargetTexture2DOES;
 
+    /* EGL_EXT_image_dma_buf_import_modifiers cap probe. Optional —
+     * older Mesa lacks the modifier-aware extension, in which case
+     * `ww_egl_query_format_caps` returns -ENOSYS and the caller
+     * falls back to a hardcoded LINEAR-only set. */
+    PFNEGLQUERYDMABUFFORMATSEXTPROC   eglQueryDmaBufFormatsEXT;
+    PFNEGLQUERYDMABUFMODIFIERSEXTPROC eglQueryDmaBufModifiersEXT;
+
     /* Core GLES2 (resolved from libGLESv2.so.2). */
     void (*glGenTextures)(GLsizei, GLuint *);
     void (*glDeleteTextures)(GLsizei, const GLuint *);
@@ -149,6 +156,37 @@ int ww_egl_query_drm_render_node(const ww_egl_backend_t *backend,
                                  EGLDisplay egl_display,
                                  uint32_t *out_major,
                                  uint32_t *out_minor);
+
+/* ------------------------------------------------------------------ */
+/*  Format/modifier capability probe                                   */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Streaming emit callback used by `ww_egl_query_format_caps` to feed
+ * each accepted (fourcc, modifier) pair to the caller. `usage` and
+ * `plane_count` mirror the wire bitmask + plane field in
+ * `consumer_caps`.
+ */
+typedef void (*ww_egl_caps_emit_fn)(uint32_t fourcc,
+                                    uint64_t modifier,
+                                    uint32_t plane_count,
+                                    uint32_t usage,
+                                    void *user_data);
+
+/*
+ * Enumerate the (fourcc, modifier) set the driver advertises as
+ * importable via `EGL_EXT_image_dma_buf_import_modifiers`. For each
+ * accepted pair (external_only=false) the `emit` callback is invoked
+ * once. Caller is responsible for filtering / deduplication.
+ *
+ * Returns 0 on success, -ENOSYS when the EXT isn't available, or
+ * -errno from a failed query. On any error `emit` is not invoked at
+ * all, so the caller can safely fall back to a hardcoded cap set.
+ */
+int ww_egl_query_format_caps(const ww_egl_backend_t *backend,
+                             EGLDisplay egl_display,
+                             ww_egl_caps_emit_fn emit,
+                             void *user_data);
 
 /* ------------------------------------------------------------------ */
 /*  Acquire sync fence                                                 */

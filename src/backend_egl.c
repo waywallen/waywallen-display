@@ -205,6 +205,25 @@ int ww_egl_backend_load(ww_egl_backend_t *backend,
 
 #undef RESOLVE_REQUIRED
 
+/* Optional symbols: missing → NULL slot, no error. The cap probe
+ * checks for non-NULL before invoking; callers fall back to a
+ * hardcoded LINEAR-only set when the driver lacks the EXT. */
+#define RESOLVE_OPTIONAL(SLOT, TYPE, NAME, DL) do {                 \
+        void (*f)(void) = resolve_symbol(host_get_proc_address,     \
+                                         backend->eglGetProcAddress,\
+                                         (DL), NAME);               \
+        backend->SLOT = (TYPE)f;                                    \
+    } while (0)
+
+    RESOLVE_OPTIONAL(eglQueryDmaBufFormatsEXT,
+                     PFNEGLQUERYDMABUFFORMATSEXTPROC,
+                     "eglQueryDmaBufFormatsEXT", s_libegl);
+    RESOLVE_OPTIONAL(eglQueryDmaBufModifiersEXT,
+                     PFNEGLQUERYDMABUFMODIFIERSEXTPROC,
+                     "eglQueryDmaBufModifiersEXT", s_libegl);
+
+#undef RESOLVE_OPTIONAL
+
     backend->loaded = true;
     return 0;
 }
@@ -451,6 +470,73 @@ int ww_egl_query_drm_render_node(const ww_egl_backend_t *backend,
     *out_major = major(st.st_rdev);
     *out_minor = minor(st.st_rdev);
     return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Format/modifier capability probe                                   */
+/* ------------------------------------------------------------------ */
+
+int ww_egl_query_format_caps(const ww_egl_backend_t *backend,
+                             EGLDisplay egl_display,
+                             ww_egl_caps_emit_fn emit,
+                             void *user_data) {
+    if (!backend || !backend->loaded || !emit) return -EINVAL;
+    if (!backend->eglQueryDmaBufFormatsEXT
+        || !backend->eglQueryDmaBufModifiersEXT) {
+        return -ENOSYS;
+    }
+
+    /* Step 1: enumerate fourccs the driver imports. */
+    EGLint num_fmts = 0;
+    if (!backend->eglQueryDmaBufFormatsEXT(egl_display, 0, NULL, &num_fmts)
+        || num_fmts <= 0) {
+        ww_log(WAYWALLEN_LOG_DEBUG, "egl: eglQueryDmaBufFormatsEXT count=0");
+        return -ENOSYS;
+    }
+    EGLint *fmts = (EGLint *)calloc((size_t)num_fmts, sizeof(*fmts));
+    if (!fmts) return -ENOMEM;
+    if (!backend->eglQueryDmaBufFormatsEXT(egl_display, num_fmts, fmts, &num_fmts)) {
+        free(fmts);
+        return -EIO;
+    }
+
+    /* Step 2: per fourcc, enumerate modifiers + filter external_only.
+     * Skip fourccs that report 0 modifiers — they're typically formats
+     * the driver lists but can't actually import (NVIDIA/Mesa quirk). */
+    int worst_rc = 0;
+    for (EGLint i = 0; i < num_fmts; ++i) {
+        EGLint num_mods = 0;
+        if (!backend->eglQueryDmaBufModifiersEXT(egl_display, fmts[i], 0,
+                                                 NULL, NULL, &num_mods)) {
+            continue;
+        }
+        if (num_mods <= 0) {
+            /* Implicit-modifier-only; advertise as LINEAR so the daemon's
+             * picker has at least one option per fourcc. */
+            emit((uint32_t)fmts[i], 0 /*LINEAR*/, 1, 1u /*USAGE_SAMPLED*/, user_data);
+            continue;
+        }
+        EGLuint64KHR *mods = (EGLuint64KHR *)calloc((size_t)num_mods, sizeof(*mods));
+        EGLBoolean *ext_only = (EGLBoolean *)calloc((size_t)num_mods, sizeof(*ext_only));
+        if (!mods || !ext_only) {
+            free(mods);
+            free(ext_only);
+            worst_rc = -ENOMEM;
+            break;
+        }
+        if (backend->eglQueryDmaBufModifiersEXT(egl_display, fmts[i], num_mods,
+                                                mods, ext_only, &num_mods)) {
+            for (EGLint j = 0; j < num_mods; ++j) {
+                if (ext_only[j]) continue;   /* skip GL_TEXTURE_EXTERNAL-only */
+                emit((uint32_t)fmts[i], (uint64_t)mods[j], 1,
+                     1u /*USAGE_SAMPLED*/, user_data);
+            }
+        }
+        free(mods);
+        free(ext_only);
+    }
+    free(fmts);
+    return worst_rc;
 }
 
 #else /* !WW_HAVE_EGL */

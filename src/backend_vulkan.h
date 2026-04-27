@@ -112,6 +112,46 @@ int ww_vk_query_drm_render_node(const ww_vk_backend_t *backend,
                                 uint32_t *out_minor);
 
 /* ------------------------------------------------------------------ */
+/*  Format/modifier capability probe                                   */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Streaming emit callback used by `ww_vk_query_format_caps`. Signature
+ * mirrors the EGL backend's; consumers can share a single accumulator.
+ */
+typedef void (*ww_vk_caps_emit_fn)(uint32_t fourcc,
+                                   uint64_t modifier,
+                                   uint32_t plane_count,
+                                   uint32_t usage,
+                                   void *user_data);
+
+/*
+ * Enumerate (fourcc, modifier) pairs the physical device advertises
+ * for sampled-image import via `VK_EXT_image_drm_format_modifier`.
+ * Walks a fixed set of common 32-bit RGBA fourccs; for each calls
+ * `vkGetPhysicalDeviceFormatProperties2` with
+ * `VkDrmFormatModifierPropertiesListEXT` chained in. Reports each
+ * accepted (fourcc, modifier) pair via `emit`.
+ *
+ * Returns 0 on success, -ENOSYS if the EXT entry points cannot be
+ * resolved on the instance, or -errno from a failed query. On any
+ * error `emit` is not invoked.
+ */
+int ww_vk_query_format_caps(const ww_vk_backend_t *backend,
+                            ww_vk_caps_emit_fn emit,
+                            void *user_data);
+
+/*
+ * Read the `VkPhysicalDeviceIDProperties` deviceUUID + driverUUID
+ * for the bound physical device. Each output buffer must point to a
+ * 16-byte array. Returns 0 on success, -ENOSYS if
+ * `vkGetPhysicalDeviceProperties2` is unavailable.
+ */
+int ww_vk_query_device_uuid(const ww_vk_backend_t *backend,
+                            uint8_t out_device_uuid[16],
+                            uint8_t out_driver_uuid[16]);
+
+/* ------------------------------------------------------------------ */
 
 typedef struct ww_vk_dmabuf_import {
     uint32_t fourcc;

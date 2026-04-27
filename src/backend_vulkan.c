@@ -20,6 +20,7 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -698,6 +699,125 @@ int ww_vk_query_drm_render_node(const ww_vk_backend_t *backend,
     }
     *out_major = (uint32_t)drm.renderMajor;
     *out_minor = (uint32_t)drm.renderMinor;
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Format/modifier capability probe                                   */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Drm fourccs we probe and their Vulkan counterparts. The mapping
+ * follows Mesa's drm-format ↔ VkFormat table for the 32-bit RGBA
+ * permutations actually used in this codebase. Drivers that don't
+ * support a fourcc just report 0 modifiers and we skip it.
+ */
+struct ww_vk_fourcc_entry {
+    uint32_t fourcc;
+    VkFormat vk_format;
+};
+static const struct ww_vk_fourcc_entry s_vk_fourcc_table[] = {
+    { 0x34324241, VK_FORMAT_R8G8B8A8_UNORM }, /* AB24 — DRM_FORMAT_ABGR8888 */
+    { 0x34324258, VK_FORMAT_R8G8B8A8_UNORM }, /* XB24 — DRM_FORMAT_XBGR8888 */
+    { 0x34325241, VK_FORMAT_B8G8R8A8_UNORM }, /* AR24 — DRM_FORMAT_ARGB8888 */
+    { 0x34325258, VK_FORMAT_B8G8R8A8_UNORM }, /* XR24 — DRM_FORMAT_XRGB8888 */
+};
+
+int ww_vk_query_format_caps(const ww_vk_backend_t *backend,
+                            ww_vk_caps_emit_fn emit,
+                            void *user_data) {
+    if (!backend || !backend->loaded || !emit) return -EINVAL;
+    if (!backend->vkGetInstanceProcAddr) return -ENOSYS;
+
+    PFN_vkVoidFunction fp_vf = backend->vkGetInstanceProcAddr(
+        backend->instance, "vkGetPhysicalDeviceFormatProperties2");
+    if (!fp_vf) {
+        fp_vf = backend->vkGetInstanceProcAddr(
+            backend->instance, "vkGetPhysicalDeviceFormatProperties2KHR");
+    }
+    if (!fp_vf) return -ENOSYS;
+    PFN_vkGetPhysicalDeviceFormatProperties2 gpdfp2 =
+        (PFN_vkGetPhysicalDeviceFormatProperties2)fp_vf;
+
+    const uint32_t want_features = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT
+                                 | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+
+    for (size_t i = 0;
+         i < sizeof(s_vk_fourcc_table) / sizeof(s_vk_fourcc_table[0]);
+         ++i) {
+        const struct ww_vk_fourcc_entry *e = &s_vk_fourcc_table[i];
+
+        /* Two-call idiom: first to learn modifier count, second to
+         * fill the array. */
+        VkDrmFormatModifierPropertiesListEXT list = {0};
+        list.sType = VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT;
+        list.pNext = NULL;
+        list.drmFormatModifierCount = 0;
+        list.pDrmFormatModifierProperties = NULL;
+
+        VkFormatProperties2 props = {0};
+        props.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2;
+        props.pNext = &list;
+
+        gpdfp2(backend->physical_device, e->vk_format, &props);
+        if (list.drmFormatModifierCount == 0) continue;
+
+        VkDrmFormatModifierPropertiesEXT *entries =
+            (VkDrmFormatModifierPropertiesEXT *)calloc(
+                list.drmFormatModifierCount, sizeof(*entries));
+        if (!entries) return -ENOMEM;
+        list.pDrmFormatModifierProperties = entries;
+        gpdfp2(backend->physical_device, e->vk_format, &props);
+
+        for (uint32_t j = 0; j < list.drmFormatModifierCount; ++j) {
+            const VkDrmFormatModifierPropertiesEXT *m = &entries[j];
+            /* Require at least sampled-image + transfer_dst — a
+             * texture we couldn't sample is useless. drmFormatModifierPlaneCount
+             * is the per-buffer plane count for this modifier. */
+            if ((m->drmFormatModifierTilingFeatures & want_features)
+                != want_features) {
+                continue;
+            }
+            uint32_t planes = m->drmFormatModifierPlaneCount > 0
+                ? m->drmFormatModifierPlaneCount : 1u;
+            emit(e->fourcc, (uint64_t)m->drmFormatModifier, planes,
+                 1u /*USAGE_SAMPLED*/, user_data);
+        }
+        free(entries);
+    }
+    return 0;
+}
+
+int ww_vk_query_device_uuid(const ww_vk_backend_t *backend,
+                            uint8_t out_device_uuid[16],
+                            uint8_t out_driver_uuid[16]) {
+    if (!backend || !backend->loaded || !out_device_uuid || !out_driver_uuid) {
+        return -EINVAL;
+    }
+    if (!backend->vkGetInstanceProcAddr) return -ENOSYS;
+
+    PFN_vkVoidFunction p2_vf = backend->vkGetInstanceProcAddr(
+        backend->instance, "vkGetPhysicalDeviceProperties2");
+    if (!p2_vf) {
+        p2_vf = backend->vkGetInstanceProcAddr(
+            backend->instance, "vkGetPhysicalDeviceProperties2KHR");
+    }
+    if (!p2_vf) return -ENOSYS;
+    PFN_vkGetPhysicalDeviceProperties2 gpdp2 =
+        (PFN_vkGetPhysicalDeviceProperties2)p2_vf;
+
+    VkPhysicalDeviceIDProperties id = {0};
+    id.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
+    id.pNext = NULL;
+
+    VkPhysicalDeviceProperties2 props = {0};
+    props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    props.pNext = &id;
+
+    gpdp2(backend->physical_device, &props);
+
+    memcpy(out_device_uuid, id.deviceUUID, 16);
+    memcpy(out_driver_uuid, id.driverUUID, 16);
     return 0;
 }
 
