@@ -651,6 +651,7 @@ static int hs_queue_hello(waywallen_display_t *d) {
     hello.protocol = (char *)WW_PROTOCOL_NAME;
     hello.client_name = (char *)"libwaywallen_display";
     hello.client_version = (char *)"0.1.0";
+    hello.client_protocol_version = WAYWALLEN_DISPLAY_PROTOCOL_VERSION;
     return hs_queue_request(d, WW_REQ_HELLO, enc_hello, &hello);
 }
 
@@ -811,6 +812,10 @@ static int hs_advance_one(waywallen_display_t *d) {
             ww_codec_recv_state_reset(&d->hs_recv);
             return WAYWALLEN_ERR_PROTO;
         }
+        /* Decode purely for diagnostics — `welcome` is informational
+         * in v3+. Version compatibility was already enforced by the
+         * daemon before it sent welcome; reaching here means we are
+         * a supported client. Features are advisory only. */
         ww_evt_welcome_t welcome;
         if (ww_evt_welcome_decode(d->hs_recv.body, d->hs_recv.body_len,
                                   &welcome) != WW_OK) {
@@ -818,21 +823,8 @@ static int hs_advance_one(waywallen_display_t *d) {
             ww_codec_recv_state_reset(&d->hs_recv);
             return WAYWALLEN_ERR_PROTO;
         }
-        bool has_explicit_sync = false;
-        for (uint32_t i = 0; i < welcome.features.count; i++) {
-            if (welcome.features.data[i]
-                && strcmp(welcome.features.data[i], "explicit_sync_fd") == 0) {
-                has_explicit_sync = true;
-                break;
-            }
-        }
         ww_evt_welcome_free(&welcome);
         ww_codec_recv_state_reset(&d->hs_recv);
-        if (!has_explicit_sync) {
-            fire_disconnected(d, WAYWALLEN_ERR_PROTO,
-                              "server missing explicit_sync_fd feature");
-            return WAYWALLEN_ERR_PROTO;
-        }
         int rc2 = hs_queue_register(d);
         if (rc2 != WAYWALLEN_OK) {
             fire_disconnected(d, rc2, "queue register_display");

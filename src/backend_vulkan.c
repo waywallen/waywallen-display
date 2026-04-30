@@ -721,6 +721,17 @@ static const struct ww_vk_fourcc_entry s_vk_fourcc_table[] = {
     { 0x34324258, VK_FORMAT_R8G8B8A8_UNORM }, /* XB24 — DRM_FORMAT_XBGR8888 */
     { 0x34325241, VK_FORMAT_B8G8R8A8_UNORM }, /* AR24 — DRM_FORMAT_ARGB8888 */
     { 0x34325258, VK_FORMAT_B8G8R8A8_UNORM }, /* XR24 — DRM_FORMAT_XRGB8888 */
+    /* Mirror the producer's full candidate list (waywallen/plugins/mpv/src
+     * /main.cpp:pick_export_format). The values match WW_DRM_FORMAT_*
+     * in waywallen/bridge/include/waywallen-bridge/drm_fourcc.h — the
+     * daemon negotiator compares these by exact integer, so producer
+     * and consumer must agree on the same bag of bits. Vulkan silently
+     * reports 0 modifiers for any (VkFormat, fourcc) the driver can't
+     * import, so a fourcc the GPU doesn't actually support is a no-op. */
+    { 0x41424752, VK_FORMAT_R8G8B8A8_UNORM }, /* RGBA — DRM_FORMAT_RGBA8888 */
+    { 0x41524742, VK_FORMAT_B8G8R8A8_UNORM }, /* BGRA — DRM_FORMAT_BGRA8888 */
+    { 0x58424752, VK_FORMAT_R8G8B8A8_UNORM }, /* RGBX — DRM_FORMAT_RGBX8888 */
+    { 0x58524742, VK_FORMAT_B8G8R8A8_UNORM }, /* BGRX — DRM_FORMAT_BGRX8888 */
 };
 
 int ww_vk_query_format_caps(const ww_vk_backend_t *backend,
