@@ -42,6 +42,15 @@ extern "C" {
 #define WAYWALLEN_DISPLAY_VERSION_MAJOR 0
 #define WAYWALLEN_DISPLAY_VERSION_MINOR 1
 
+/*
+ * On-the-wire protocol version. Independent of the library API/ABI
+ * version above — this number tracks the `<protocol version="...">`
+ * attribute in waywallen_display_v1.xml and is sent verbatim in
+ * `hello.client_protocol_version`. The daemon owns the supported
+ * range and rejects out-of-range clients with `error{code=2}`.
+ */
+#define WAYWALLEN_DISPLAY_PROTOCOL_VERSION 3
+
 /* -------------------------------------------------------------------------
  * Return codes
  * ------------------------------------------------------------------------- */
