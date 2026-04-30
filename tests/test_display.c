@@ -59,6 +59,13 @@ struct test_state {
 
     int  last_disconnect_code;
     char last_disconnect_msg[256];
+
+    /* Populated by handler_full_handshake_capture_caps after decoding
+     * the client's consumer_caps request. */
+    int      saw_consumer_caps;
+    uint32_t consumer_caps_mem_hints;
+    uint32_t consumer_caps_sync_caps;
+    uint32_t consumer_caps_color_caps;
 };
 
 static void cb_textures_ready(void *ud, const waywallen_textures_t *t) {
@@ -255,6 +262,82 @@ static int handler_full_handshake(int client_fd, struct test_state *ts) {
                                WW_CODEC_MAX_BODY_BYTES, &body_len,
                                fds, 4, &n_fds);
     (void)rc;
+    return 0;
+}
+
+/* Like handler_full_handshake, but also reads + decodes the
+ * consumer_caps request the client emits after display_accepted, and
+ * records mem_hints / sync_caps / color_caps onto the test_state for
+ * the main thread to assert. */
+static int handler_full_handshake_capture_caps(int client_fd,
+                                               struct test_state *ts) {
+    static uint8_t body_buf[WW_CODEC_MAX_BODY_BYTES];
+    uint16_t op;
+    size_t body_len;
+    int fds[4];
+    size_t n_fds;
+
+    /* HELLO -> WELCOME */
+    int rc = ww_codec_recv_request(client_fd, &op, body_buf,
+                                   WW_CODEC_MAX_BODY_BYTES, &body_len,
+                                   fds, 4, &n_fds);
+    if (rc != 0 || op != WW_REQ_HELLO) return -1;
+    ww_req_hello_t hello;
+    if (ww_req_hello_decode(body_buf, body_len, &hello) != WW_OK) return -1;
+    ww_req_hello_free(&hello);
+
+    ww_evt_welcome_t welcome;
+    memset(&welcome, 0, sizeof(welcome));
+    welcome.server_version = (char *)"mock-server/0.1";
+    char *features_data[1] = { (char *)"explicit_sync_fd" };
+    welcome.features.count = 1;
+    welcome.features.data = features_data;
+    ww_buf_t out;
+    ww_buf_init(&out);
+    if (ww_evt_welcome_encode(&welcome, &out) != WW_OK) {
+        ww_buf_free(&out);
+        return -1;
+    }
+    rc = ww_codec_send_event(client_fd, WW_EVT_WELCOME,
+                             out.data, out.len, NULL, 0);
+    ww_buf_free(&out);
+    if (rc != 0) return -1;
+
+    /* REGISTER_DISPLAY -> DISPLAY_ACCEPTED */
+    rc = ww_codec_recv_request(client_fd, &op, body_buf,
+                               WW_CODEC_MAX_BODY_BYTES, &body_len,
+                               fds, 4, &n_fds);
+    if (rc != 0 || op != WW_REQ_REGISTER_DISPLAY) return -1;
+    ww_req_register_display_t reg;
+    if (ww_req_register_display_decode(body_buf, body_len, &reg) != WW_OK) return -1;
+    ww_req_register_display_free(&reg);
+
+    ww_evt_display_accepted_t accepted = { .display_id = 99 };
+    ww_buf_init(&out);
+    if (ww_evt_display_accepted_encode(&accepted, &out) != WW_OK) {
+        ww_buf_free(&out);
+        return -1;
+    }
+    rc = ww_codec_send_event(client_fd, WW_EVT_DISPLAY_ACCEPTED,
+                             out.data, out.len, NULL, 0);
+    ww_buf_free(&out);
+    if (rc != 0) return -1;
+
+    /* CONSUMER_CAPS -- the next request the client sends after
+     * display_accepted. Capture mem_hints / sync_caps / color_caps. */
+    rc = ww_codec_recv_request(client_fd, &op, body_buf,
+                               WW_CODEC_MAX_BODY_BYTES, &body_len,
+                               fds, 4, &n_fds);
+    if (rc != 0 || op != WW_REQ_CONSUMER_CAPS) return -1;
+    ww_req_consumer_caps_t caps;
+    if (ww_req_consumer_caps_decode(body_buf, body_len, &caps) != WW_OK) {
+        return -1;
+    }
+    ts->consumer_caps_mem_hints = caps.mem_hints;
+    ts->consumer_caps_sync_caps = caps.sync_caps;
+    ts->consumer_caps_color_caps = caps.color_caps;
+    ts->saw_consumer_caps = 1;
+    ww_req_consumer_caps_free(&caps);
     return 0;
 }
 
@@ -462,6 +545,53 @@ static void test_full_handshake_via_async_api(void) {
     printf("  ok test_full_handshake_via_async_api\n");
 }
 
+/* No backend bound → consumer_caps probe falls through to the
+ * hardcoded ABGR/XRGB + LINEAR fallback. The library should:
+ *   - set HOST_VISIBLE in mem_hints (always)
+ *   - set LINEAR_ONLY in mem_hints (every advertised modifier is LINEAR)
+ *   - leave DEVICE_LOCAL clear (no Vulkan probe ran)
+ *   - advertise both BINARY+TIMELINE in sync_caps unconditionally */
+static void test_consumer_caps_signals_linear_only_when_no_backend(void) {
+    struct test_state ts;
+    ts_init(&ts);
+    pthread_t srv = spawn_server(&ts, handler_full_handshake_capture_caps);
+
+    waywallen_display_t *d = make_client(&ts);
+    int rc = waywallen_display_begin_connect(d, ts.sock_path, "test-display",
+                                             1920, 1080, 60000);
+    assert(rc == WAYWALLEN_OK);
+    rc = drive_handshake(d, 2000);
+    assert(rc == WAYWALLEN_OK);
+
+    pthread_join(srv, NULL);
+
+    assert(ts.saw_consumer_caps && "server never received consumer_caps");
+
+    const uint32_t WW_MEM_HINT_DEVICE_LOCAL = 1u << 0;
+    const uint32_t WW_MEM_HINT_HOST_VISIBLE = 1u << 1;
+    const uint32_t WW_MEM_HINT_LINEAR_ONLY  = 1u << 4;
+    const uint32_t WW_SYNC_SYNCOBJ_BINARY   = 1u << 1;
+    const uint32_t WW_SYNC_SYNCOBJ_TIMELINE = 1u << 2;
+
+    assert((ts.consumer_caps_mem_hints & WW_MEM_HINT_HOST_VISIBLE) != 0
+           && "expected HOST_VISIBLE in mem_hints");
+    assert((ts.consumer_caps_mem_hints & WW_MEM_HINT_LINEAR_ONLY) != 0
+           && "expected LINEAR_ONLY in mem_hints (no backend → fallback)");
+    assert((ts.consumer_caps_mem_hints & WW_MEM_HINT_DEVICE_LOCAL) == 0
+           && "DEVICE_LOCAL must not be advertised without Vulkan probe");
+    assert((ts.consumer_caps_sync_caps
+            & (WW_SYNC_SYNCOBJ_BINARY | WW_SYNC_SYNCOBJ_TIMELINE))
+           == (WW_SYNC_SYNCOBJ_BINARY | WW_SYNC_SYNCOBJ_TIMELINE)
+           && "sync_caps must advertise BINARY+TIMELINE");
+
+    waywallen_display_disconnect(d);
+    waywallen_display_destroy(d);
+    ts_teardown(&ts);
+    printf("  ok test_consumer_caps_signals_linear_only_when_no_backend "
+           "(mem_hints=0x%x sync_caps=0x%x)\n",
+           ts.consumer_caps_mem_hints, ts.consumer_caps_sync_caps);
+}
+
 static void test_partial_welcome(void) {
     struct test_state ts;
     ts_init(&ts);
@@ -530,6 +660,7 @@ int main(void) {
     test_legacy_blocking_connect();
     test_begin_connect_immediate();
     test_full_handshake_via_async_api();
+    test_consumer_caps_signals_linear_only_when_no_backend();
     test_partial_welcome();
     test_server_closes_during_welcome_wait();
     test_server_sends_error_event();

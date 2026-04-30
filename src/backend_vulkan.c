@@ -832,6 +832,33 @@ int ww_vk_query_device_uuid(const ww_vk_backend_t *backend,
     return 0;
 }
 
+int ww_vk_query_supports_device_local(const ww_vk_backend_t *backend,
+                                      int *out_has_device_local) {
+    if (!backend || !backend->loaded || !out_has_device_local) return -EINVAL;
+    if (!backend->vkGetInstanceProcAddr) return -ENOSYS;
+
+    PFN_vkVoidFunction mp_vf = backend->vkGetInstanceProcAddr(
+        backend->instance, "vkGetPhysicalDeviceMemoryProperties");
+    if (!mp_vf) return -ENOSYS;
+    PFN_vkGetPhysicalDeviceMemoryProperties gpdmp =
+        (PFN_vkGetPhysicalDeviceMemoryProperties)mp_vf;
+
+    VkPhysicalDeviceMemoryProperties pdmp;
+    memset(&pdmp, 0, sizeof(pdmp));
+    gpdmp(backend->physical_device, &pdmp);
+
+    int found = 0;
+    for (uint32_t i = 0; i < pdmp.memoryTypeCount; ++i) {
+        if (pdmp.memoryTypes[i].propertyFlags
+            & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) {
+            found = 1;
+            break;
+        }
+    }
+    *out_has_device_local = found;
+    return 0;
+}
+
 #else /* !WW_HAVE_VULKAN */
 
 typedef int ww_vk_backend_disabled_t;

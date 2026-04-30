@@ -240,7 +240,9 @@ static int enc_consumer_caps(const void *m, ww_buf_t *out) {
  * The daemon advertises "modifier_negotiation_v1" in welcome.features
  * to indicate it understands these messages. */
 #define WW_USAGE_SAMPLED          (1u << 0)
+#define WW_MEM_HINT_DEVICE_LOCAL  (1u << 0)
 #define WW_MEM_HINT_HOST_VISIBLE  (1u << 1)
+#define WW_MEM_HINT_LINEAR_ONLY   (1u << 4)
 #define WW_SYNC_SYNCOBJ_BINARY    (1u << 1)
 #define WW_SYNC_SYNCOBJ_TIMELINE  (1u << 2)
 #define WW_COLOR_ENC_SRGB         (1u << 0)
@@ -349,6 +351,7 @@ static int send_consumer_caps_blocking(waywallen_display_t *d) {
     ww_caps_buf_t buf = {0};
     uint8_t dev_uuid_bytes[16] = {0};
     uint8_t drv_uuid_bytes[16] = {0};
+    bool advertise_device_local = false;
 
     int probe_rc = -ENOSYS;
     switch (d->backend) {
@@ -358,6 +361,10 @@ static int send_consumer_caps_blocking(waywallen_display_t *d) {
             probe_rc = ww_egl_query_format_caps(
                 &d->egl_backend, (EGLDisplay)d->egl.egl_display,
                 ww_caps_buf_emit, &buf);
+            /* No portable EGL/GBM way to ask "do you have DEVICE_LOCAL
+             * memory I can import a dmabuf into?" — GBM consumers
+             * effectively always end up in GTT (HOST_VISIBLE). Leave
+             * advertise_device_local=false. */
         }
         break;
 #endif
@@ -370,6 +377,17 @@ static int send_consumer_caps_blocking(waywallen_display_t *d) {
                 /* Best-effort UUIDs; ignore failure → leave zeros. */
                 (void)ww_vk_query_device_uuid(
                     &d->vk_backend, dev_uuid_bytes, drv_uuid_bytes);
+                /* If the device exposes any DEVICE_LOCAL memory type,
+                 * advertise the bit so the daemon's same-device
+                 * intersection (`pick_mem_hint`) can land on
+                 * DEVICE_LOCAL when the producer also asks. The actual
+                 * dmabuf import still re-validates memoryTypeBits at
+                 * `vkAllocateMemory` time, so this hint only widens
+                 * the daemon's choice — it can't force a bad mapping. */
+                int has_dl = 0;
+                (void)ww_vk_query_supports_device_local(
+                    &d->vk_backend, &has_dl);
+                advertise_device_local = (has_dl != 0);
             }
         }
         break;
@@ -414,6 +432,21 @@ static int send_consumer_caps_blocking(waywallen_display_t *d) {
         memcpy(&drv_uuid_w[i], drv_uuid_bytes + i * 4, 4);
     }
 
+    /* LINEAR_ONLY: every advertised modifier is DRM_FORMAT_MOD_LINEAR.
+     * Covers both the probe-failed fallback (we just emitted ABGR/XRGB
+     * + LINEAR above) and the case where the driver only reports
+     * LINEAR for the formats it advertises. Telling the daemon
+     * up-front saves a `bind_failed` round-trip when the producer
+     * happens to live on the same vendor and would otherwise have
+     * tried a tile modifier. */
+    bool linear_only = (buf.n > 0);
+    for (size_t i = 0; i < buf.n; ++i) {
+        if (buf.modifiers[i] != WW_DRM_FORMAT_MOD_LINEAR) {
+            linear_only = false;
+            break;
+        }
+    }
+
     ww_req_consumer_caps_t m;
     memset(&m, 0, sizeof(m));
     m.fourccs.count       = (uint32_t)grp_n;
@@ -432,8 +465,22 @@ static int send_consumer_caps_blocking(waywallen_display_t *d) {
     m.driver_uuid.data    = drv_uuid_w;
     m.drm_render_major    = d->hs_drm_render_major;
     m.drm_render_minor    = d->hs_drm_render_minor;
-    m.mem_hints           = WW_MEM_HINT_HOST_VISIBLE;
+    m.mem_hints           = WW_MEM_HINT_HOST_VISIBLE
+                          | (advertise_device_local ? WW_MEM_HINT_DEVICE_LOCAL : 0u)
+                          | (linear_only ? WW_MEM_HINT_LINEAR_ONLY : 0u);
+    /* sync_caps: consumer-side release/wait always lands on the kernel
+     * drm_syncobj ioctl path (`waywallen_display_signal_release_syncobj`
+     * + `vk/egl_wait_sync_fd`); both BINARY and TIMELINE are always
+     * supported regardless of which GPU API the host bound. No probe
+     * needed. */
     m.sync_caps           = WW_SYNC_SYNCOBJ_TIMELINE | WW_SYNC_SYNCOBJ_BINARY;
+    /* color_caps: encoding/range/alpha flags are interpretation-time
+     * choices, not driver-locked capabilities — the consumer can
+     * always sample any sRGB texture and apply any color transform
+     * downstream. The defaults below are the most common desktop
+     * compositor settings; daemon falls back to DEFAULT_COLOR per
+     * axis if the producer's intersection is empty. No probe
+     * needed. */
     m.color_caps          = WW_COLOR_ENC_SRGB | WW_COLOR_RANGE_LIMITED
                           | WW_COLOR_ALPHA_PREMUL;
     m.extent_max_w        = 16384;

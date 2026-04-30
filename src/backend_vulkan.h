@@ -151,6 +151,26 @@ int ww_vk_query_device_uuid(const ww_vk_backend_t *backend,
                             uint8_t out_device_uuid[16],
                             uint8_t out_driver_uuid[16]);
 
+/*
+ * Heuristic: does the bound physical device expose at least one
+ * `VkMemoryType` with `VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT`? Used by
+ * the display library to OR `WW_MEM_HINT_DEVICE_LOCAL` into its
+ * `consumer_caps.mem_hints` so the daemon's same-device picker can
+ * land on DEVICE_LOCAL when the producer also asks for it.
+ *
+ * Whether a specific dmabuf import actually maps to DEVICE_LOCAL
+ * depends on the producer's allocation flags (the cross-import
+ * memory_type intersection runs at `vkAllocateMemory` time; see
+ * `ww_vk_import_dmabuf` in this file). So this is a "DEVICE_LOCAL
+ * is *possible*" hint, not a guarantee.
+ *
+ * Writes 1 / 0 to `*out_has_device_local`. Returns 0 on success,
+ * -ENOSYS if `vkGetPhysicalDeviceMemoryProperties` cannot be
+ * resolved.
+ */
+int ww_vk_query_supports_device_local(const ww_vk_backend_t *backend,
+                                      int *out_has_device_local);
+
 /* ------------------------------------------------------------------ */
 
 typedef struct ww_vk_dmabuf_import {
