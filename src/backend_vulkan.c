@@ -399,11 +399,12 @@ int ww_vk_import_dmabuf(const ww_vk_backend_t *backend,
          * DRM_FORMAT_MODIFIER_EXT tiling, per-modifier format features
          * decide which usages are legal — and SAMPLED_IMAGE_BIT often
          * isn't part of the supported set (esp. for non-LINEAR vendor
-         * modifiers). Importing as TRANSFER_SRC only matches what the
-         * producer guarantees (it allocated the dmabuf for TRANSFER_DST,
-         * and TRANSFER_SRC is the symmetric capability). The host then
-         * blits this into a sampler-friendly OPTIMAL VkImage of its
-         * own creation. See plugins/qml/VkBlitter.{hpp,cpp}. */
+         * modifiers). Bridge unconditionally OR-s TRANSFER_SRC into the
+         * producer-side usage so importing here as TRANSFER_SRC always
+         * matches the modifier sub-layout the producer's image was
+         * allocated for. The host then blits this into a sampler-
+         * friendly OPTIMAL VkImage of its own creation. See
+         * plugins/qml/VkBlitter.{hpp,cpp}. */
         .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
         .queueFamilyIndexCount = 1,
@@ -750,8 +751,16 @@ int ww_vk_query_format_caps(const ww_vk_backend_t *backend,
     PFN_vkGetPhysicalDeviceFormatProperties2 gpdfp2 =
         (PFN_vkGetPhysicalDeviceFormatProperties2)fp_vf;
 
+    /* Consumer side uses the modifier image as TRANSFER_SRC only (it
+     * blits out into a sampler-friendly OPTIMAL host image). Modifiers
+     * the consumer is willing to advertise must therefore support
+     * TRANSFER_SRC; SAMPLED is kept because some drivers only return
+     * the right sub-layout when both bits are present together (and
+     * the consumer never actually creates a SAMPLED image — the
+     * advertise side is a feature-mask filter, not an image creation
+     * usage). */
     const uint32_t want_features = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT
-                                 | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+                                 | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT;
 
     for (size_t i = 0;
          i < sizeof(s_vk_fourcc_table) / sizeof(s_vk_fourcc_table[0]);
