@@ -209,4 +209,12 @@ private:
     bool m_pendingRelease { false };
     uint32_t m_pendingReleaseIdx { 0 };
     uint64_t m_pendingReleaseSeq { 0 };
+
+    // EGL path: per-frame release_syncobj fd handed to us via
+    // on_frame_ready. We signal it on the *next* frame_ready (in
+    // flushPendingRelease) so the daemon's reaper sees a real signal
+    // instead of timing out and force-signaling. -1 when no fd is held.
+    // The Vulkan path uses the separate m_pendingVk.releaseSyncobjFd
+    // and signals from VkBlitter after the GPU copy completes.
+    int m_pendingEglReleaseSyncobjFd { -1 };
 };

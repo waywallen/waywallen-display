@@ -87,6 +87,16 @@ static void on_frame_ready(void *ud, const waywallen_frame_t *f) {
         "[egl] frame #%lld: idx=%u seq=%llu (sync already waited by library)\n",
         (long long)s->frames_seen, f->buffer_index,
         (unsigned long long)f->seq);
+    // Signal the per-frame release_syncobj so the daemon's reaper sees
+    // a real release instead of timing out and force-signaling. This
+    // demo doesn't actually GPU-render the texture, so signaling
+    // immediately is correct: there is no later "I'm done with this
+    // buffer" moment to defer to. The helper closes the fd in all
+    // paths.
+    if (f->release_syncobj_fd >= 0) {
+        (void)waywallen_display_signal_release_syncobj(
+            f->release_syncobj_fd);
+    }
 }
 
 static void on_disconnected(void *ud, int code, const char *msg) {

@@ -12,10 +12,10 @@
 #include <QSGSimpleTextureNode>
 #include <QtGui/qopenglcontext_platform.h>
 #include <QtQuick/qsgtexture_platform.h>
+#include <unistd.h>
 
 #ifdef WW_HAVE_VULKAN
 #include "VkBlitter.hpp"
-#include <unistd.h>
 #endif
 
 Q_LOGGING_CATEGORY(lcWD, "waywallen.display")
@@ -123,6 +123,11 @@ void WaywallenDisplay::c_on_config(void *ud, const waywallen_config_t *c) {
 void WaywallenDisplay::c_on_frame_ready(void *ud,
                                         const waywallen_frame_t *f) {
     auto *self = static_cast<WaywallenDisplay *>(ud);
+    // flushPendingRelease signals the *prior* frame's release_syncobj
+    // (EGL path) so that producer's wait at that release_point doesn't
+    // time out. Vulkan signals from VkBlitter once the GPU copy is
+    // done; the EGL path approximates "done with prior frame" by
+    // signaling when the next frame_ready arrives.
     self->flushPendingRelease();
     self->m_framesReceived++;
     self->m_currentSlot = static_cast<int>(f->buffer_index);
@@ -143,8 +148,25 @@ void WaywallenDisplay::c_on_frame_ready(void *ud,
         self->m_pendingVk.slot = static_cast<int>(f->buffer_index);
         self->m_pendingVk.acquireSem = f->vk_acquire_semaphore;
         self->m_pendingVk.releaseSyncobjFd = f->release_syncobj_fd;
-    }
+    } else
 #endif
+    if (self->m_activeBackend == BackendEGL) {
+        // Capture the fd; flushPendingRelease on the *next* frame_ready
+        // signals it. If a prior fd was somehow still pending (frames
+        // arrived faster than flushPendingRelease ran), signal that one
+        // first instead of leaking it.
+        if (self->m_pendingEglReleaseSyncobjFd >= 0) {
+            (void)waywallen_display_signal_release_syncobj(
+                self->m_pendingEglReleaseSyncobjFd);
+            self->m_pendingEglReleaseSyncobjFd = -1;
+        }
+        self->m_pendingEglReleaseSyncobjFd = f->release_syncobj_fd;
+    } else if (f->release_syncobj_fd >= 0) {
+        // No active backend yet (textures haven't arrived). Close the
+        // fd so the daemon's reaper times out the bucket and continues
+        // — leaking the fd would tie up the syncobj forever.
+        ::close(f->release_syncobj_fd);
+    }
 
     emit self->framesReceivedChanged();
     self->update();
@@ -196,6 +218,17 @@ void WaywallenDisplay::cleanup() {
     m_textureCount = 0;
     m_pendingRelease = false;
     m_activeBackend = BackendNone;
+
+    // Drop any unsignaled EGL release_syncobj fd. We *signal* it on
+    // teardown rather than closing it: closing alone doesn't progress
+    // the syncobj, so the daemon's reaper would still wait the full
+    // WAIT_TIMEOUT for this point. Signaling lets the reaper observe
+    // the release and TRANSFER cleanly.
+    if (m_pendingEglReleaseSyncobjFd >= 0) {
+        (void)waywallen_display_signal_release_syncobj(
+            m_pendingEglReleaseSyncobjFd);
+        m_pendingEglReleaseSyncobjFd = -1;
+    }
 
 #ifdef WW_HAVE_VULKAN
     {
@@ -683,7 +716,25 @@ void WaywallenDisplay::onSocketReadable() {
 }
 
 void WaywallenDisplay::flushPendingRelease() {
+    // EGL path: signal the prior frame's release_syncobj. The helper
+    // imports the fd as a syncobj handle on this process's DRM device,
+    // SIGNALs it, and closes the fd in all paths. The kernel-side
+    // syncobj stays alive (the daemon still holds a handle ref); the
+    // signal is what the daemon's reaper is waiting on.
+    if (m_pendingEglReleaseSyncobjFd >= 0) {
+        int rc = waywallen_display_signal_release_syncobj(
+            m_pendingEglReleaseSyncobjFd);
+        if (rc != WAYWALLEN_OK) {
+            qCWarning(lcWD,
+                "EGL: signal_release_syncobj failed: %d "
+                "(daemon will time out the slot)", rc);
+        }
+        m_pendingEglReleaseSyncobjFd = -1;
+    }
     if (m_pendingRelease && m_display) {
+        // Deprecated stub since v1 dropped the BufferRelease wire
+        // request; kept around so any future re-introduction has a
+        // hook. Has no effect today.
         waywallen_display_release_frame(
             m_display, m_pendingReleaseIdx, m_pendingReleaseSeq);
         m_pendingRelease = false;

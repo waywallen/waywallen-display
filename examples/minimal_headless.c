@@ -76,6 +76,13 @@ static void on_frame_ready(void *ud, const waywallen_frame_t *f) {
     fprintf(stderr,
         "[cb] frame_ready #%lld: idx=%u seq=%llu\n",
         (long long)rs->frames_seen, f->buffer_index, (unsigned long long)f->seq);
+    // No GPU work in this demo, so signal the release_syncobj
+    // immediately. Otherwise the daemon's reaper waits 500ms per frame
+    // and force-signals with a warning. The helper closes the fd.
+    if (f->release_syncobj_fd >= 0) {
+        (void)waywallen_display_signal_release_syncobj(
+            f->release_syncobj_fd);
+    }
 }
 
 static void on_disconnected(void *ud, int code, const char *msg) {
