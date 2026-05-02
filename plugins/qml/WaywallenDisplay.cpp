@@ -118,6 +118,10 @@ void WaywallenDisplay::c_on_config(void *ud, const waywallen_config_t *c) {
         static_cast<qreal>(c->clear_color[2]),
         static_cast<qreal>(c->clear_color[3]));
     emit self->clearColorChanged();
+    // Schedule a repaint so a fillmode/align change applied while no
+    // new frame is in flight still becomes visible — updatePaintNode
+    // re-reads m_sourceRect/m_destRect.
+    self->update();
 }
 
 void WaywallenDisplay::c_on_frame_ready(void *ud,
@@ -960,6 +964,29 @@ QSGNode *WaywallenDisplay::updatePaintNode(QSGNode *oldNode,
         return nullptr;
     }
 
-    node->setRect(boundingRect());
+    // m_sourceRect / m_destRect arrive in c_on_config and live in
+    // texture-pixel and display-pixel space respectively. The item's
+    // boundingRect is in QML logical pixels, so convert dest by the
+    // ratio (boundingRect / m_displayWidth) which is 1/DPR for the
+    // common case. Default-constructed (zero-size) rects mean we
+    // haven't seen a SetConfig yet — fall back to identity.
+    if (m_sourceRect.width() > 0 && m_sourceRect.height() > 0) {
+        node->setSourceRect(m_sourceRect);
+    } else {
+        node->setSourceRect(QRectF(0, 0, m_texWidth, m_texHeight));
+    }
+
+    const QRectF bounds = boundingRect();
+    if (m_destRect.width() > 0 && m_destRect.height() > 0
+        && m_displayWidth > 0 && m_displayHeight > 0) {
+        const qreal sx = bounds.width()  / qreal(m_displayWidth);
+        const qreal sy = bounds.height() / qreal(m_displayHeight);
+        node->setRect(QRectF(m_destRect.x()      * sx,
+                             m_destRect.y()      * sy,
+                             m_destRect.width()  * sx,
+                             m_destRect.height() * sy));
+    } else {
+        node->setRect(bounds);
+    }
     return node;
 }
