@@ -122,6 +122,10 @@ struct waywallen_display {
     /* Saved register_display params, captured in begin_connect and
      * applied when WELCOME_WAIT transitions to REGISTER_PEND. */
     char     hs_display_name[256];
+    /* Stable per-(DE,screen) identifier used by the daemon as the key
+     * into per-display settings. Empty string means "no stable id";
+     * the daemon then falls back to keying by `hs_display_name`. */
+    char     hs_instance_id[128];
     uint32_t hs_display_width;
     uint32_t hs_display_height;
     uint32_t hs_display_refresh_mhz;
@@ -706,6 +710,7 @@ static int hs_queue_register(waywallen_display_t *d) {
     ww_req_register_display_t reg;
     memset(&reg, 0, sizeof(reg));
     reg.name = d->hs_display_name;
+    reg.instance_id = d->hs_instance_id;
     reg.width = d->hs_display_width;
     reg.height = d->hs_display_height;
     reg.refresh_mhz = d->hs_display_refresh_mhz;
@@ -716,12 +721,13 @@ static int hs_queue_register(waywallen_display_t *d) {
     return hs_queue_request(d, WW_REQ_REGISTER_DISPLAY, enc_register, &reg);
 }
 
-int waywallen_display_begin_connect(waywallen_display_t *d,
-                                    const char *socket_path,
-                                    const char *display_name,
-                                    uint32_t width,
-                                    uint32_t height,
-                                    uint32_t refresh_mhz) {
+int waywallen_display_begin_connect_v2(waywallen_display_t *d,
+                                       const char *socket_path,
+                                       const char *display_name,
+                                       const char *instance_id,
+                                       uint32_t width,
+                                       uint32_t height,
+                                       uint32_t refresh_mhz) {
     if (!d || !display_name) return WAYWALLEN_ERR_INVAL;
     if (d->conn != WW_CONN_DISCONNECTED && d->conn != WW_CONN_DEAD) {
         return WAYWALLEN_ERR_STATE;
@@ -738,6 +744,15 @@ int waywallen_display_begin_connect(waywallen_display_t *d,
     size_t name_len = strlen(display_name);
     if (name_len + 1 > sizeof(d->hs_display_name)) return WAYWALLEN_ERR_INVAL;
     memcpy(d->hs_display_name, display_name, name_len + 1);
+    /* instance_id is optional; NULL maps to empty string ("daemon, key
+     * settings by name"). */
+    if (instance_id) {
+        size_t iid_len = strlen(instance_id);
+        if (iid_len + 1 > sizeof(d->hs_instance_id)) return WAYWALLEN_ERR_INVAL;
+        memcpy(d->hs_instance_id, instance_id, iid_len + 1);
+    } else {
+        d->hs_instance_id[0] = '\0';
+    }
     d->hs_display_width = width;
     d->hs_display_height = height;
     d->hs_display_refresh_mhz = refresh_mhz;
@@ -770,6 +785,16 @@ int waywallen_display_begin_connect(waywallen_display_t *d,
         d->hs_state = WW_HS_HELLO_PENDING;
     }
     return WAYWALLEN_OK;
+}
+
+int waywallen_display_begin_connect(waywallen_display_t *d,
+                                    const char *socket_path,
+                                    const char *display_name,
+                                    uint32_t width,
+                                    uint32_t height,
+                                    uint32_t refresh_mhz) {
+    return waywallen_display_begin_connect_v2(d, socket_path, display_name,
+                                              NULL, width, height, refresh_mhz);
 }
 
 waywallen_handshake_state_t waywallen_display_handshake_state(waywallen_display_t *d) {
@@ -954,14 +979,16 @@ int waywallen_display_advance_handshake(waywallen_display_t *d) {
     }
 }
 
-int waywallen_display_connect(waywallen_display_t *d,
-                              const char *socket_path,
-                              const char *display_name,
-                              uint32_t width,
-                              uint32_t height,
-                              uint32_t refresh_mhz) {
-    int rc = waywallen_display_begin_connect(d, socket_path, display_name,
-                                             width, height, refresh_mhz);
+int waywallen_display_connect_v2(waywallen_display_t *d,
+                                 const char *socket_path,
+                                 const char *display_name,
+                                 const char *instance_id,
+                                 uint32_t width,
+                                 uint32_t height,
+                                 uint32_t refresh_mhz) {
+    int rc = waywallen_display_begin_connect_v2(d, socket_path, display_name,
+                                                instance_id, width, height,
+                                                refresh_mhz);
     if (rc != WAYWALLEN_OK) return rc;
     int fd = waywallen_display_get_fd(d);
     for (;;) {
@@ -980,6 +1007,16 @@ int waywallen_display_connect(waywallen_display_t *d,
             return WAYWALLEN_ERR_IO;
         }
     }
+}
+
+int waywallen_display_connect(waywallen_display_t *d,
+                              const char *socket_path,
+                              const char *display_name,
+                              uint32_t width,
+                              uint32_t height,
+                              uint32_t refresh_mhz) {
+    return waywallen_display_connect_v2(d, socket_path, display_name, NULL,
+                                        width, height, refresh_mhz);
 }
 
 int waywallen_display_update_size(waywallen_display_t *d,

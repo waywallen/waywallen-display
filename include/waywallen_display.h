@@ -49,7 +49,7 @@ extern "C" {
  * `hello.client_protocol_version`. The daemon owns the supported
  * range and rejects out-of-range clients with `error{code=2}`.
  */
-#define WAYWALLEN_DISPLAY_PROTOCOL_VERSION 3
+#define WAYWALLEN_DISPLAY_PROTOCOL_VERSION 4
 
 /* -------------------------------------------------------------------------
  * Return codes
@@ -305,6 +305,23 @@ int waywallen_display_set_drm_render_node(waywallen_display_t *d,
  * path: read-only QSocketNotifier driving `waywallen_display_dispatch`.
  * ------------------------------------------------------------------------- */
 
+/*
+ * `instance_id` (added in protocol v4): a stable identifier persisted by
+ * the host (e.g. UUID4 stored in KDE/GNOME extension config) that
+ * survives reconnects and DE restarts. Used by the daemon as the key
+ * into per-display settings. Pass NULL or "" if the host has no stable
+ * id; the daemon will fall back to indexing settings by display_name.
+ */
+int waywallen_display_begin_connect_v2(waywallen_display_t *d,
+                                       const char *socket_path,
+                                       const char *display_name,
+                                       const char *instance_id,
+                                       uint32_t width,
+                                       uint32_t height,
+                                       uint32_t refresh_mhz);
+
+/* Legacy entry point — equivalent to `_v2` with instance_id=NULL. */
+__attribute__((deprecated("use waywallen_display_begin_connect_v2")))
 int waywallen_display_begin_connect(waywallen_display_t *d,
                                     const char *socket_path,
                                     const char *display_name,
@@ -326,7 +343,19 @@ waywallen_handshake_state_t waywallen_display_handshake_state(waywallen_display_
  * completes (or fails). Suitable for one-shot CLI tools and tests;
  * NEVER call from a thread that runs an event loop — use the async
  * primitives above instead.
+ *
+ * See `_begin_connect_v2` for the meaning of `instance_id`.
  */
+int waywallen_display_connect_v2(waywallen_display_t *d,
+                                 const char *socket_path,
+                                 const char *display_name,
+                                 const char *instance_id,
+                                 uint32_t width,
+                                 uint32_t height,
+                                 uint32_t refresh_mhz);
+
+/* Legacy entry point — equivalent to `_v2` with instance_id=NULL. */
+__attribute__((deprecated("use waywallen_display_connect_v2")))
 int waywallen_display_connect(waywallen_display_t *d,
                               const char *socket_path,
                               const char *display_name,

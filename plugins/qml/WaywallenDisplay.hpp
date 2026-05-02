@@ -32,6 +32,8 @@ class WaywallenDisplay : public QQuickItem {
                    NOTIFY socketPathChanged)
     Q_PROPERTY(QString displayName READ displayName WRITE setDisplayName
                    NOTIFY displayNameChanged)
+    Q_PROPERTY(QString instanceId READ instanceId WRITE setInstanceId
+                   NOTIFY instanceIdChanged)
     Q_PROPERTY(int displayWidth READ displayWidth WRITE setDisplayWidth
                    NOTIFY displayWidthChanged)
     Q_PROPERTY(int displayHeight READ displayHeight WRITE setDisplayHeight
@@ -71,6 +73,9 @@ public:
     QString displayName() const { return m_displayName; }
     void setDisplayName(const QString &name);
 
+    QString instanceId() const { return m_instanceId; }
+    void setInstanceId(const QString &id);
+
     int displayWidth() const { return m_displayWidth; }
     void setDisplayWidth(int w);
 
@@ -98,6 +103,7 @@ public:
 signals:
     void socketPathChanged();
     void displayNameChanged();
+    void instanceIdChanged();
     void displayWidthChanged();
     void displayHeightChanged();
     void framesReceivedChanged();
@@ -144,6 +150,7 @@ private:
     // Properties.
     QString m_socketPath;
     QString m_displayName { QStringLiteral("qml-display") };
+    QString m_instanceId;
     int m_displayWidth { 1920 };
     int m_displayHeight { 1080 };
     int m_framesReceived { 0 };

@@ -17,5 +17,12 @@
         <entry name="ShowDiagnostics" type="Bool">
             <default>false</default>
         </entry>
+        <!-- Hidden field. Auto-populated with a UUID4 on first run by
+             main.qml; sent to the daemon as `register_display.instance_id`
+             so per-display settings (fillmode/align/clear color) survive
+             screen renames and identical-monitor swaps. -->
+        <entry name="DisplayInstanceId" type="String">
+            <default></default>
+        </entry>
     </group>
 </kcfg>

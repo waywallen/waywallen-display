@@ -270,6 +270,12 @@ void WaywallenDisplay::setDisplayName(const QString &name) {
     emit displayNameChanged();
 }
 
+void WaywallenDisplay::setInstanceId(const QString &id) {
+    if (m_instanceId == id) return;
+    m_instanceId = id;
+    emit instanceIdChanged();
+}
+
 void WaywallenDisplay::setDisplayWidth(int w) {
     if (m_displayWidth == w) return;
     m_displayWidth = w;
@@ -671,10 +677,12 @@ void WaywallenDisplay::tryConnect() {
 
     const QByteArray sockPath = m_socketPath.toUtf8();
     const QByteArray name = m_displayName.toUtf8();
-    int rc = waywallen_display_begin_connect(
+    const QByteArray instanceId = m_instanceId.toUtf8();
+    int rc = waywallen_display_begin_connect_v2(
         m_display,
         sockPath.isEmpty() ? nullptr : sockPath.constData(),
         name.constData(),
+        instanceId.isEmpty() ? nullptr : instanceId.constData(),
         static_cast<uint32_t>(m_displayWidth),
         static_cast<uint32_t>(m_displayHeight),
         60000);
