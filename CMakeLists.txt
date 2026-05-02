@@ -305,38 +305,19 @@ if(WAYWALLEN_DISPLAY_PLUGIN_QML)
     add_subdirectory(plugins/qml)
     message(STATUS "libwaywallen_display: QML plugin ENABLED")
 
-    # Bundle the KDE Plasma wallpaper extension as a zip with the QML plugin
-    # embedded under contents/ui/WaywallenDisplay/. WaywallenSurfaceEmbed.qml
-    # uses `import "WaywallenDisplay"` as a fallback when the system-wide
-    # `Waywallen.Display` module is missing, so a self-contained kpackage zip
-    # can be installed via `kpackagetool6 -i waywallen-kde.zip` without
-    # requiring a system install of the QML module.
-    set(_kde_pkg_src   "${CMAKE_CURRENT_SOURCE_DIR}/extensions/kde/package")
-    set(_kde_pkg_stage "${CMAKE_CURRENT_BINARY_DIR}/kde-package")
-    set(_kde_pkg_name  "org.waywallen.kde")
-    set(_kde_pkg_zip   "${CMAKE_CURRENT_BINARY_DIR}/waywallen-kde-${CMAKE_SYSTEM_PROCESSOR}.zip")
+    # KDE Plasma kpackage extension. The zip root must be
+    # `org.waywallen.kde/{metadata.json,contents/...}` so it can be installed
+    # via `kpackagetool6 -i`. The matching install rule for the QML plugin's
+    # qmldir + .so lives in plugins/qml/CMakeLists.txt (where the relevant
+    # CMAKE_CURRENT_BINARY_DIR resolves correctly).
+    install(DIRECTORY extensions/kde/package/
+        DESTINATION org.waywallen.kde
+        COMPONENT kde_extension
+        EXCLUDE_FROM_ALL)
 
-    file(GLOB_RECURSE _kde_pkg_files
-        CONFIGURE_DEPENDS
-        LIST_DIRECTORIES false
-        "${_kde_pkg_src}/*")
-
-    add_custom_command(
-        OUTPUT ${_kde_pkg_zip}
-        COMMAND ${CMAKE_COMMAND} -E rm -rf ${_kde_pkg_stage}
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-            ${_kde_pkg_src} ${_kde_pkg_stage}/${_kde_pkg_name}
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-            $<TARGET_FILE_DIR:waywallen-display-qml>
-            ${_kde_pkg_stage}/${_kde_pkg_name}/contents/ui/WaywallenDisplay
-        COMMAND ${CMAKE_COMMAND} -E rm -f ${_kde_pkg_zip}
-        COMMAND ${CMAKE_COMMAND} -E chdir ${_kde_pkg_stage}
-            ${CMAKE_COMMAND} -E tar cf ${_kde_pkg_zip} --format=zip ${_kde_pkg_name}
-        DEPENDS waywallen-display-qml ${_kde_pkg_files}
-        COMMENT "Packaging KDE wallpaper extension to ${_kde_pkg_zip}"
-        VERBATIM)
-
-    add_custom_target(waywallen-kde-zip DEPENDS ${_kde_pkg_zip})
+    list(APPEND CPACK_COMPONENTS_ALL kde_extension)
+    set(CPACK_ARCHIVE_KDE_EXTENSION_FILE_NAME
+        "waywallen-kde-${PROJECT_VERSION}-${CMAKE_SYSTEM_PROCESSOR}")
 endif()
 
 option(WAYWALLEN_DISPLAY_PLUGIN_GOBJECT "Build the GObject Introspection plugin" OFF)
@@ -353,3 +334,17 @@ install(TARGETS waywallen_display waywallen_display_static
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
 install(FILES include/waywallen_display.h
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+
+# ---------------------------------------------------------------------------
+# CPack — multi-zip output, one zip per desktop-shell extension.
+# `cmake --build build --target package` produces every extension zip in
+# CPACK_COMPONENTS_ALL. Adding a new extension only requires another
+# `install(... COMPONENT <name> EXCLUDE_FROM_ALL)` block plus a
+# `list(APPEND CPACK_COMPONENTS_ALL <name>)` above this section.
+# ---------------------------------------------------------------------------
+set(CPACK_GENERATOR "ZIP")
+set(CPACK_PACKAGE_NAME "waywallen-display")
+set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+set(CPACK_ARCHIVE_COMPONENT_INSTALL ON)
+set(CPACK_PACKAGING_INSTALL_PREFIX "")
+include(CPack)

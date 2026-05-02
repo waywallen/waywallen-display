@@ -63,3 +63,12 @@ set(QML_INSTALL_DIR "${CMAKE_INSTALL_FULL_LIBDIR}/qt6/qml"
 install(
     DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/Waywallen/
     DESTINATION ${QML_INSTALL_DIR}/Waywallen)
+
+# Embed the QML module into the KDE kpackage layout for the kde_extension
+# CPack component. EXCLUDE_FROM_ALL keeps a normal `cmake --install` to the
+# system prefix from also writing this kpackage-shaped path.
+install(
+    DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/Waywallen/Display/
+    DESTINATION org.waywallen.kde/contents/ui/WaywallenDisplay
+    COMPONENT kde_extension
+    EXCLUDE_FROM_ALL)
