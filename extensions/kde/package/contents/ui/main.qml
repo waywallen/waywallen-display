@@ -13,7 +13,7 @@ WallpaperItem {
 
     readonly property string defaultDisplayName: {
         const screen = root.parent && root.parent.screen ? root.parent.screen.name : "";
-        return screen.length > 0 ? ("kde-wallpaper-" + screen) : "kde-wallpaper";
+        return screen.length > 0 ? screen : "kde-wallpaper";
     }
 
     // RFC 4122 v4 (random) UUID generated client-side on first run and
