@@ -95,6 +95,7 @@ typedef enum ww_request_op {
     WW_REQ_BYE = 5,
     WW_REQ_CONSUMER_CAPS = 6,
     WW_REQ_BIND_FAILED = 7,
+    WW_REQ_MOUSE_EVENT = 8,
 } ww_request_op_t;
 
 typedef enum ww_event_op {
@@ -158,6 +159,13 @@ typedef struct ww_req_bind_failed_t {
     uint32_t reason;
     char *message;
 } ww_req_bind_failed_t;
+
+typedef struct ww_req_mouse_event_t {
+    uint32_t kind;
+    float x;
+    float y;
+    ww_kv_list_t properties;
+} ww_req_mouse_event_t;
 
 typedef struct ww_evt_welcome_t {
     char *server_version;
@@ -243,6 +251,11 @@ int  ww_req_bind_failed_encode(const ww_req_bind_failed_t *m, ww_buf_t *out);
 int  ww_req_bind_failed_decode(const uint8_t *buf, size_t len, ww_req_bind_failed_t *out);
 void ww_req_bind_failed_free(ww_req_bind_failed_t *m);
 uint32_t ww_req_bind_failed_expected_fds(const ww_req_bind_failed_t *m);
+
+int  ww_req_mouse_event_encode(const ww_req_mouse_event_t *m, ww_buf_t *out);
+int  ww_req_mouse_event_decode(const uint8_t *buf, size_t len, ww_req_mouse_event_t *out);
+void ww_req_mouse_event_free(ww_req_mouse_event_t *m);
+uint32_t ww_req_mouse_event_expected_fds(const ww_req_mouse_event_t *m);
 
 int  ww_evt_welcome_encode(const ww_evt_welcome_t *m, ww_buf_t *out);
 int  ww_evt_welcome_decode(const uint8_t *buf, size_t len, ww_evt_welcome_t *out);
