@@ -89,6 +89,13 @@ ColumnLayout {
             checked: cfg_ShowDiagnostics
             onToggled: cfg_ShowDiagnostics = checked
         }
+
+        QQC2.Label {
+            Kirigami.FormData.label: i18nd("plasma_wallpaper_org.waywallen.kde", "Project:")
+            text: "<a href=\"https://github.com/waywallen/waywallen\">github.com/waywallen/waywallen</a>"
+            textFormat: Text.RichText
+            onLinkActivated: (link) => Qt.openUrlExternally(link)
+        }
     }
 
     // Spacer pushes the error block down and keeps the form anchored to
