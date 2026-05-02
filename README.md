@@ -1,22 +1,23 @@
 # waywallen-display
 
-A C client library for the `waywallen-display` protocol, exposing a stable C ABI
-for Linux desktop environments (KDE Plasma, GNOME Shell, ...) to talk to a
-`waywallen` daemon.
+Desktop integration for the `waywallen` wallpaper daemon — lets KDE Plasma,
+GNOME Shell, and other Linux desktop shells display `waywallen` wallpaper
+output as a regular surface, with zero-copy GPU sharing via DMA-BUF.
 
-## Flow
+## What's implemented
 
-```
-┌───── waywallen daemon (separate process) ─────┐                ┌──── desktop integration process ────┐
-│                                               │    v1 UDS      │                                     │
-│  wallpaper subprocess dma-buf ─▶ dispatcher  │  ◀──────▶   │       waywallen-display             │
-│                                               │   msgs + fd    │             │                       │
-└───────────────────────────────────────────────┘                │             ▼                       │
-                                                                 │     render / composition            │
-                                                                 └─────────────────────────────────────┘
+- **Protocol client** — C library that speaks `waywallen-display` v1 to the
+  daemon and receives DMA-BUF frames plus acquire/release sync fences.
+- **EGL backend** — imports DMA-BUFs as `EGLImage` via
+  `EGL_EXT_image_dma_buf_import`.
+- **Vulkan backend** — imports DMA-BUFs as `VkImage` via
+  `VK_KHR_external_memory_fd`.
+- **Qt 6 QML plugin** (`Waywallen.Display`) — drop-in `WaywallenSurface` item
+  for Qt Quick scenes.
+- **KDE Plasma wallpaper extension** — Plasma 6 kpackage built on the QML
+  plugin.
 
-socket path: $XDG_RUNTIME_DIR/waywallen/display.sock
-```
+GNOME Shell extension is on the roadmap.
 
 ## Install
 

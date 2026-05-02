@@ -1,21 +1,22 @@
 # waywallen-display
 
-`waywallen-display` 协议的 C 库，提供一份稳定的 C ABI  
-给 LinuxDE（KDE Plasma、GNOME Shell、...）提供一个稳定的 C ABI，用来连到 `waywallen` daemon 进程
+`waywallen` 壁纸守护进程的桌面集成层 —— 让 KDE Plasma、GNOME Shell 等  
+Linux 桌面环境把 `waywallen` 的壁纸输出当作普通 surface 显示，通过 DMA-BUF  
+零拷贝共享 GPU 资源。
 
-## 流程图
+## 已实现
 
-```
-┌───── waywallen daemon (独立进程) ─────┐                ┌────  桌面集成进程  ────┐
-│                                      │    v1 UDS      │                        │
-│  壁纸渲染器子进程 ──dma-buf──▶ 分发器 │◀────────────▶│   waywallen-display   │
-│                                       │  消息 + fd     │           │           │
-└───────────────────────────────────────┘                │          ▼            │
-                                                         │       渲染 / 合成     │
-                                                         └──────────────────────┘
+- **协议客户端** —— C 库，与 daemon 走 `waywallen-display` v1 协议，接收
+  DMA-BUF 帧 + acquire/release 同步 fence。
+- **EGL 后端** —— 通过 `EGL_EXT_image_dma_buf_import` 把 DMA-BUF 导入为
+  `EGLImage`。
+- **Vulkan 后端** —— 通过 `VK_KHR_external_memory_fd` 把 DMA-BUF 导入为
+  `VkImage`。
+- **Qt 6 QML 插件**（`Waywallen.Display`）—— 在 Qt Quick 场景中即插即用的
+  `WaywallenSurface` 组件。
+- **KDE Plasma 壁纸扩展** —— 基于 QML 插件的 Plasma 6 kpackage。
 
-socket 路径：$XDG_RUNTIME_DIR/waywallen/display.sock
-```
+GNOME Shell 扩展在路线图中。
 
 ## 安装
 

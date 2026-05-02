@@ -4,6 +4,24 @@ This document is for developers building `waywallen-display` from source. End
 users should grab a prebuilt release from the
 [GitHub releases page](https://github.com/waywallen/waywallen-display/releases).
 
+## Architecture
+
+`waywallen-display` is a C client library that exposes a stable C ABI to the
+desktop integration process. It speaks the `waywallen-display` v1 wire
+protocol over a Unix domain socket to the `waywallen` daemon.
+
+```
+┌───── waywallen daemon (separate process) ─────┐                ┌──── desktop integration process ────┐
+│                                               │    v1 UDS      │                                     │
+│  wallpaper subprocess dma-buf ─▶ dispatcher  │  ◀──────▶   │       waywallen-display             │
+│                                               │   msgs + fd    │             │                       │
+└───────────────────────────────────────────────┘                │             ▼                       │
+                                                                 │     render / composition            │
+                                                                 └─────────────────────────────────────┘
+
+socket path: $XDG_RUNTIME_DIR/waywallen/display.sock
+```
+
 ## Dependencies
 
 | Dependency | Required | Notes |
