@@ -6,6 +6,7 @@
 #include <QRectF>
 #include <QSocketNotifier>
 #include <QString>
+#include <QTimer>
 #include <QVector>
 #include <memory>
 #include <qqml.h>
@@ -118,6 +119,7 @@ private slots:
                                   const QString &oldOwner,
                                   const QString &newOwner);
     void onDaemonReadySignal();
+    void pushSizeUpdate();
 
 private:
     void tryConnect();
@@ -154,6 +156,13 @@ private:
     waywallen_display_t *m_display { nullptr };
     QSocketNotifier *m_notifier { nullptr };
     QSocketNotifier *m_notifierWrite { nullptr };
+
+    // Coalesces a flood of width/height changes during a window resize
+    // into a single `update_display` wire message. Last reported size is
+    // kept so we don't push duplicate updates.
+    QTimer m_updateSizeTimer;
+    int m_lastPushedWidth { -1 };
+    int m_lastPushedHeight { -1 };
 
     // Backend detected from Qt's scene graph.
     enum ActiveBackend { BackendNone, BackendEGL, BackendVulkan };

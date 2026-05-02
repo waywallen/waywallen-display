@@ -189,6 +189,11 @@ WaywallenDisplay::WaywallenDisplay(QQuickItem *parent)
     : QQuickItem(parent) {
     setFlag(ItemHasContents, true);
     waywallen_display_set_log_callback(qtLogBridge, nullptr);
+
+    m_updateSizeTimer.setSingleShot(true);
+    m_updateSizeTimer.setInterval(100);
+    connect(&m_updateSizeTimer, &QTimer::timeout,
+            this, &WaywallenDisplay::pushSizeUpdate);
 }
 
 WaywallenDisplay::~WaywallenDisplay() {
@@ -208,6 +213,9 @@ void WaywallenDisplay::cleanup() {
         waywallen_display_destroy(m_display);
         m_display = nullptr;
     }
+    m_updateSizeTimer.stop();
+    m_lastPushedWidth  = -1;
+    m_lastPushedHeight = -1;
 
     m_eglImagesValid = false;
     m_glTexturesCreated = false;
@@ -262,12 +270,39 @@ void WaywallenDisplay::setDisplayWidth(int w) {
     if (m_displayWidth == w) return;
     m_displayWidth = w;
     emit displayWidthChanged();
+    if (m_display) m_updateSizeTimer.start();
 }
 
 void WaywallenDisplay::setDisplayHeight(int h) {
     if (m_displayHeight == h) return;
     m_displayHeight = h;
     emit displayHeightChanged();
+    if (m_display) m_updateSizeTimer.start();
+}
+
+void WaywallenDisplay::pushSizeUpdate() {
+    if (!m_display) return;
+    if (waywallen_display_conn_state(m_display) != WAYWALLEN_CONN_CONNECTED) {
+        // Drop silently — once the handshake completes, register_display
+        // already carried the latest dims via begin_connect.
+        return;
+    }
+    if (m_displayWidth <= 0 || m_displayHeight <= 0) return;
+    if (m_lastPushedWidth == m_displayWidth &&
+        m_lastPushedHeight == m_displayHeight) {
+        return;
+    }
+    int rc = waywallen_display_update_size(
+        m_display,
+        static_cast<uint32_t>(m_displayWidth),
+        static_cast<uint32_t>(m_displayHeight));
+    if (rc != 0) {
+        qCWarning(lcWD, "update_size(%d, %d) failed: %d",
+                  m_displayWidth, m_displayHeight, rc);
+        return;
+    }
+    m_lastPushedWidth = m_displayWidth;
+    m_lastPushedHeight = m_displayHeight;
 }
 
 void WaywallenDisplay::setClearColor(const QColor &color) {
@@ -648,6 +683,12 @@ void WaywallenDisplay::tryConnect() {
         return;
     }
 
+    // begin_connect carries these dims to the daemon as part of
+    // register_display, so seed the dedupe so a same-size resize
+    // post-handshake is a no-op.
+    m_lastPushedWidth  = m_displayWidth;
+    m_lastPushedHeight = m_displayHeight;
+
     int fd = waywallen_display_get_fd(m_display);
     if (fd < 0) {
         qCWarning(lcWD, "begin_connect returned no fd");
@@ -696,6 +737,13 @@ void WaywallenDisplay::onHandshakeIO() {
         }
         setStreamState(Inactive);
         setConnState(Connected);
+        // Window may have resized while the handshake was in flight;
+        // reconcile by pushing if the current dims drifted from what
+        // begin_connect carried.
+        if (m_displayWidth  != m_lastPushedWidth ||
+            m_displayHeight != m_lastPushedHeight) {
+            m_updateSizeTimer.start();
+        }
         return;
     }
     if (rc < 0) {
