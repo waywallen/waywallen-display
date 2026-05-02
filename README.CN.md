@@ -17,18 +17,18 @@
 socket 路径：$XDG_RUNTIME_DIR/waywallen/display.sock
 ```
 
-## 构建
+## 安装
 
-| 依赖 | 必需 | 说明 |
-|------|------|------|
-| CMake ≥ 3.16 | ✓ | |
-| GCC | ✓ | |
-| Qt 6 | 可选 | QML 插件，默认开启； |
+预编译产物发布在
+[GitHub releases 页面](https://github.com/waywallen/waywallen-display/releases)。
 
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -DWAYWALLEN_DISPLAY_PLUGIN_QML=ON
-cmake --build build
-sudo cmake --install build
+### KDE Plasma 扩展
+
+从最新 release 下载 `waywallen-kde-<版本>-<架构>.zip`，然后：
+
+```sh
+kpackagetool6 --type Plasma/Wallpaper -i waywallen-kde-<版本>-<架构>.zip
+# -u 升级，-r 卸载
 ```
 
 > [!TIP]
@@ -39,6 +39,11 @@ sudo cmake --install build
 > ```
 
 ## 扩展
+
 | 扩展 | 说明 |
 |------------|----------|
-| [kde](./extensions/kde) | 需要 QML Plugin |
+| [kde](./extensions/kde) | Plasma 6 壁纸插件 |
+
+## 从源码构建
+
+见 [BUILD.md](./BUILD.md)。

@@ -18,18 +18,18 @@ for Linux desktop environments (KDE Plasma, GNOME Shell, ...) to talk to a
 socket path: $XDG_RUNTIME_DIR/waywallen/display.sock
 ```
 
-## Build
+## Install
 
-| Dependency | Required | Notes |
-|------------|----------|-------|
-| CMake ≥ 3.16 | ✓ | |
-| GCC | ✓ | |
-| Qt 6 | optional | QML plugin |
+Prebuilt artifacts are published on the
+[GitHub releases page](https://github.com/waywallen/waywallen-display/releases).
 
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -DWAYWALLEN_DISPLAY_PLUGIN_QML=ON
-cmake --build build
-sudo cmake --install build
+### KDE Plasma extension
+
+Download `waywallen-kde-<version>-<arch>.zip` from the latest release, then:
+
+```sh
+kpackagetool6 --type Plasma/Wallpaper -i waywallen-kde-<version>-<arch>.zip
+# -u to upgrade, -r to remove
 ```
 
 > [!TIP]
@@ -40,6 +40,11 @@ sudo cmake --install build
 > ```
 
 ## Extensions
+
 | Extension | Notes |
 |------------|----------|
-| [kde](./extensions/kde) | Require QML Plugin |
+| [kde](./extensions/kde) | Plasma 6 wallpaper plugin |
+
+## Building from source
+
+See [BUILD.md](./BUILD.md).
