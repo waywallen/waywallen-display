@@ -8,10 +8,6 @@ output as a regular surface, with zero-copy GPU sharing via DMA-BUF.
 
 - **Protocol client** — C library that speaks `waywallen-display` v1 to the
   daemon and receives DMA-BUF frames plus acquire/release sync fences.
-- **EGL backend** — imports DMA-BUFs as `EGLImage` via
-  `EGL_EXT_image_dma_buf_import`.
-- **Vulkan backend** — imports DMA-BUFs as `VkImage` via
-  `VK_KHR_external_memory_fd`.
 - **Qt 6 QML plugin** (`Waywallen.Display`) — drop-in `WaywallenSurface` item
   for Qt Quick scenes.
 - **KDE Plasma wallpaper extension** — Plasma 6 kpackage built on the QML
