@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist gettext-domain="waywallen-gnome">
+  <schema id="org.waywallen.gnome" path="/org/waywallen/gnome/">
+
+    <key name="instance-id" type="s">
+      <default>""</default>
+      <summary>Stable per-display UUID</summary>
+      <description>
+        UUID v4 generated on first enable and persisted forever.
+        Used as the per-display settings key on the daemon side; survives
+        renames, GPU swaps, and DE restarts.
+      </description>
+    </key>
+
+    <key name="display-name" type="s">
+      <default>"gnome-shell"</default>
+      <summary>Human-readable display name reported to the daemon</summary>
+    </key>
+
+    <key name="clear-color" type="(dddd)">
+      <default>(0.0, 0.0, 0.0, 1.0)</default>
+      <summary>Fallback solid color shown when no frame has arrived</summary>
+    </key>
+
+    <key name="show-diagnostics" type="b">
+      <default>false</default>
+      <summary>Overlay connection state on top of the wallpaper</summary>
+    </key>
+
+    <key name="renderer-binary" type="s">
+      <default>""</default>
+      <summary>Override path to the renderer entry point</summary>
+      <description>
+        Empty string means use the renderer.js bundled with the extension.
+        Absolute path points at an alternate executable for development.
+      </description>
+    </key>
+
+  </schema>
+</schemalist>

@@ -1,0 +1,16 @@
+{
+    "uuid": "org.waywallen.gnome@waywallen.io",
+    "name": "Waywallen",
+    "description": "Display-side wallpaper plugin for the waywallen daemon. Spawns a GTK4 renderer per monitor and clones it onto the desktop background.",
+    "url": "https://github.com/waywallen",
+    "version-name": "@PROJECT_VERSION@",
+    "shell-version": [
+        "46",
+        "47",
+        "48",
+        "49",
+        "50"
+    ],
+    "settings-schema": "org.waywallen.gnome",
+    "gettext-domain": "waywallen-gnome"
+}

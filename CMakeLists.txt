@@ -326,6 +326,21 @@ if(WAYWALLEN_DISPLAY_PLUGIN_GOBJECT)
     message(STATUS "libwaywallen_display: GObject plugin ENABLED")
 endif()
 
+option(WAYWALLEN_DISPLAY_PLUGIN_GNOME "Build the GNOME Shell extension" OFF)
+if(WAYWALLEN_DISPLAY_PLUGIN_GNOME)
+    if(NOT WAYWALLEN_DISPLAY_PLUGIN_GOBJECT)
+        message(FATAL_ERROR
+            "WAYWALLEN_DISPLAY_PLUGIN_GNOME requires WAYWALLEN_DISPLAY_PLUGIN_GOBJECT=ON; "
+            "the GNOME renderer subprocess imports gi://Waywallen.")
+    endif()
+    add_subdirectory(extensions/gnome)
+    message(STATUS "libwaywallen_display: GNOME extension ENABLED")
+
+    list(APPEND CPACK_COMPONENTS_ALL gnome_extension)
+    set(CPACK_ARCHIVE_GNOME_EXTENSION_FILE_NAME
+        "waywallen-gnome-${PROJECT_VERSION}-${CMAKE_SYSTEM_PROCESSOR}")
+endif()
+
 # ---------------------------------------------------------------------------
 # Install
 # ---------------------------------------------------------------------------
