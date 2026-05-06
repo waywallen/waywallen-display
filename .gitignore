@@ -9,3 +9,5 @@ compile_commands.json
 /build*
 /draft
 /qml
+/target/
+/Cargo.lock

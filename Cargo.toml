@@ -1,0 +1,21 @@
+[package]
+name = "waywallen-display-sys"
+version = "0.1.2"
+edition = "2021"
+license = "MIT"
+description = "Low-level FFI bindings for libwaywallen_display"
+repository = "https://github.com/waywallen/waywallen-display"
+links = "waywallen_display"
+build = "build.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = ["egl", "vulkan"]
+egl = []
+vulkan = []
+
+[build-dependencies]
+cc = "1"
+pkg-config = "0.3"
