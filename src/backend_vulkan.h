@@ -87,12 +87,25 @@ typedef struct ww_vk_backend {
 
 typedef void *(*ww_vk_get_instance_proc_addr_fn)(void *instance, const char *name);
 
+/* Stringify a VkResult for log lines. Covers the codes we actually
+ * see across import / sync / blit paths; unknowns return "VK_<unknown>".
+ * Stable strings — safe to embed in log format args directly. */
+const char *ww_vk_result_str(VkResult r);
+
+/*
+ * `install_debug_utils`: when true (and the host enabled
+ * `VK_EXT_debug_utils` at instance creation), register a debug messenger
+ * that routes driver/validation messages through `ww_log`. Pass false
+ * when another loaded backend on the same VkInstance already installed
+ * one (e.g. the blitter sharing the host's instance with the library).
+ */
 int  ww_vk_backend_load(ww_vk_backend_t *backend,
                         VkInstance instance,
                         VkPhysicalDevice physical_device,
                         VkDevice device,
                         uint32_t queue_family_index,
-                        ww_vk_get_instance_proc_addr_fn host_get_proc);
+                        ww_vk_get_instance_proc_addr_fn host_get_proc,
+                        bool install_debug_utils);
 void ww_vk_backend_unload(ww_vk_backend_t *backend);
 
 /*

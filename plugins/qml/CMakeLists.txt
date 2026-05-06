@@ -22,14 +22,16 @@ qt_add_qml_module(waywallen-display-qml
     SOURCES
         WaywallenDisplay.hpp
         WaywallenDisplay.cpp
-        VkBlitter.hpp
-        VkBlitter.cpp
     OUTPUT_DIRECTORY
         ${CMAKE_CURRENT_BINARY_DIR}/Waywallen/Display
 )
 
 if(Vulkan_FOUND)
     target_compile_definitions(waywallen-display-qml PRIVATE WW_HAVE_VULKAN=1)
+    # Pull in src/ for backend_vulkan_blit.h (internal header — the
+    # blitter symbols live in waywallen_display_static).
+    target_include_directories(waywallen-display-qml PRIVATE
+        ${WAYWALLEN_DISPLAY_DIR}/src)
 endif()
 
 # When built as a subdirectory of the top-level waywallen_display project,

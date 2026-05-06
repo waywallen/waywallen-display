@@ -599,7 +599,8 @@ int waywallen_display_bind_vulkan(waywallen_display_t *d,
         (VkPhysicalDevice)ctx->physical_device,
         (VkDevice)ctx->device,
         ctx->queue_family_index,
-        (ww_vk_get_instance_proc_addr_fn)ctx->vk_get_instance_proc_addr);
+        (ww_vk_get_instance_proc_addr_fn)ctx->vk_get_instance_proc_addr,
+        true);
     if (rc != 0) {
         ww_log(WAYWALLEN_LOG_WARN, "vk backend load failed: %d", rc);
         memset(&d->vk_backend, 0, sizeof(d->vk_backend));

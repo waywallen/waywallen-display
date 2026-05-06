@@ -14,9 +14,6 @@
 #include <QtQuick/qsgtexture_platform.h>
 #include <unistd.h>
 
-#ifdef WW_HAVE_VULKAN
-#include "VkBlitter.hpp"
-#endif
 
 Q_LOGGING_CATEGORY(lcWD, "waywallen.display")
 
@@ -129,7 +126,7 @@ void WaywallenDisplay::c_on_frame_ready(void *ud,
     auto *self = static_cast<WaywallenDisplay *>(ud);
     // flushPendingRelease signals the *prior* frame's release_syncobj
     // (EGL path) so that producer's wait at that release_point doesn't
-    // time out. Vulkan signals from VkBlitter once the GPU copy is
+    // time out. Vulkan signals from the blitter once the GPU copy is
     // done; the EGL path approximates "done with prior frame" by
     // signaling when the next frame_ready arrives.
     self->flushPendingRelease();
@@ -250,7 +247,10 @@ void WaywallenDisplay::cleanup() {
         }
         m_pendingVk = PendingVkFrame{};
     }
-    m_vkBlitter.reset();
+    if (m_vkBlitterInited) {
+        ww_vk_blitter_shutdown(&m_vkBlitter);
+        m_vkBlitterInited = false;
+    }
 #endif
 }
 
@@ -602,7 +602,10 @@ void WaywallenDisplay::onWindowReady() {
                     }
                     m_pendingVk = PendingVkFrame{};
                 }
-                m_vkBlitter.reset();
+                if (m_vkBlitterInited) {
+                    ww_vk_blitter_shutdown(&m_vkBlitter);
+                    m_vkBlitterInited = false;
+                }
 #endif
             },
             Qt::DirectConnection);
@@ -857,33 +860,21 @@ QSGNode *WaywallenDisplay::updatePaintNode(QSGNode *oldNode,
     // the shadow image. The shadow is what Qt actually samples.
     if (m_activeBackend == BackendVulkan && m_vkImagesValid
         && m_textureCount > 0 && m_texWidth > 0 && m_texHeight > 0) {
-        if (!m_vkBlitter) {
-            m_vkBlitter = std::make_unique<VkBlitter>();
-        }
-        if (!m_vkBlitter->initialized()) {
-            // Resolve vkGetDeviceProcAddr lazily here so we have it on
-            // the render thread.
-            PFN_vkGetDeviceProcAddr gdpa = nullptr;
-            if (m_vkGipa && m_vkInstance) {
-                auto gipa = reinterpret_cast<PFN_vkGetInstanceProcAddr>(m_vkGipa);
-                gdpa = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
-                    gipa(reinterpret_cast<VkInstance>(m_vkInstance),
-                         "vkGetDeviceProcAddr"));
-            }
-            const bool ok = m_vkBlitter->init(
+        if (!m_vkBlitterInited) {
+            int rc = ww_vk_blitter_init(
+                &m_vkBlitter,
                 reinterpret_cast<VkInstance>(m_vkInstance),
                 reinterpret_cast<VkPhysicalDevice>(m_vkPhys),
                 reinterpret_cast<VkDevice>(m_vkDevice),
                 m_vkQfi,
                 reinterpret_cast<VkQueue>(m_vkQueue),
-                reinterpret_cast<PFN_vkGetInstanceProcAddr>(m_vkGipa),
-                gdpa);
-            if (!ok) {
-                qCWarning(lcWD, "VkBlitter init failed; Vulkan path disabled this session");
-                m_vkBlitter.reset();
+                reinterpret_cast<ww_vk_get_instance_proc_addr_fn>(m_vkGipa));
+            if (rc != 0) {
+                qCWarning(lcWD, "vk blitter init failed (%d); Vulkan path disabled this session", rc);
                 delete oldNode;
                 return nullptr;
             }
+            m_vkBlitterInited = true;
         }
 
         // VkFormat must match the imported image's format. Library maps
@@ -894,14 +885,15 @@ QSGNode *WaywallenDisplay::updatePaintNode(QSGNode *oldNode,
         case 0x34325241: case 0x34325258: shadowFmt = VK_FORMAT_B8G8R8A8_UNORM; break;
         case 0x34324241: case 0x34324258: shadowFmt = VK_FORMAT_R8G8B8A8_UNORM; break;
         default:
-            qCWarning(lcWD, "VkBlitter: unsupported fourcc 0x%08x; skipping frame",
+            qCWarning(lcWD, "vk blitter: unsupported fourcc 0x%08x; skipping frame",
                       m_vkFourcc);
             delete oldNode;
             return nullptr;
         }
-        if (!m_vkBlitter->ensureShadow(static_cast<uint32_t>(m_texWidth),
-                                       static_cast<uint32_t>(m_texHeight),
-                                       shadowFmt)) {
+        if (ww_vk_blitter_ensure_shadow(&m_vkBlitter,
+                                         static_cast<uint32_t>(m_texWidth),
+                                         static_cast<uint32_t>(m_texHeight),
+                                         shadowFmt) != 0) {
             delete oldNode;
             return nullptr;
         }
@@ -916,12 +908,12 @@ QSGNode *WaywallenDisplay::updatePaintNode(QSGNode *oldNode,
             && frame.slot < m_vkImages.size()) {
             auto imported = reinterpret_cast<VkImage>(m_vkImages[frame.slot]);
             auto acquireSem = reinterpret_cast<VkSemaphore>(frame.acquireSem);
-            // blit() consumes ownership of releaseSyncobjFd unconditionally.
-            m_vkBlitter->blit(imported,
-                              static_cast<uint32_t>(m_texWidth),
-                              static_cast<uint32_t>(m_texHeight),
-                              acquireSem,
-                              frame.releaseSyncobjFd);
+            // blit consumes ownership of releaseSyncobjFd unconditionally.
+            ww_vk_blitter_blit(&m_vkBlitter, imported,
+                               static_cast<uint32_t>(m_texWidth),
+                               static_cast<uint32_t>(m_texHeight),
+                               acquireSem,
+                               frame.releaseSyncobjFd);
         }
     }
 #endif
@@ -930,8 +922,8 @@ QSGNode *WaywallenDisplay::updatePaintNode(QSGNode *oldNode,
         (m_activeBackend == BackendEGL && m_glTexturesCreated
          && m_currentSlot >= 0 && m_currentSlot < m_glTextures.size())
 #ifdef WW_HAVE_VULKAN
-        || (m_activeBackend == BackendVulkan && m_vkBlitter
-            && m_vkBlitter->shadow() != VK_NULL_HANDLE)
+        || (m_activeBackend == BackendVulkan && m_vkBlitterInited
+            && ww_vk_blitter_shadow(&m_vkBlitter) != VK_NULL_HANDLE)
 #endif
         ;
 
@@ -958,8 +950,8 @@ QSGNode *WaywallenDisplay::updatePaintNode(QSGNode *oldNode,
     } else if (m_activeBackend == BackendVulkan) {
 #ifdef WW_HAVE_VULKAN
         sgTex = QNativeInterface::QSGVulkanTexture::fromNative(
-            m_vkBlitter->shadow(),
-            m_vkBlitter->shadowLayout(),
+            ww_vk_blitter_shadow(&m_vkBlitter),
+            ww_vk_blitter_shadow_layout(&m_vkBlitter),
             window(), texSize,
             QQuickWindow::TextureHasAlphaChannel);
 #endif

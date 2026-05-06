@@ -8,3 +8,4 @@ build/
 compile_commands.json
 /build*
 /draft
+/qml

@@ -143,7 +143,9 @@ if(WAYWALLEN_DISPLAY_WITH_VULKAN)
         message(FATAL_ERROR
             "WAYWALLEN_DISPLAY_WITH_VULKAN=ON but vulkan pkg-config not found")
     endif()
-    list(APPEND _backend_sources src/backend_vulkan.c)
+    list(APPEND _backend_sources
+        src/backend_vulkan.c
+        src/backend_vulkan_blit.c)
     # Headers only: backend resolves libvulkan.so.1 via dlopen at runtime.
     list(APPEND _backend_include_dirs ${VULKAN_INCLUDE_DIRS})
     list(APPEND _backend_defines WW_HAVE_VULKAN=1)

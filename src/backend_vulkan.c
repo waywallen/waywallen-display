@@ -32,7 +32,7 @@
  * out of the import / sync paths; anything else falls through to the
  * raw integer. Single-source-of-truth for our log lines so failures are
  * grep-able by name (e.g. VK_ERROR_INVALID_EXTERNAL_HANDLE). */
-static const char *vk_result_str(VkResult r) {
+const char *ww_vk_result_str(VkResult r) {
     switch (r) {
     case VK_SUCCESS:                              return "VK_SUCCESS";
     case VK_NOT_READY:                            return "VK_NOT_READY";
@@ -136,7 +136,8 @@ int ww_vk_backend_load(ww_vk_backend_t *backend,
                        VkPhysicalDevice physical_device,
                        VkDevice device,
                        uint32_t queue_family_index,
-                       ww_vk_get_instance_proc_addr_fn host_get_proc) {
+                       ww_vk_get_instance_proc_addr_fn host_get_proc,
+                       bool install_debug_utils) {
     if (!backend) {
         ww_log(WAYWALLEN_LOG_ERROR, "vk backend load: NULL backend");
         return -EINVAL;
@@ -255,7 +256,8 @@ int ww_vk_backend_load(ww_vk_backend_t *backend,
         (PFN_vkDestroyDebugUtilsMessengerEXT)gipa(
             instance, "vkDestroyDebugUtilsMessengerEXT");
 
-    if (backend->vkCreateDebugUtilsMessengerEXT
+    if (install_debug_utils
+        && backend->vkCreateDebugUtilsMessengerEXT
         && backend->vkDestroyDebugUtilsMessengerEXT) {
         VkDebugUtilsMessengerCreateInfoEXT msg_ci = {
             .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
@@ -279,10 +281,10 @@ int ww_vk_backend_load(ww_vk_backend_t *backend,
         } else {
             ww_log(WAYWALLEN_LOG_WARN,
                    "vk debug_utils messenger create failed: %s; continuing without driver messages",
-                   vk_result_str(mvr));
+                   ww_vk_result_str(mvr));
             backend->debug_messenger = VK_NULL_HANDLE;
         }
-    } else {
+    } else if (install_debug_utils) {
         ww_log(WAYWALLEN_LOG_DEBUG,
                "vk debug_utils not available (host did not enable VK_EXT_debug_utils); driver messages disabled");
     }
@@ -404,7 +406,7 @@ int ww_vk_import_dmabuf(const ww_vk_backend_t *backend,
          * matches the modifier sub-layout the producer's image was
          * allocated for. The host then blits this into a sampler-
          * friendly OPTIMAL VkImage of its own creation. See
-         * plugins/qml/VkBlitter.{hpp,cpp}. */
+         * src/backend_vulkan_blit.{h,c}. */
         .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
         .queueFamilyIndexCount = 1,
@@ -420,7 +422,7 @@ int ww_vk_import_dmabuf(const ww_vk_backend_t *backend,
                "(fourcc=0x%08x %ux%u modifier=0x%" PRIx64 " n_planes=%u) — "
                "driver rejected the explicit modifier+plane layout; check "
                "that the producer's modifier is in the importer's supported list",
-               vk_result_str(vr), im->fourcc, im->width, im->height,
+               ww_vk_result_str(vr), im->fourcc, im->width, im->height,
                im->modifier, im->n_planes);
         return -EIO;
     }
@@ -442,7 +444,7 @@ int ww_vk_import_dmabuf(const ww_vk_backend_t *backend,
         ww_log(WAYWALLEN_LOG_ERROR,
                "vk import: vkGetMemoryFdPropertiesKHR(fd=%d) failed: %s — "
                "fd is not a valid dmabuf or driver rejected the handle type",
-               im->fds[0], vk_result_str(vr));
+               im->fds[0], ww_vk_result_str(vr));
         backend->vkDestroyImage(backend->device, out->image, NULL);
         out->image = VK_NULL_HANDLE;
         return -EIO;
@@ -565,7 +567,7 @@ int ww_vk_import_dmabuf(const ww_vk_backend_t *backend,
         if (!last_attempt) close(try_fd);
         ww_log(WAYWALLEN_LOG_DEBUG,
                "vk import: vkAllocateMemory(memTypeIndex=%u props=[%s]) failed: %s; %s",
-               i, props_buf, vk_result_str(vr2),
+               i, props_buf, ww_vk_result_str(vr2),
                last_attempt ? "out of candidates" : "trying next memtype");
     }
 
@@ -573,7 +575,7 @@ int ww_vk_import_dmabuf(const ww_vk_backend_t *backend,
         ww_log(WAYWALLEN_LOG_ERROR,
                "vk import: vkAllocateMemory exhausted all %u candidate memtype(s) "
                "(mask=0x%08x size=%" PRIu64 "), last error: %s",
-               n_cand, mask, (uint64_t)mem_req.size, vk_result_str(last_vr));
+               n_cand, mask, (uint64_t)mem_req.size, ww_vk_result_str(last_vr));
         backend->vkDestroyImage(backend->device, out->image, NULL);
         out->image = VK_NULL_HANDLE;
         return -EIO;
@@ -588,7 +590,7 @@ int ww_vk_import_dmabuf(const ww_vk_backend_t *backend,
                                     out->memory, 0);
     if (vr != VK_SUCCESS) {
         ww_log(WAYWALLEN_LOG_ERROR,
-               "vk import: vkBindImageMemory failed: %s", vk_result_str(vr));
+               "vk import: vkBindImageMemory failed: %s", ww_vk_result_str(vr));
         backend->vkFreeMemory(backend->device, out->memory, NULL);
         backend->vkDestroyImage(backend->device, out->image, NULL);
         memset(out, 0, sizeof(*out));
@@ -646,7 +648,7 @@ int ww_vk_import_sync_fd(const ww_vk_backend_t *backend,
     if (vr != VK_SUCCESS) {
         ww_log(WAYWALLEN_LOG_ERROR,
                "vk import_sync_fd: vkImportSemaphoreFdKHR(sync_fd=%d) failed: %s",
-               sync_fd, vk_result_str(vr));
+               sync_fd, ww_vk_result_str(vr));
         return -EIO;
     }
 

@@ -8,11 +8,10 @@
 #include <QString>
 #include <QTimer>
 #include <QVector>
-#include <memory>
 #include <qqml.h>
 
 #ifdef WW_HAVE_VULKAN
-class VkBlitter;
+#include "backend_vulkan_blit.h"
 #endif
 
 struct waywallen_display;
@@ -193,7 +192,8 @@ private:
     // Owned by render thread; created on first updatePaintNode after
     // a Vulkan textures_ready. Copies imported dmabuf images into a
     // sampler-friendly OPTIMAL VkImage Qt actually samples.
-    std::unique_ptr<VkBlitter> m_vkBlitter;
+    ww_vk_blitter_t m_vkBlitter {};
+    bool m_vkBlitterInited { false };
 
     // Cached on bindVulkanBackend.
     void *m_vkInstance { nullptr };
@@ -231,6 +231,6 @@ private:
     // flushPendingRelease) so the daemon's reaper sees a real signal
     // instead of timing out and force-signaling. -1 when no fd is held.
     // The Vulkan path uses the separate m_pendingVk.releaseSyncobjFd
-    // and signals from VkBlitter after the GPU copy completes.
+    // and signals from the blitter after the GPU copy completes.
     int m_pendingEglReleaseSyncobjFd { -1 };
 };
