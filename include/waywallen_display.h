@@ -49,7 +49,7 @@ extern "C" {
  * `hello.client_protocol_version`. The daemon owns the supported
  * range and rejects out-of-range clients with `error{code=2}`.
  */
-#define WAYWALLEN_DISPLAY_PROTOCOL_VERSION 4
+#define WAYWALLEN_DISPLAY_PROTOCOL_VERSION 5
 
 /* -------------------------------------------------------------------------
  * Return codes

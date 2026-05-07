@@ -19,7 +19,7 @@ use core::ffi::{c_char, c_int, c_void};
 
 pub const WAYWALLEN_DISPLAY_VERSION_MAJOR: u32 = 0;
 pub const WAYWALLEN_DISPLAY_VERSION_MINOR: u32 = 1;
-pub const WAYWALLEN_DISPLAY_PROTOCOL_VERSION: u32 = 4;
+pub const WAYWALLEN_DISPLAY_PROTOCOL_VERSION: u32 = 5;
 
 // -----------------------------------------------------------------------------
 // Return codes
