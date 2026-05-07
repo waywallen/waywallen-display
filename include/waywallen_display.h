@@ -482,6 +482,55 @@ waywallen_stream_state_t waywallen_display_stream_state(waywallen_display_t *d);
 uint64_t waywallen_display_get_display_id(waywallen_display_t *d);
 
 /* -------------------------------------------------------------------------
+ * Last disconnect reason
+ *
+ * When the library invokes `on_disconnected`, the host receives an
+ * (errno-ish int, char *) pair. That tells the host *what* IO syscall
+ * failed but not *why* the session ended. The reason getter below
+ * categorises every internal `fire_disconnected` callsite — including
+ * decoded daemon `error` events whose `code` field is otherwise
+ * thrown away by the callback path — into the enum below.
+ *
+ * Lifetime:
+ *   - Initially `NONE` and empty until the first disconnect.
+ *   - Updated synchronously inside `on_disconnected` (callback sees
+ *     the post-update values too).
+ *   - Cleared back to `NONE` when a subsequent `connect` reaches
+ *     CONNECTED state — so a UI can keep showing "why we dropped"
+ *     across reconnect attempts and only hide it once we're healthy.
+ * ------------------------------------------------------------------------- */
+
+typedef enum waywallen_disconnect_reason {
+    WAYWALLEN_DISCONNECT_NONE                 = 0,
+    /* daemon `error.code == 2`: hello.client_protocol_version is
+     * outside the daemon's supported range. */
+    WAYWALLEN_DISCONNECT_VERSION_UNSUPPORTED  = 1,
+    /* daemon `error.code == 1`: hello.protocol string mismatch. */
+    WAYWALLEN_DISCONNECT_PROTOCOL_MISMATCH    = 2,
+    /* daemon sent an `error` event with an unrecognised code. */
+    WAYWALLEN_DISCONNECT_DAEMON_ERROR         = 3,
+    /* welcome / display_accepted decode failed, or an unexpected
+     * opcode arrived during the handshake. */
+    WAYWALLEN_DISCONNECT_HANDSHAKE_FAILED     = 4,
+    /* connect / send / recv syscall failed. */
+    WAYWALLEN_DISCONNECT_SOCKET_IO            = 5,
+    /* post-handshake wire-format error (bind_buffers, set_config,
+     * frame_ready, unbind decode failure). */
+    WAYWALLEN_DISCONNECT_PROTOCOL_ERROR       = 6,
+    /* clean EOF / ECONNRESET — the daemon closed the socket. */
+    WAYWALLEN_DISCONNECT_DAEMON_GONE          = 7,
+} waywallen_disconnect_reason_t;
+
+waywallen_disconnect_reason_t
+waywallen_display_last_disconnect_reason(waywallen_display_t *d);
+
+/* Always non-NULL; empty string if no disconnect has occurred. The
+ * pointer is valid for the lifetime of `d` (or until the next
+ * disconnect overwrites the buffer). */
+const char *
+waywallen_display_last_disconnect_message(waywallen_display_t *d);
+
+/* -------------------------------------------------------------------------
  * EGL deferred GL texture creation
  *
  * When backend == EGL, `on_textures_ready` delivers EGLImageKHR handles

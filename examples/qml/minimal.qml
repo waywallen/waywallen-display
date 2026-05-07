@@ -60,7 +60,26 @@ Window {
                 s += "\nconn:   " + connText(wallpaper.connState)
                       + "  stream: " + streamText(wallpaper.streamState)
                 s += "\nframes: " + wallpaper.framesReceived
+                if (wallpaper.lastDisconnectReason !== WaywallenDisplay.None) {
+                    s += "\nreason: " + reasonText(wallpaper.lastDisconnectReason)
+                    if (wallpaper.lastDisconnectMessage.length > 0)
+                        s += "\n  msg:  " + wallpaper.lastDisconnectMessage
+                }
                 return s
+            }
+
+            function reasonText(r) {
+                switch (r) {
+                case WaywallenDisplay.None:               return "—"
+                case WaywallenDisplay.VersionUnsupported: return "version unsupported"
+                case WaywallenDisplay.ProtocolMismatch:   return "protocol mismatch"
+                case WaywallenDisplay.DaemonError:        return "daemon error"
+                case WaywallenDisplay.HandshakeFailed:    return "handshake failed"
+                case WaywallenDisplay.SocketIo:           return "socket io"
+                case WaywallenDisplay.ProtocolError:      return "protocol error"
+                case WaywallenDisplay.DaemonGone:         return "daemon gone"
+                }
+                return "unknown"
             }
 
             function screenVendor() {

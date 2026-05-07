@@ -78,18 +78,26 @@ Window {
             color: "#cdd6f4"
             font.pixelSize: 13
             font.family: "monospace"
-            text: box.wallpaper.displayName
-                  + " (id=" + box.idLabel(box.wallpaper.displayId) + ") | "
-                  + box.connLabel(box.wallpaper.connState)
-                  + " " + box.streamLabel(box.wallpaper.streamState)
-                  + " | frames: " + box.wallpaper.framesReceived
-                  + "\nscreen: " + Screen.name + box.screenVendor()
-                  + "\n  geom:  " + Screen.width + "x" + Screen.height
-                          + " @ (" + Screen.virtualX + "," + Screen.virtualY + ")"
-                  + "\n  avail: " + Screen.desktopAvailableWidth
-                          + "x" + Screen.desktopAvailableHeight
-                  + "\n  dpr=" + Screen.devicePixelRatio
-                          + "  density=" + Screen.pixelDensity.toFixed(2) + " px/mm"
+            text: {
+                let s = box.wallpaper.displayName
+                      + " (id=" + box.idLabel(box.wallpaper.displayId) + ") | "
+                      + box.connLabel(box.wallpaper.connState)
+                      + " " + box.streamLabel(box.wallpaper.streamState)
+                      + " | frames: " + box.wallpaper.framesReceived
+                      + "\nscreen: " + Screen.name + box.screenVendor()
+                      + "\n  geom:  " + Screen.width + "x" + Screen.height
+                              + " @ (" + Screen.virtualX + "," + Screen.virtualY + ")"
+                      + "\n  avail: " + Screen.desktopAvailableWidth
+                              + "x" + Screen.desktopAvailableHeight
+                      + "\n  dpr=" + Screen.devicePixelRatio
+                              + "  density=" + Screen.pixelDensity.toFixed(2) + " px/mm"
+                if (box.wallpaper.lastDisconnectReason !== WaywallenDisplay.None) {
+                    s += "\nreason: " + box.reasonLabel(box.wallpaper.lastDisconnectReason)
+                    if (box.wallpaper.lastDisconnectMessage.length > 0)
+                        s += "\n  msg:  " + box.wallpaper.lastDisconnectMessage
+                }
+                return s
+            }
         }
 
         function screenVendor() {
@@ -119,6 +127,20 @@ Window {
 
         function idLabel(id) {
             return id === 0 ? "—" : id
+        }
+
+        function reasonLabel(r) {
+            switch (r) {
+            case WaywallenDisplay.None:               return "—"
+            case WaywallenDisplay.VersionUnsupported: return "version unsupported"
+            case WaywallenDisplay.ProtocolMismatch:   return "protocol mismatch"
+            case WaywallenDisplay.DaemonError:        return "daemon error"
+            case WaywallenDisplay.HandshakeFailed:    return "handshake failed"
+            case WaywallenDisplay.SocketIo:           return "socket io"
+            case WaywallenDisplay.ProtocolError:      return "protocol error"
+            case WaywallenDisplay.DaemonGone:         return "daemon gone"
+            }
+            return "unknown"
         }
     }
 

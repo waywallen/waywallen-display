@@ -43,6 +43,10 @@ class WaywallenDisplay : public QQuickItem {
     Q_PROPERTY(ConnState connState READ connState NOTIFY connStateChanged)
     Q_PROPERTY(StreamState streamState READ streamState
                    NOTIFY streamStateChanged)
+    Q_PROPERTY(DisconnectReason lastDisconnectReason READ lastDisconnectReason
+                   NOTIFY lastDisconnectChanged)
+    Q_PROPERTY(QString lastDisconnectMessage READ lastDisconnectMessage
+                   NOTIFY lastDisconnectChanged)
     Q_PROPERTY(QColor clearColor READ clearColor WRITE setClearColor
                    NOTIFY clearColorChanged)
     Q_PROPERTY(bool autoReconnect READ autoReconnect WRITE setAutoReconnect
@@ -66,6 +70,20 @@ public:
         Active,
     };
     Q_ENUM(StreamState)
+
+    // Numeric values mirror waywallen_disconnect_reason_t in
+    // include/waywallen_display.h — keep in sync.
+    enum DisconnectReason {
+        None                = 0,
+        VersionUnsupported  = 1,
+        ProtocolMismatch    = 2,
+        DaemonError         = 3,
+        HandshakeFailed     = 4,
+        SocketIo            = 5,
+        ProtocolError       = 6,
+        DaemonGone          = 7,
+    };
+    Q_ENUM(DisconnectReason)
 
     explicit WaywallenDisplay(QQuickItem *parent = nullptr);
     ~WaywallenDisplay() override;
@@ -91,6 +109,9 @@ public:
 
     ConnState connState() const { return m_connState; }
     StreamState streamState() const { return m_streamState; }
+
+    DisconnectReason lastDisconnectReason() const { return m_lastReason; }
+    QString lastDisconnectMessage() const { return m_lastMessage; }
 
     QColor clearColor() const { return m_clearColor; }
     void setClearColor(const QColor &color);
@@ -120,6 +141,7 @@ signals:
     void displayIdChanged();
     void connStateChanged();
     void streamStateChanged();
+    void lastDisconnectChanged();
     void clearColorChanged();
     void autoReconnectChanged();
     void mouseForwardEnabledChanged();
@@ -169,6 +191,8 @@ private:
     qulonglong m_displayId { 0 };
     ConnState m_connState { Disconnected };
     StreamState m_streamState { Inactive };
+    DisconnectReason m_lastReason { None };
+    QString m_lastMessage;
     QColor m_clearColor { Qt::black };
     bool m_autoReconnect { true };
     bool m_mouseForwardEnabled { true };

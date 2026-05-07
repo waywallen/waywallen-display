@@ -200,6 +200,15 @@ void WaywallenDisplay::c_on_disconnected(void *ud, int err,
     // If m_display was nulled (e.g. by sceneGraphInvalidated on the
     // render thread), skip — we're already tearing down.
     if (!self->m_display) return;
+    const auto reason = static_cast<DisconnectReason>(
+        waywallen_display_last_disconnect_reason(self->m_display));
+    const QString message = QString::fromUtf8(
+        waywallen_display_last_disconnect_message(self->m_display));
+    if (self->m_lastReason != reason || self->m_lastMessage != message) {
+        self->m_lastReason = reason;
+        self->m_lastMessage = message;
+        emit self->lastDisconnectChanged();
+    }
     self->handleDisconnect(err, msg);
 }
 
@@ -877,6 +886,11 @@ void WaywallenDisplay::onHandshakeIO() {
         if (m_displayId != newId) {
             m_displayId = newId;
             emit displayIdChanged();
+        }
+        if (m_lastReason != None || !m_lastMessage.isEmpty()) {
+            m_lastReason = None;
+            m_lastMessage.clear();
+            emit lastDisconnectChanged();
         }
         // Window may have resized while the handshake was in flight;
         // reconcile by pushing if the current dims drifted from what

@@ -83,6 +83,31 @@ ApplicationWindow {
                 color: "#a6adc8"
                 text: "Frames: " + wallpaper.framesReceived
             }
+            Label {
+                visible: wallpaper.lastDisconnectReason !== WaywallenDisplay.None
+                color: "#f38ba8"
+                wrapMode: Text.WrapAnywhere
+                Layout.fillWidth: true
+                text: {
+                    let s = "Reason: " + reasonText(wallpaper.lastDisconnectReason)
+                    if (wallpaper.lastDisconnectMessage.length > 0)
+                        s += "\n  " + wallpaper.lastDisconnectMessage
+                    return s
+                }
+                function reasonText(r) {
+                    switch (r) {
+                    case WaywallenDisplay.None:               return "—"
+                    case WaywallenDisplay.VersionUnsupported: return "version unsupported"
+                    case WaywallenDisplay.ProtocolMismatch:   return "protocol mismatch"
+                    case WaywallenDisplay.DaemonError:        return "daemon error"
+                    case WaywallenDisplay.HandshakeFailed:    return "handshake failed"
+                    case WaywallenDisplay.SocketIo:           return "socket io"
+                    case WaywallenDisplay.ProtocolError:      return "protocol error"
+                    case WaywallenDisplay.DaemonGone:         return "daemon gone"
+                    }
+                    return "unknown"
+                }
+            }
 
             Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: "#45475a" }
 

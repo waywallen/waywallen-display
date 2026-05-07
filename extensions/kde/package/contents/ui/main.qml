@@ -50,10 +50,13 @@ WallpaperItem {
         ? "WaywallenSurface.qml"
         : "WaywallenSurfaceEmbed.qml"
 
+    property bool _initDone: false
+
     Loader {
         id: surfaceLoader
         anchors.fill: parent
         asynchronous: false
+        active: root._initDone
         source: root.surfaceSource
 
         onLoaded: {
@@ -137,6 +140,10 @@ WallpaperItem {
             root.configuration.DisplayInstanceId = root._generateUuidV4();
             root.configuration.writeConfig();
         }
+        // Release the gate: surfaceLoader now constructs WaywallenDisplay
+        // with a guaranteed-non-empty DisplayInstanceId, so the first
+        // tryConnect carries the real UUID rather than racing the write.
+        root._initDone = true;
         // Async wallpaper: content arrives via the daemon stream, which can
         // take arbitrary time (or never connect, if the daemon is down). We
         // must NOT gate ksplash on first frame — Plasma waits for every

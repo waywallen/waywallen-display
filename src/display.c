@@ -165,18 +165,44 @@ struct waywallen_display {
     bool has_textures;
     uint64_t current_buffer_generation;
     waywallen_textures_t current_textures;
+
+    /* Last categorised disconnect reason + a fixed-buffer copy of the
+     * accompanying message. Updated by fire_disconnected_r before the
+     * `on_disconnected` callback fires, so hosts can read them
+     * synchronously from inside the callback. Reset to NONE when a
+     * subsequent connect reaches CONNECTED. */
+    waywallen_disconnect_reason_t last_reason;
+    char last_message[256];
 };
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                            */
 /* ------------------------------------------------------------------ */
 
-static void fire_disconnected(waywallen_display_t *d, int err, const char *msg) {
+static waywallen_disconnect_reason_t map_daemon_error_code(uint32_t code) {
+    switch (code) {
+    case 1: return WAYWALLEN_DISCONNECT_PROTOCOL_MISMATCH;
+    case 2: return WAYWALLEN_DISCONNECT_VERSION_UNSUPPORTED;
+    default: return WAYWALLEN_DISCONNECT_DAEMON_ERROR;
+    }
+}
+
+static void fire_disconnected_r(waywallen_display_t *d,
+                                waywallen_disconnect_reason_t reason,
+                                int err, const char *msg) {
     if (d->conn == WW_CONN_DEAD) return;
     d->conn = WW_CONN_DEAD;
     d->stream = WW_STREAM_INACTIVE;
     d->hs_state = WW_HS_IDLE;
     d->display_id = 0;
+    d->last_reason = reason;
+    if (msg) {
+        size_t n = sizeof(d->last_message) - 1;
+        strncpy(d->last_message, msg, n);
+        d->last_message[n] = '\0';
+    } else {
+        d->last_message[0] = '\0';
+    }
     ww_codec_recv_state_reset(&d->hs_recv);
     d->hs_send_len = 0;
     d->hs_send_pos = 0;
@@ -187,6 +213,23 @@ static void fire_disconnected(waywallen_display_t *d, int err, const char *msg) 
         close(d->fd);
         d->fd = -1;
     }
+}
+
+/* Default-categorised wrapper for IO/syscall paths. Specific callsites
+ * (handshake, decode, daemon error event) call fire_disconnected_r
+ * directly with a more precise reason. */
+static void fire_disconnected(waywallen_display_t *d, int err, const char *msg) {
+    waywallen_disconnect_reason_t r;
+    if (err == WAYWALLEN_ERR_NOTCONN) {
+        r = WAYWALLEN_DISCONNECT_DAEMON_GONE;
+    } else if (err == WAYWALLEN_ERR_IO) {
+        r = WAYWALLEN_DISCONNECT_SOCKET_IO;
+    } else if (err == WAYWALLEN_ERR_PROTO) {
+        r = WAYWALLEN_DISCONNECT_PROTOCOL_ERROR;
+    } else {
+        r = WAYWALLEN_DISCONNECT_SOCKET_IO;
+    }
+    fire_disconnected_r(d, r, err, msg);
 }
 
 static void close_all_fds(int *fds, size_t n) {
@@ -873,17 +916,20 @@ static int hs_advance_one(waywallen_display_t *d) {
             const char *msg = "server error";
             if (ww_evt_error_decode(d->hs_recv.body, d->hs_recv.body_len, &er) == WW_OK) {
                 if (er.message) msg = er.message;
-                fire_disconnected(d, WAYWALLEN_ERR_PROTO, msg);
+                fire_disconnected_r(d, map_daemon_error_code(er.code),
+                                    WAYWALLEN_ERR_PROTO, msg);
                 ww_evt_error_free(&er);
             } else {
-                fire_disconnected(d, WAYWALLEN_ERR_PROTO,
-                                  "server error (decode failed)");
+                fire_disconnected_r(d, WAYWALLEN_DISCONNECT_DAEMON_ERROR,
+                                    WAYWALLEN_ERR_PROTO,
+                                    "server error (decode failed)");
             }
             ww_codec_recv_state_reset(&d->hs_recv);
             return WAYWALLEN_ERR_PROTO;
         }
         if (d->hs_recv.op != WW_EVT_WELCOME) {
-            fire_disconnected(d, WAYWALLEN_ERR_PROTO, "expected welcome");
+            fire_disconnected_r(d, WAYWALLEN_DISCONNECT_HANDSHAKE_FAILED,
+                                WAYWALLEN_ERR_PROTO, "expected welcome");
             ww_codec_recv_state_reset(&d->hs_recv);
             return WAYWALLEN_ERR_PROTO;
         }
@@ -894,7 +940,8 @@ static int hs_advance_one(waywallen_display_t *d) {
         ww_evt_welcome_t welcome;
         if (ww_evt_welcome_decode(d->hs_recv.body, d->hs_recv.body_len,
                                   &welcome) != WW_OK) {
-            fire_disconnected(d, WAYWALLEN_ERR_PROTO, "decode welcome");
+            fire_disconnected_r(d, WAYWALLEN_DISCONNECT_HANDSHAKE_FAILED,
+                                WAYWALLEN_ERR_PROTO, "decode welcome");
             ww_codec_recv_state_reset(&d->hs_recv);
             return WAYWALLEN_ERR_PROTO;
         }
@@ -925,17 +972,20 @@ static int hs_advance_one(waywallen_display_t *d) {
             const char *msg = "server error";
             if (ww_evt_error_decode(d->hs_recv.body, d->hs_recv.body_len, &er) == WW_OK) {
                 if (er.message) msg = er.message;
-                fire_disconnected(d, WAYWALLEN_ERR_PROTO, msg);
+                fire_disconnected_r(d, map_daemon_error_code(er.code),
+                                    WAYWALLEN_ERR_PROTO, msg);
                 ww_evt_error_free(&er);
             } else {
-                fire_disconnected(d, WAYWALLEN_ERR_PROTO,
-                                  "server error (decode failed)");
+                fire_disconnected_r(d, WAYWALLEN_DISCONNECT_DAEMON_ERROR,
+                                    WAYWALLEN_ERR_PROTO,
+                                    "server error (decode failed)");
             }
             ww_codec_recv_state_reset(&d->hs_recv);
             return WAYWALLEN_ERR_PROTO;
         }
         if (d->hs_recv.op != WW_EVT_DISPLAY_ACCEPTED) {
-            fire_disconnected(d, WAYWALLEN_ERR_PROTO, "expected display_accepted");
+            fire_disconnected_r(d, WAYWALLEN_DISCONNECT_HANDSHAKE_FAILED,
+                                WAYWALLEN_ERR_PROTO, "expected display_accepted");
             ww_codec_recv_state_reset(&d->hs_recv);
             return WAYWALLEN_ERR_PROTO;
         }
@@ -943,13 +993,16 @@ static int hs_advance_one(waywallen_display_t *d) {
         if (ww_evt_display_accepted_decode(d->hs_recv.body,
                                            d->hs_recv.body_len,
                                            &accepted) != WW_OK) {
-            fire_disconnected(d, WAYWALLEN_ERR_PROTO, "decode display_accepted");
+            fire_disconnected_r(d, WAYWALLEN_DISCONNECT_HANDSHAKE_FAILED,
+                                WAYWALLEN_ERR_PROTO, "decode display_accepted");
             ww_codec_recv_state_reset(&d->hs_recv);
             return WAYWALLEN_ERR_PROTO;
         }
         d->display_id = accepted.display_id;
         ww_evt_display_accepted_free(&accepted);
         d->conn = WW_CONN_CONNECTED;
+        d->last_reason = WAYWALLEN_DISCONNECT_NONE;
+        d->last_message[0] = '\0';
         // Modifier-negotiation v2 — ship a hardcoded LINEAR-only
         // ConsumerCaps before transitioning to READY. Real probing
         // (eglQueryDmaBufModifiersEXT / vkGetPhysicalDeviceFormatProperties2)
@@ -1600,15 +1653,18 @@ static int handle_error(waywallen_display_t *d,
                         const uint8_t *body, size_t body_len) {
     ww_evt_error_t er;
     if (ww_evt_error_decode(body, body_len, &er) != WW_OK) {
-        fire_disconnected(d, WAYWALLEN_ERR_PROTO, "decode error");
+        fire_disconnected_r(d, WAYWALLEN_DISCONNECT_DAEMON_ERROR,
+                            WAYWALLEN_ERR_PROTO, "decode error");
         return WAYWALLEN_ERR_PROTO;
     }
     /* Make a local copy of the message before freeing `er`, then
      * fire the callback. */
     char *msg = er.message;
+    uint32_t code = er.code;
     er.message = NULL;
     ww_evt_error_free(&er);
-    fire_disconnected(d, WAYWALLEN_ERR_PROTO, msg ? msg : "server error");
+    fire_disconnected_r(d, map_daemon_error_code(code),
+                        WAYWALLEN_ERR_PROTO, msg ? msg : "server error");
     free(msg);
     return WAYWALLEN_ERR_PROTO;
 }
@@ -1806,6 +1862,18 @@ waywallen_stream_state_t waywallen_display_stream_state(waywallen_display_t *d) 
 uint64_t waywallen_display_get_display_id(waywallen_display_t *d) {
     if (!d) return 0;
     return d->display_id;
+}
+
+waywallen_disconnect_reason_t
+waywallen_display_last_disconnect_reason(waywallen_display_t *d) {
+    if (!d) return WAYWALLEN_DISCONNECT_NONE;
+    return d->last_reason;
+}
+
+const char *
+waywallen_display_last_disconnect_message(waywallen_display_t *d) {
+    if (!d) return "";
+    return d->last_message;
 }
 
 /* ------------------------------------------------------------------ */
