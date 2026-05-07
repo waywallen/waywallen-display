@@ -738,6 +738,7 @@ static const struct ww_vk_fourcc_entry s_vk_fourcc_table[] = {
 };
 
 int ww_vk_query_format_caps(const ww_vk_backend_t *backend,
+                            uint32_t want_features,
                             ww_vk_caps_emit_fn emit,
                             void *user_data) {
     if (!backend || !backend->loaded || !emit) return -EINVAL;
@@ -752,17 +753,6 @@ int ww_vk_query_format_caps(const ww_vk_backend_t *backend,
     if (!fp_vf) return -ENOSYS;
     PFN_vkGetPhysicalDeviceFormatProperties2 gpdfp2 =
         (PFN_vkGetPhysicalDeviceFormatProperties2)fp_vf;
-
-    /* Consumer side uses the modifier image as TRANSFER_SRC only (it
-     * blits out into a sampler-friendly OPTIMAL host image). Modifiers
-     * the consumer is willing to advertise must therefore support
-     * TRANSFER_SRC; SAMPLED is kept because some drivers only return
-     * the right sub-layout when both bits are present together (and
-     * the consumer never actually creates a SAMPLED image — the
-     * advertise side is a feature-mask filter, not an image creation
-     * usage). */
-    const uint32_t want_features = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT
-                                 | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT;
 
     for (size_t i = 0;
          i < sizeof(s_vk_fourcc_table) / sizeof(s_vk_fourcc_table[0]);
@@ -793,9 +783,6 @@ int ww_vk_query_format_caps(const ww_vk_backend_t *backend,
 
         for (uint32_t j = 0; j < list.drmFormatModifierCount; ++j) {
             const VkDrmFormatModifierPropertiesEXT *m = &entries[j];
-            /* Require at least sampled-image + transfer_dst — a
-             * texture we couldn't sample is useless. drmFormatModifierPlaneCount
-             * is the per-buffer plane count for this modifier. */
             if ((m->drmFormatModifierTilingFeatures & want_features)
                 != want_features) {
                 continue;
@@ -803,7 +790,7 @@ int ww_vk_query_format_caps(const ww_vk_backend_t *backend,
             uint32_t planes = m->drmFormatModifierPlaneCount > 0
                 ? m->drmFormatModifierPlaneCount : 1u;
             emit(e->fourcc, (uint64_t)m->drmFormatModifier, planes,
-                 1u /*USAGE_SAMPLED*/, user_data);
+                 user_data);
         }
         free(entries);
     }

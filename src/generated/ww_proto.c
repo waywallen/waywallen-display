@@ -546,7 +546,6 @@ int ww_req_consumer_caps_encode(const ww_req_consumer_caps_t *m, ww_buf_t *out) 
     if ((rc = w_array_u32(out, &m->fourccs))) return rc;
     if ((rc = w_array_u32(out, &m->mod_counts))) return rc;
     if ((rc = w_array_u64(out, &m->modifiers))) return rc;
-    if ((rc = w_array_u32(out, &m->usages))) return rc;
     if ((rc = w_array_u32(out, &m->plane_counts))) return rc;
     if ((rc = w_array_u32(out, &m->device_uuid))) return rc;
     if ((rc = w_array_u32(out, &m->driver_uuid))) return rc;
@@ -567,7 +566,6 @@ int ww_req_consumer_caps_decode(const uint8_t *buf, size_t len, ww_req_consumer_
     if ((rc = rd_array_u32(&r, &out->fourccs))) goto fail;
     if ((rc = rd_array_u32(&r, &out->mod_counts))) goto fail;
     if ((rc = rd_array_u64(&r, &out->modifiers))) goto fail;
-    if ((rc = rd_array_u32(&r, &out->usages))) goto fail;
     if ((rc = rd_array_u32(&r, &out->plane_counts))) goto fail;
     if ((rc = rd_array_u32(&r, &out->device_uuid))) goto fail;
     if ((rc = rd_array_u32(&r, &out->driver_uuid))) goto fail;
@@ -594,7 +592,6 @@ void ww_req_consumer_caps_free(ww_req_consumer_caps_t *m) {
     free(m->fourccs.data); m->fourccs.data = NULL; m->fourccs.count = 0;
     free(m->mod_counts.data); m->mod_counts.data = NULL; m->mod_counts.count = 0;
     free(m->modifiers.data); m->modifiers.data = NULL; m->modifiers.count = 0;
-    free(m->usages.data); m->usages.data = NULL; m->usages.count = 0;
     free(m->plane_counts.data); m->plane_counts.data = NULL; m->plane_counts.count = 0;
     free(m->device_uuid.data); m->device_uuid.data = NULL; m->device_uuid.count = 0;
     free(m->driver_uuid.data); m->driver_uuid.data = NULL; m->driver_uuid.count = 0;

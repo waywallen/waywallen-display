@@ -513,7 +513,7 @@ int ww_egl_query_format_caps(const ww_egl_backend_t *backend,
         if (num_mods <= 0) {
             /* Implicit-modifier-only; advertise as LINEAR so the daemon's
              * picker has at least one option per fourcc. */
-            emit((uint32_t)fmts[i], 0 /*LINEAR*/, 1, 1u /*USAGE_SAMPLED*/, user_data);
+            emit((uint32_t)fmts[i], 0 /*LINEAR*/, 1, user_data);
             continue;
         }
         EGLuint64KHR *mods = (EGLuint64KHR *)calloc((size_t)num_mods, sizeof(*mods));
@@ -528,8 +528,7 @@ int ww_egl_query_format_caps(const ww_egl_backend_t *backend,
                                                 mods, ext_only, &num_mods)) {
             for (EGLint j = 0; j < num_mods; ++j) {
                 if (ext_only[j]) continue;   /* skip GL_TEXTURE_EXTERNAL-only */
-                emit((uint32_t)fmts[i], (uint64_t)mods[j], 1,
-                     1u /*USAGE_SAMPLED*/, user_data);
+                emit((uint32_t)fmts[i], (uint64_t)mods[j], 1, user_data);
             }
         }
         free(mods);

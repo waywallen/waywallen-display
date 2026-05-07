@@ -243,7 +243,6 @@ static int enc_consumer_caps(const void *m, ww_buf_t *out) {
  *
  * The daemon advertises "modifier_negotiation_v1" in welcome.features
  * to indicate it understands these messages. */
-#define WW_USAGE_SAMPLED          (1u << 0)
 #define WW_MEM_HINT_DEVICE_LOCAL  (1u << 0)
 #define WW_MEM_HINT_HOST_VISIBLE  (1u << 1)
 #define WW_MEM_HINT_LINEAR_ONLY   (1u << 4)
@@ -262,7 +261,6 @@ typedef struct ww_caps_buf {
     uint32_t *fourccs;       /* one entry per modifier (flattened) */
     uint64_t *modifiers;
     uint32_t *plane_counts;
-    uint32_t *usages;
     size_t    n;
     size_t    cap;
     int       oom;
@@ -273,19 +271,18 @@ static int ww_caps_buf_grow(ww_caps_buf_t *b) {
     uint32_t *f = (uint32_t *)realloc(b->fourccs, n * sizeof(*f));
     uint64_t *m = (uint64_t *)realloc(b->modifiers, n * sizeof(*m));
     uint32_t *p = (uint32_t *)realloc(b->plane_counts, n * sizeof(*p));
-    uint32_t *u = (uint32_t *)realloc(b->usages, n * sizeof(*u));
-    if (!f || !m || !p || !u) {
-        free(f); free(m); free(p); free(u);
+    if (!f || !m || !p) {
+        free(f); free(m); free(p);
         b->oom = 1;
         return -ENOMEM;
     }
-    b->fourccs = f; b->modifiers = m; b->plane_counts = p; b->usages = u;
+    b->fourccs = f; b->modifiers = m; b->plane_counts = p;
     b->cap = n;
     return 0;
 }
 
 static void ww_caps_buf_emit(uint32_t fourcc, uint64_t modifier,
-                             uint32_t plane_count, uint32_t usage,
+                             uint32_t plane_count,
                              void *user_data) {
     ww_caps_buf_t *b = (ww_caps_buf_t *)user_data;
     if (b->oom) return;
@@ -293,7 +290,6 @@ static void ww_caps_buf_emit(uint32_t fourcc, uint64_t modifier,
     b->fourccs[b->n]      = fourcc;
     b->modifiers[b->n]    = modifier;
     b->plane_counts[b->n] = plane_count;
-    b->usages[b->n]       = usage;
     b->n++;
 }
 
@@ -301,7 +297,6 @@ static void ww_caps_buf_free(ww_caps_buf_t *b) {
     free(b->fourccs);
     free(b->modifiers);
     free(b->plane_counts);
-    free(b->usages);
     memset(b, 0, sizeof(*b));
 }
 
@@ -375,8 +370,16 @@ static int send_consumer_caps_blocking(waywallen_display_t *d) {
 #ifdef WW_HAVE_VULKAN
     case WAYWALLEN_BACKEND_VULKAN:
         if (d->vk_backend.loaded) {
+            /* Consumer's blit-out path imports the dma-buf as
+             * TRANSFER_SRC and samples from a host-owned shadow image,
+             * so the modifier must support both feature bits. SAMPLED
+             * stays in the mask because some drivers only return the
+             * right modifier sub-layout when both bits are present. */
+            const uint32_t want_features =
+                VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT
+                | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT;
             probe_rc = ww_vk_query_format_caps(
-                &d->vk_backend, ww_caps_buf_emit, &buf);
+                &d->vk_backend, want_features, ww_caps_buf_emit, &buf);
             if (probe_rc == 0) {
                 /* Best-effort UUIDs; ignore failure → leave zeros. */
                 (void)ww_vk_query_device_uuid(
@@ -406,9 +409,9 @@ static int send_consumer_caps_blocking(waywallen_display_t *d) {
                "falling back to ABGR/XRGB + LINEAR",
                probe_rc, buf.n);
         ww_caps_buf_emit(WW_DRM_FORMAT_ABGR8888, WW_DRM_FORMAT_MOD_LINEAR,
-                         1, WW_USAGE_SAMPLED, &buf);
+                         1, &buf);
         ww_caps_buf_emit(WW_DRM_FORMAT_XRGB8888, WW_DRM_FORMAT_MOD_LINEAR,
-                         1, WW_USAGE_SAMPLED, &buf);
+                         1, &buf);
     } else {
         ww_log(WAYWALLEN_LOG_INFO,
                "consumer_caps: backend probe yielded %zu (fourcc, modifier) entries",
@@ -459,8 +462,6 @@ static int send_consumer_caps_blocking(waywallen_display_t *d) {
     m.mod_counts.data     = grp_counts;
     m.modifiers.count     = (uint32_t)buf.n;
     m.modifiers.data      = buf.modifiers;
-    m.usages.count        = (uint32_t)buf.n;
-    m.usages.data         = buf.usages;
     m.plane_counts.count  = (uint32_t)buf.n;
     m.plane_counts.data   = buf.plane_counts;
     m.device_uuid.count   = 4;

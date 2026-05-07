@@ -135,22 +135,30 @@ int ww_vk_query_drm_render_node(const ww_vk_backend_t *backend,
 typedef void (*ww_vk_caps_emit_fn)(uint32_t fourcc,
                                    uint64_t modifier,
                                    uint32_t plane_count,
-                                   uint32_t usage,
                                    void *user_data);
 
 /*
  * Enumerate (fourcc, modifier) pairs the physical device advertises
- * for sampled-image import via `VK_EXT_image_drm_format_modifier`.
- * Walks a fixed set of common 32-bit RGBA fourccs; for each calls
+ * for `want_features`-capable import via
+ * `VK_EXT_image_drm_format_modifier`. Walks a fixed set of common
+ * 32-bit RGBA fourccs; for each calls
  * `vkGetPhysicalDeviceFormatProperties2` with
  * `VkDrmFormatModifierPropertiesListEXT` chained in. Reports each
- * accepted (fourcc, modifier) pair via `emit`.
+ * (fourcc, modifier) pair whose `drmFormatModifierTilingFeatures`
+ * covers `want_features` via `emit`.
+ *
+ * `want_features` is typically
+ * `VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT`
+ * for the standard "shadow-import + sample" consumer path; future
+ * consumers that import directly into a sampled image may pass a
+ * different mask.
  *
  * Returns 0 on success, -ENOSYS if the EXT entry points cannot be
  * resolved on the instance, or -errno from a failed query. On any
  * error `emit` is not invoked.
  */
 int ww_vk_query_format_caps(const ww_vk_backend_t *backend,
+                            uint32_t want_features,
                             ww_vk_caps_emit_fn emit,
                             void *user_data);
 

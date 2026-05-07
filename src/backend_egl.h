@@ -163,14 +163,12 @@ int ww_egl_query_drm_render_node(const ww_egl_backend_t *backend,
 
 /*
  * Streaming emit callback used by `ww_egl_query_format_caps` to feed
- * each accepted (fourcc, modifier) pair to the caller. `usage` and
- * `plane_count` mirror the wire bitmask + plane field in
- * `consumer_caps`.
+ * each accepted (fourcc, modifier) pair to the caller. `plane_count`
+ * mirrors the wire field in `consumer_caps`.
  */
 typedef void (*ww_egl_caps_emit_fn)(uint32_t fourcc,
                                     uint64_t modifier,
                                     uint32_t plane_count,
-                                    uint32_t usage,
                                     void *user_data);
 
 /*

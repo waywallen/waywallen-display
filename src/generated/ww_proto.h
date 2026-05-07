@@ -140,7 +140,6 @@ typedef struct ww_req_consumer_caps_t {
     ww_array_u32_t fourccs;
     ww_array_u32_t mod_counts;
     ww_array_u64_t modifiers;
-    ww_array_u32_t usages;
     ww_array_u32_t plane_counts;
     ww_array_u32_t device_uuid;
     ww_array_u32_t driver_uuid;
