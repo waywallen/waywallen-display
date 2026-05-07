@@ -57,6 +57,7 @@ WallpaperItem {
             item.clearColorBinding     = Qt.binding(() => root.configuration.ClearColor);
             item.displayWidthBinding   = Qt.binding(() => Math.round(root.width  * Screen.devicePixelRatio));
             item.displayHeightBinding  = Qt.binding(() => Math.round(root.height * Screen.devicePixelRatio));
+            item.mouseForwardBinding   = Qt.binding(() => root.configuration.MouseForward);
         }
     }
 

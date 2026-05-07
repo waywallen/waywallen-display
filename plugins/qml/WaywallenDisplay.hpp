@@ -46,6 +46,9 @@ class WaywallenDisplay : public QQuickItem {
                    NOTIFY clearColorChanged)
     Q_PROPERTY(bool autoReconnect READ autoReconnect WRITE setAutoReconnect
                    NOTIFY autoReconnectChanged)
+    Q_PROPERTY(bool mouseForwardEnabled READ mouseForwardEnabled
+                   WRITE setMouseForwardEnabled
+                   NOTIFY mouseForwardEnabledChanged)
 
 public:
     enum ConnState {
@@ -92,12 +95,17 @@ public:
     bool autoReconnect() const { return m_autoReconnect; }
     void setAutoReconnect(bool enabled);
 
+    bool mouseForwardEnabled() const { return m_mouseForwardEnabled; }
+    void setMouseForwardEnabled(bool enabled);
+
     // Attempt to connect now. No-op when already Connected. Triggered
     // automatically by the DBus NameOwnerChanged / Daemon Ready signals
     // (see setupDBusWatcher); also exposed for tests and manual cues.
     // There is no internal retry timer — recovery relies entirely on
     // DBus signals fired when the daemon re-appears.
     Q_INVOKABLE void requestReconnect();
+
+    bool eventFilter(QObject *obj, QEvent *event) override;
 
 signals:
     void socketPathChanged();
@@ -110,6 +118,7 @@ signals:
     void streamStateChanged();
     void clearColorChanged();
     void autoReconnectChanged();
+    void mouseForwardEnabledChanged();
 
 protected:
     QSGNode *updatePaintNode(QSGNode *oldNode,
@@ -157,6 +166,8 @@ private:
     StreamState m_streamState { Inactive };
     QColor m_clearColor { Qt::black };
     bool m_autoReconnect { true };
+    bool m_mouseForwardEnabled { true };
+    bool m_filterInstalled { false };
 
     // C library handle.
     waywallen_display_t *m_display { nullptr };

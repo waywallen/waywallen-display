@@ -16,13 +16,15 @@ WW.WaywallenDisplay {
     property color  clearColorBinding
     property int    displayWidthBinding
     property int    displayHeightBinding
+    property bool   mouseForwardBinding: true
 
-    displayName:   displayNameBinding
-    instanceId:    instanceIdBinding
-    clearColor:    clearColorBinding
-    autoReconnect: true
-    displayWidth:  displayWidthBinding
-    displayHeight: displayHeightBinding
+    displayName:         displayNameBinding
+    instanceId:          instanceIdBinding
+    clearColor:          clearColorBinding
+    autoReconnect:       true
+    displayWidth:        displayWidthBinding
+    displayHeight:       displayHeightBinding
+    mouseForwardEnabled: mouseForwardBinding
 
     signal firstFrameSeen()
 

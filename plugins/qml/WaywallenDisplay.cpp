@@ -6,16 +6,37 @@
 #include <QDBusMessage>
 #include <QDebug>
 #include <QLoggingCategory>
+#include <QMouseEvent>
 #include <QQuickGraphicsConfiguration>
 #include <QQuickWindow>
 #include <QSGRendererInterface>
 #include <QSGSimpleTextureNode>
+#include <QWheelEvent>
 #include <QtGui/qopenglcontext_platform.h>
 #include <QtQuick/qsgtexture_platform.h>
 #include <unistd.h>
 
 
 Q_LOGGING_CATEGORY(lcWD, "waywallen.display")
+
+// Linux input event codes — matches wlroots / Wayland convention so
+// renderer plugins consuming forwarded events get a familiar enum.
+static constexpr uint32_t WW_BTN_LEFT    = 0x110;
+static constexpr uint32_t WW_BTN_RIGHT   = 0x111;
+static constexpr uint32_t WW_BTN_MIDDLE  = 0x112;
+static constexpr uint32_t WW_BTN_SIDE    = 0x113;
+static constexpr uint32_t WW_BTN_EXTRA   = 0x114;
+
+static uint32_t qtButtonToLinuxCode(Qt::MouseButton b) {
+    switch (b) {
+    case Qt::LeftButton:   return WW_BTN_LEFT;
+    case Qt::RightButton:  return WW_BTN_RIGHT;
+    case Qt::MiddleButton: return WW_BTN_MIDDLE;
+    case Qt::BackButton:   return WW_BTN_SIDE;
+    case Qt::ForwardButton:return WW_BTN_EXTRA;
+    default:               return 0;
+    }
+}
 
 // ---------------------------------------------------------------------------
 // C library log → Qt log category bridge
@@ -204,6 +225,11 @@ WaywallenDisplay::~WaywallenDisplay() {
 }
 
 void WaywallenDisplay::cleanup() {
+    if (m_filterInstalled && window()) {
+        window()->removeEventFilter(this);
+    }
+    m_filterInstalled = false;
+
     delete m_notifier;
     m_notifier = nullptr;
     delete m_notifierWrite;
@@ -326,6 +352,86 @@ void WaywallenDisplay::setAutoReconnect(bool enabled) {
     if (m_autoReconnect == enabled) return;
     m_autoReconnect = enabled;
     emit autoReconnectChanged();
+}
+
+void WaywallenDisplay::setMouseForwardEnabled(bool enabled) {
+    if (m_mouseForwardEnabled == enabled) return;
+    m_mouseForwardEnabled = enabled;
+    if (window()) {
+        if (enabled && !m_filterInstalled) {
+            window()->installEventFilter(this);
+            m_filterInstalled = true;
+        } else if (!enabled && m_filterInstalled) {
+            window()->removeEventFilter(this);
+            m_filterInstalled = false;
+        }
+    }
+    emit mouseForwardEnabledChanged();
+}
+
+bool WaywallenDisplay::eventFilter(QObject *obj, QEvent *ev) {
+    if (!m_mouseForwardEnabled || obj != window() || !m_display) {
+        return false;
+    }
+    if (waywallen_display_conn_state(m_display) != WAYWALLEN_CONN_CONNECTED) {
+        return false;
+    }
+
+    const QRectF bounds = boundingRect();
+    if (bounds.width() <= 0 || bounds.height() <= 0) return false;
+
+    auto toSurface = [&](const QPointF &scenePos, float &px, float &py) -> bool {
+        const QPointF inItem = mapFromScene(scenePos);
+        if (!bounds.contains(inItem)) return false;
+        const float sx = float(m_displayWidth)  / float(bounds.width());
+        const float sy = float(m_displayHeight) / float(bounds.height());
+        px = float(inItem.x()) * sx;
+        py = float(inItem.y()) * sy;
+        return true;
+    };
+
+    switch (ev->type()) {
+    case QEvent::MouseMove: {
+        auto *me = static_cast<QMouseEvent *>(ev);
+        float px, py;
+        if (!toSurface(me->scenePosition(), px, py)) return false;
+        const uint64_t ts = uint64_t(me->timestamp()) * 1000ull;
+        (void)waywallen_display_send_pointer_motion(
+            m_display, px, py, ts, 0);
+        break;
+    }
+    case QEvent::MouseButtonPress:
+    case QEvent::MouseButtonRelease: {
+        auto *me = static_cast<QMouseEvent *>(ev);
+        float px, py;
+        if (!toSurface(me->scenePosition(), px, py)) return false;
+        const uint32_t code = qtButtonToLinuxCode(me->button());
+        if (code == 0) return false;
+        const uint64_t ts = uint64_t(me->timestamp()) * 1000ull;
+        const auto state = (ev->type() == QEvent::MouseButtonPress)
+                               ? WAYWALLEN_BUTTON_PRESSED
+                               : WAYWALLEN_BUTTON_RELEASED;
+        (void)waywallen_display_send_pointer_button(
+            m_display, px, py, code, state, ts, 0);
+        break;
+    }
+    case QEvent::Wheel: {
+        auto *we = static_cast<QWheelEvent *>(ev);
+        float px, py;
+        if (!toSurface(we->position(), px, py)) return false;
+        const QPoint angle = we->angleDelta();
+        const float dx = float(angle.x()) / 120.0f;
+        const float dy = float(angle.y()) / 120.0f;
+        if (dx == 0.0f && dy == 0.0f) return false;
+        const uint64_t ts = uint64_t(we->timestamp()) * 1000ull;
+        (void)waywallen_display_send_pointer_axis(
+            m_display, px, py, dx, dy, WAYWALLEN_AXIS_WHEEL, ts, 0);
+        break;
+    }
+    default:
+        break;
+    }
+    return false;
 }
 
 void WaywallenDisplay::setConnState(ConnState s) {
@@ -567,7 +673,16 @@ void WaywallenDisplay::requestReconnect() {
 }
 
 void WaywallenDisplay::onWindowReady() {
-    if (!window() || m_display) return;
+    if (!window()) return;
+
+    if (m_mouseForwardEnabled) {
+        // installEventFilter is idempotent on the same (target, filter)
+        // pair; safe to call again if windowChanged refires.
+        window()->installEventFilter(this);
+        m_filterInstalled = true;
+    }
+
+    if (m_display) return;
 
     // Release GPU resources (VkImage, EGLImage, GL textures) before Qt
     // destroys its Vulkan device / GL context. This signal fires on the

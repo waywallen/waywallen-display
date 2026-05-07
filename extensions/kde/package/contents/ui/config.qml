@@ -17,6 +17,7 @@ ColumnLayout {
     property color  cfg_ClearColor
     property string cfg_SurfaceMode
     property bool   cfg_ShowDiagnostics
+    property bool   cfg_MouseForward
 
     property string _probeError: ""
 
@@ -88,6 +89,12 @@ ColumnLayout {
             Kirigami.FormData.label: i18nd("plasma_wallpaper_org.waywallen.kde", "Show diagnostics overlay")
             checked: cfg_ShowDiagnostics
             onToggled: cfg_ShowDiagnostics = checked
+        }
+
+        QQC2.CheckBox {
+            Kirigami.FormData.label: i18nd("plasma_wallpaper_org.waywallen.kde", "Forward mouse events to wallpaper")
+            checked: cfg_MouseForward
+            onToggled: cfg_MouseForward = checked
         }
 
         QQC2.Label {

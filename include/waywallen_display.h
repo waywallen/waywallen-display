@@ -417,6 +417,59 @@ int waywallen_display_signal_release_syncobj(int fd);
 void waywallen_display_disconnect(waywallen_display_t *d);
 
 /* -------------------------------------------------------------------------
+ * Pointer event forwarding
+ *
+ * Forwards a pointer event to the daemon over the v1 `pointer_*`
+ * requests (opcodes 8/9/10). Best-effort: pointer events are
+ * soft-realtime and not retried — a non-fatal IO error returns
+ * WAYWALLEN_ERR_IO and is silently swallowed so subsequent events
+ * still try. All three return WAYWALLEN_ERR_STATE if the session is
+ * not yet CONNECTED.
+ *
+ * Coordinates `x` / `y` are surface-local pixels in the same space as
+ * `register_display.width`/`height` (post-DPR scaling).
+ *
+ * `timestamp_us` is monotonic microseconds; pass 0 if unavailable —
+ * the daemon will stamp on receipt. `modifiers` is a Linux KEY_*
+ * modifier mask (or 0 if the host can't track it).
+ * ------------------------------------------------------------------------- */
+
+typedef enum waywallen_button_state {
+    WAYWALLEN_BUTTON_RELEASED = 0,
+    WAYWALLEN_BUTTON_PRESSED  = 1,
+} waywallen_button_state_t;
+
+typedef enum waywallen_axis_source {
+    WAYWALLEN_AXIS_WHEEL      = 0,
+    WAYWALLEN_AXIS_FINGER     = 1,
+    WAYWALLEN_AXIS_CONTINUOUS = 2,
+} waywallen_axis_source_t;
+
+int waywallen_display_send_pointer_motion(waywallen_display_t *d,
+                                          float x, float y,
+                                          uint64_t timestamp_us,
+                                          uint32_t modifiers);
+
+/* `button` is a Linux input event code: BTN_LEFT=0x110, BTN_RIGHT=0x111,
+ * BTN_MIDDLE=0x112, BTN_SIDE=0x113, BTN_EXTRA=0x114. */
+int waywallen_display_send_pointer_button(waywallen_display_t *d,
+                                          float x, float y,
+                                          uint32_t button,
+                                          waywallen_button_state_t state,
+                                          uint64_t timestamp_us,
+                                          uint32_t modifiers);
+
+/* Deltas are in logical notches (Qt's 120-per-notch / 120; Wayland's
+ * wl_pointer.axis units / 10 for wheel). Diagonal scroll fits in one
+ * call. */
+int waywallen_display_send_pointer_axis(waywallen_display_t *d,
+                                        float x, float y,
+                                        float delta_x, float delta_y,
+                                        waywallen_axis_source_t source,
+                                        uint64_t timestamp_us,
+                                        uint32_t modifiers);
+
+/* -------------------------------------------------------------------------
  * State queries
  * ------------------------------------------------------------------------- */
 

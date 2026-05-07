@@ -1041,6 +1041,54 @@ int waywallen_display_update_size(waywallen_display_t *d,
     return rc;
 }
 
+static int enc_pointer_motion(const void *m, ww_buf_t *out) {
+    return ww_req_pointer_motion_encode((const ww_req_pointer_motion_t *)m, out);
+}
+static int enc_pointer_button(const void *m, ww_buf_t *out) {
+    return ww_req_pointer_button_encode((const ww_req_pointer_button_t *)m, out);
+}
+static int enc_pointer_axis(const void *m, ww_buf_t *out) {
+    return ww_req_pointer_axis_encode((const ww_req_pointer_axis_t *)m, out);
+}
+
+int waywallen_display_send_pointer_motion(waywallen_display_t *d,
+                                          float x, float y,
+                                          uint64_t timestamp_us,
+                                          uint32_t modifiers) {
+    if (!d) return WAYWALLEN_ERR_INVAL;
+    if (d->conn != WW_CONN_CONNECTED) return WAYWALLEN_ERR_STATE;
+    ww_req_pointer_motion_t msg = { x, y, timestamp_us, modifiers };
+    return send_request_msg(d, WW_REQ_POINTER_MOTION, enc_pointer_motion, &msg);
+}
+
+int waywallen_display_send_pointer_button(waywallen_display_t *d,
+                                          float x, float y,
+                                          uint32_t button,
+                                          waywallen_button_state_t state,
+                                          uint64_t timestamp_us,
+                                          uint32_t modifiers) {
+    if (!d) return WAYWALLEN_ERR_INVAL;
+    if (d->conn != WW_CONN_CONNECTED) return WAYWALLEN_ERR_STATE;
+    ww_req_pointer_button_t msg = {
+        x, y, button, (uint32_t)state, timestamp_us, modifiers
+    };
+    return send_request_msg(d, WW_REQ_POINTER_BUTTON, enc_pointer_button, &msg);
+}
+
+int waywallen_display_send_pointer_axis(waywallen_display_t *d,
+                                        float x, float y,
+                                        float delta_x, float delta_y,
+                                        waywallen_axis_source_t source,
+                                        uint64_t timestamp_us,
+                                        uint32_t modifiers) {
+    if (!d) return WAYWALLEN_ERR_INVAL;
+    if (d->conn != WW_CONN_CONNECTED) return WAYWALLEN_ERR_STATE;
+    ww_req_pointer_axis_t msg = {
+        x, y, delta_x, delta_y, (uint32_t)source, timestamp_us, modifiers
+    };
+    return send_request_msg(d, WW_REQ_POINTER_AXIS, enc_pointer_axis, &msg);
+}
+
 int waywallen_display_get_fd(waywallen_display_t *d) {
     if (!d) return -1;
     return d->fd;
