@@ -783,6 +783,15 @@ void WaywallenDisplay::tryConnect() {
         return;
     }
 
+    // cleanup() removed the event filter on the prior session's
+    // teardown; reinstall it now so mouse events resume forwarding
+    // after a daemon-restart reconnect. Idempotent — Qt deduplicates
+    // (target, filter) pairs.
+    if (m_mouseForwardEnabled && !m_filterInstalled && window()) {
+        window()->installEventFilter(this);
+        m_filterInstalled = true;
+    }
+
     // Auto-detect Qt's graphics API and bind the matching backend.
     m_activeBackend = BackendNone;
     if (window()) {
