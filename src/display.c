@@ -176,6 +176,7 @@ static void fire_disconnected(waywallen_display_t *d, int err, const char *msg) 
     d->conn = WW_CONN_DEAD;
     d->stream = WW_STREAM_INACTIVE;
     d->hs_state = WW_HS_IDLE;
+    d->display_id = 0;
     ww_codec_recv_state_reset(&d->hs_recv);
     d->hs_send_len = 0;
     d->hs_send_pos = 0;
@@ -1800,6 +1801,11 @@ waywallen_conn_state_t waywallen_display_conn_state(waywallen_display_t *d) {
 waywallen_stream_state_t waywallen_display_stream_state(waywallen_display_t *d) {
     if (!d) return WAYWALLEN_STREAM_INACTIVE;
     return (waywallen_stream_state_t)d->stream;
+}
+
+uint64_t waywallen_display_get_display_id(waywallen_display_t *d) {
+    if (!d) return 0;
+    return d->display_id;
 }
 
 /* ------------------------------------------------------------------ */

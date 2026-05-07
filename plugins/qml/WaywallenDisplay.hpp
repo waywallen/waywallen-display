@@ -39,6 +39,7 @@ class WaywallenDisplay : public QQuickItem {
                    NOTIFY displayHeightChanged)
     Q_PROPERTY(int framesReceived READ framesReceived
                    NOTIFY framesReceivedChanged)
+    Q_PROPERTY(qulonglong displayId READ displayId NOTIFY displayIdChanged)
     Q_PROPERTY(ConnState connState READ connState NOTIFY connStateChanged)
     Q_PROPERTY(StreamState streamState READ streamState
                    NOTIFY streamStateChanged)
@@ -86,6 +87,8 @@ public:
 
     int framesReceived() const { return m_framesReceived; }
 
+    qulonglong displayId() const { return m_displayId; }
+
     ConnState connState() const { return m_connState; }
     StreamState streamState() const { return m_streamState; }
 
@@ -114,6 +117,7 @@ signals:
     void displayWidthChanged();
     void displayHeightChanged();
     void framesReceivedChanged();
+    void displayIdChanged();
     void connStateChanged();
     void streamStateChanged();
     void clearColorChanged();
@@ -162,6 +166,7 @@ private:
     int m_displayWidth { 1920 };
     int m_displayHeight { 1080 };
     int m_framesReceived { 0 };
+    qulonglong m_displayId { 0 };
     ConnState m_connState { Disconnected };
     StreamState m_streamState { Inactive };
     QColor m_clearColor { Qt::black };

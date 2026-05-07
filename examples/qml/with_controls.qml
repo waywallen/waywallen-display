@@ -71,7 +71,45 @@ ApplicationWindow {
 
             Label {
                 color: "#a6adc8"
+                text: "Name: " + wallpaper.displayName
+            }
+            Label {
+                color: "#a6adc8"
+                text: "ID: " + (wallpaper.displayId === 0
+                                    ? "—"
+                                    : wallpaper.displayId)
+            }
+            Label {
+                color: "#a6adc8"
                 text: "Frames: " + wallpaper.framesReceived
+            }
+
+            Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: "#45475a" }
+
+            Label {
+                color: "#a6adc8"
+                font.bold: true
+                text: "Screen"
+            }
+            Label {
+                color: "#cdd6f4"
+                wrapMode: Text.WrapAnywhere
+                Layout.fillWidth: true
+                font.family: "monospace"
+                text: {
+                    let s = Screen.name
+                    const m = (Screen.manufacturer || "").trim()
+                    const x = (Screen.model || "").trim()
+                    if (m || x)
+                        s += " [" + [m, x].filter(v => v.length > 0).join(" ") + "]"
+                    s += "\ngeom:  " + Screen.width + "x" + Screen.height
+                          + " @ (" + Screen.virtualX + "," + Screen.virtualY + ")"
+                    s += "\navail: " + Screen.desktopAvailableWidth
+                          + "x" + Screen.desktopAvailableHeight
+                    s += "\ndpr=" + Screen.devicePixelRatio
+                          + "  density=" + Screen.pixelDensity.toFixed(2) + " px/mm"
+                    return s
+                }
             }
 
             // --- Display name ---

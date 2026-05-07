@@ -254,6 +254,11 @@ void WaywallenDisplay::cleanup() {
     m_pendingRelease = false;
     m_activeBackend = BackendNone;
 
+    if (m_displayId != 0) {
+        m_displayId = 0;
+        emit displayIdChanged();
+    }
+
     // Drop any unsignaled EGL release_syncobj fd. We *signal* it on
     // teardown rather than closing it: closing alone doesn't progress
     // the syncobj, so the daemon's reaper would still wait the full
@@ -867,6 +872,12 @@ void WaywallenDisplay::onHandshakeIO() {
         }
         setStreamState(Inactive);
         setConnState(Connected);
+        const auto newId =
+            qulonglong(waywallen_display_get_display_id(m_display));
+        if (m_displayId != newId) {
+            m_displayId = newId;
+            emit displayIdChanged();
+        }
         // Window may have resized while the handshake was in flight;
         // reconcile by pushing if the current dims drifted from what
         // begin_connect carried.

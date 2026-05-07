@@ -476,6 +476,11 @@ int waywallen_display_send_pointer_axis(waywallen_display_t *d,
 waywallen_conn_state_t   waywallen_display_conn_state(waywallen_display_t *d);
 waywallen_stream_state_t waywallen_display_stream_state(waywallen_display_t *d);
 
+/* Daemon-assigned display id from `display_accepted`. 0 before the
+ * handshake completes or after disconnect. Intended for logs / debug
+ * overlays — opaque to the protocol. */
+uint64_t waywallen_display_get_display_id(waywallen_display_t *d);
+
 /* -------------------------------------------------------------------------
  * EGL deferred GL texture creation
  *

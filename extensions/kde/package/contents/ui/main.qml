@@ -11,9 +11,17 @@ import org.kde.kirigami as Kirigami
 WallpaperItem {
     id: root
 
+    // Prefer the EDID-derived "Manufacturer Model" string (stable across
+    // port re-plugs) over the connector name like "DP-1" (which the
+    // compositor reassigns when cables move). Fall back to the connector
+    // name, then to a generic literal.
     readonly property string defaultDisplayName: {
-        const screen = root.parent && root.parent.screen ? root.parent.screen.name : "";
-        return screen.length > 0 ? screen : "kde-wallpaper";
+        const m = (Screen.manufacturer || "").trim();
+        const x = (Screen.model || "").trim();
+        const vendor = [m, x].filter(v => v.length > 0).join(" ");
+        if (vendor.length > 0) return vendor;
+        if (Screen.name && Screen.name.length > 0) return Screen.name;
+        return "kde-wallpaper";
     }
 
     // RFC 4122 v4 (random) UUID generated client-side on first run and

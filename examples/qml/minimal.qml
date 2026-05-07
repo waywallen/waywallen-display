@@ -31,35 +31,73 @@ Window {
         displayHeight: root.height
     }
 
-    // Status overlay (top-left).
-    Text {
+    Rectangle {
         anchors { left: parent.left; top: parent.top; margins: 12 }
-        color: "#cdd6f4"
-        font.pixelSize: 14
-        font.family: "monospace"
-        text: {
-            let s = "conn: " + connText(wallpaper.connState)
-            s += "  stream: " + streamText(wallpaper.streamState)
-            s += "\nframes: " + wallpaper.framesReceived
-            return s
-        }
+        width:  diagText.implicitWidth + 16
+        height: diagText.implicitHeight + 12
+        color: Qt.rgba(0, 0, 0, 0.55)
+        radius: 6
 
-        function connText(st) {
-            switch (st) {
-            case WaywallenDisplay.Disconnected: return "disconnected"
-            case WaywallenDisplay.Connecting:   return "connecting…"
-            case WaywallenDisplay.Connected:    return "connected"
-            case WaywallenDisplay.Error:        return "error"
+        Text {
+            id: diagText
+            x: 8; y: 6
+            color: "#cdd6f4"
+            font.pixelSize: 13
+            font.family: "monospace"
+            text: {
+                let s = "name:   " + wallpaper.displayName
+                s += "  id: " + (wallpaper.displayId === 0
+                                     ? "—"
+                                     : wallpaper.displayId)
+                s += "\nscreen: " + Screen.name + screenVendor()
+                s += "\n  geom:  " + Screen.width + "x" + Screen.height
+                      + " @ (" + Screen.virtualX + "," + Screen.virtualY + ")"
+                s += "\n  avail: " + Screen.desktopAvailableWidth
+                      + "x" + Screen.desktopAvailableHeight
+                s += "\n  dpr=" + Screen.devicePixelRatio
+                      + "  density=" + Screen.pixelDensity.toFixed(2) + " px/mm"
+                s += "\n  orient: " + orientText(Screen.orientation)
+                s += "\nconn:   " + connText(wallpaper.connState)
+                      + "  stream: " + streamText(wallpaper.streamState)
+                s += "\nframes: " + wallpaper.framesReceived
+                return s
             }
-            return "unknown"
-        }
 
-        function streamText(st) {
-            switch (st) {
-            case WaywallenDisplay.Inactive: return "inactive"
-            case WaywallenDisplay.Active:   return "active"
+            function screenVendor() {
+                const m = (Screen.manufacturer || "").trim()
+                const x = (Screen.model || "").trim()
+                if (!m && !x) return ""
+                return " [" + [m, x].filter(s => s.length > 0).join(" ") + "]"
             }
-            return "unknown"
+
+            function connText(st) {
+                switch (st) {
+                case WaywallenDisplay.Disconnected: return "disconnected"
+                case WaywallenDisplay.Connecting:   return "connecting…"
+                case WaywallenDisplay.Connected:    return "connected"
+                case WaywallenDisplay.Error:        return "error"
+                }
+                return "unknown"
+            }
+
+            function streamText(st) {
+                switch (st) {
+                case WaywallenDisplay.Inactive: return "inactive"
+                case WaywallenDisplay.Active:   return "active"
+                }
+                return "unknown"
+            }
+
+            function orientText(o) {
+                switch (o) {
+                case Qt.PrimaryOrientation:          return "primary"
+                case Qt.PortraitOrientation:         return "portrait"
+                case Qt.LandscapeOrientation:        return "landscape"
+                case Qt.InvertedPortraitOrientation: return "portrait (inv)"
+                case Qt.InvertedLandscapeOrientation:return "landscape (inv)"
+                }
+                return "?"
+            }
         }
     }
 }

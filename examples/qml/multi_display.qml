@@ -36,12 +36,9 @@ Window {
                 clearColor: "#1e1e2e"
             }
 
-            Label {
+            DiagBox {
                 anchors { left: parent.left; top: parent.top; margins: 8 }
-                color: "#cdd6f4"
-                font.pixelSize: 13
-                font.family: "monospace"
-                text: "left  | " + connLabel(left.connState) + " " + streamLabel(left.streamState) + " | frames: " + left.framesReceived
+                wallpaper: left
             }
         }
 
@@ -59,35 +56,71 @@ Window {
                 clearColor: "#181825"
             }
 
-            Label {
+            DiagBox {
                 anchors { left: parent.left; top: parent.top; margins: 8 }
-                color: "#cdd6f4"
-                font.pixelSize: 13
-                font.family: "monospace"
-                text: "right | " + connLabel(right.connState) + " " + streamLabel(right.streamState) + " | frames: " + right.framesReceived
+                wallpaper: right
             }
         }
     }
 
-    function connLabel(st) {
-        switch (st) {
-        case WaywallenDisplay.Disconnected: return "disc"
-        case WaywallenDisplay.Connecting:   return "conn…"
-        case WaywallenDisplay.Connected:    return "conn"
-        case WaywallenDisplay.Error:        return "err"
+    component DiagBox: Rectangle {
+        id: box
+        property var wallpaper
+
+        width:  diagText.implicitWidth + 16
+        height: diagText.implicitHeight + 12
+        color: Qt.rgba(0, 0, 0, 0.55)
+        radius: 6
+
+        Label {
+            id: diagText
+            x: 8; y: 6
+            color: "#cdd6f4"
+            font.pixelSize: 13
+            font.family: "monospace"
+            text: box.wallpaper.displayName
+                  + " (id=" + box.idLabel(box.wallpaper.displayId) + ") | "
+                  + box.connLabel(box.wallpaper.connState)
+                  + " " + box.streamLabel(box.wallpaper.streamState)
+                  + " | frames: " + box.wallpaper.framesReceived
+                  + "\nscreen: " + Screen.name + box.screenVendor()
+                  + "\n  geom:  " + Screen.width + "x" + Screen.height
+                          + " @ (" + Screen.virtualX + "," + Screen.virtualY + ")"
+                  + "\n  avail: " + Screen.desktopAvailableWidth
+                          + "x" + Screen.desktopAvailableHeight
+                  + "\n  dpr=" + Screen.devicePixelRatio
+                          + "  density=" + Screen.pixelDensity.toFixed(2) + " px/mm"
         }
-        return "?"
+
+        function screenVendor() {
+            const m = (Screen.manufacturer || "").trim()
+            const x = (Screen.model || "").trim()
+            if (!m && !x) return ""
+            return " [" + [m, x].filter(s => s.length > 0).join(" ") + "]"
+        }
+
+        function connLabel(st) {
+            switch (st) {
+            case WaywallenDisplay.Disconnected: return "disc"
+            case WaywallenDisplay.Connecting:   return "conn…"
+            case WaywallenDisplay.Connected:    return "conn"
+            case WaywallenDisplay.Error:        return "err"
+            }
+            return "?"
+        }
+
+        function streamLabel(st) {
+            switch (st) {
+            case WaywallenDisplay.Inactive: return "inactive"
+            case WaywallenDisplay.Active:   return "active"
+            }
+            return "?"
+        }
+
+        function idLabel(id) {
+            return id === 0 ? "—" : id
+        }
     }
 
-    function streamLabel(st) {
-        switch (st) {
-        case WaywallenDisplay.Inactive: return "inactive"
-        case WaywallenDisplay.Active:   return "active"
-        }
-        return "?"
-    }
-
-    // Import the Label from QtQuick.Controls so we don't need a
-    // separate import at top level.
     component Label: Text {}
 }
