@@ -22,6 +22,7 @@ qt_add_qml_module(waywallen-display-qml
     SOURCES
         WaywallenDisplay.hpp
         WaywallenDisplay.cpp
+        PluginInfo.hpp
     OUTPUT_DIRECTORY
         ${CMAKE_CURRENT_BINARY_DIR}/Waywallen/Display
 )

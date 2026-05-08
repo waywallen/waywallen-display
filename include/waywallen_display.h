@@ -51,6 +51,17 @@ extern "C" {
  */
 #define WAYWALLEN_DISPLAY_PROTOCOL_VERSION 5
 
+/*
+ * Library version baked in at build time.
+ */
+typedef struct waywallen_display_version {
+    uint32_t major;
+    uint32_t minor;
+    uint32_t patch;
+} waywallen_display_version_t;
+
+waywallen_display_version_t waywallen_display_version(void);
+
 /* -------------------------------------------------------------------------
  * Return codes
  * ------------------------------------------------------------------------- */

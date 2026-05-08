@@ -20,12 +20,13 @@ ColumnLayout {
     property bool   cfg_MouseForward
 
     property string _probeError: ""
+    property string _libVersion: ""
 
     // Try to compile a tiny stub QML for the currently selected mode and
     // surface any import error to the user. The stubs (ImportTest.qml /
-    // ImportTestEmbed.qml) are empty Items that exist solely to exercise
-    // the import — instantiating the real surface QML here would create
-    // sockets / connections we don't want at config-time.
+    // ImportTestEmbed.qml) instantiate a PluginInfo from the QML module —
+    // creating it serves a dual purpose: it both proves the import is
+    // resolvable and exposes the libdisplay version to read here.
     function _probeSurface(mode) {
         const src = (mode === "system")
             ? "ImportTest.qml"
@@ -33,13 +34,22 @@ ColumnLayout {
         const c = Qt.createComponent(src, Component.PreferSynchronous, root);
         if (!c) {
             root._probeError = "Failed to create QML component for " + src;
+            root._libVersion = "";
             return;
         }
         const finish = () => {
             if (c.status === Component.Error) {
                 root._probeError = c.errorString();
+                root._libVersion = "";
             } else if (c.status === Component.Ready) {
                 root._probeError = "";
+                const obj = c.createObject(root);
+                if (obj) {
+                    root._libVersion = obj.version || "";
+                    obj.destroy();
+                } else {
+                    root._libVersion = "";
+                }
             }
         };
         if (c.status === Component.Loading) {
@@ -102,6 +112,12 @@ ColumnLayout {
             text: "<a href=\"https://github.com/waywallen/waywallen\">github.com/waywallen/waywallen</a>"
             textFormat: Text.RichText
             onLinkActivated: (link) => Qt.openUrlExternally(link)
+        }
+
+        QQC2.Label {
+            Kirigami.FormData.label: i18nd("plasma_wallpaper_org.waywallen.kde", "Version:")
+            visible: root._libVersion.length > 0
+            text: root._libVersion
         }
     }
 

@@ -41,6 +41,15 @@
 #include <unistd.h>
 
 /* ------------------------------------------------------------------ */
+/*  Library version                                                    */
+/* ------------------------------------------------------------------ */
+
+/* Keep in sync with the project() VERSION in the top-level CMakeLists.txt. */
+waywallen_display_version_t waywallen_display_version(void) {
+    return (waywallen_display_version_t){ .major = 0, .minor = 1, .patch = 3 };
+}
+
+/* ------------------------------------------------------------------ */
 /*  Logging                                                            */
 /* ------------------------------------------------------------------ */
 
