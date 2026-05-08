@@ -1,5 +1,5 @@
 import QtQuick
-import "WaywallenDisplay" as WW
+import "WaywallenDisplayEmbed" as WW
 
 WW.WaywallenDisplay {
     id: display

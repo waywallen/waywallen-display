@@ -72,6 +72,6 @@ install(
 # system prefix from also writing this kpackage-shaped path.
 install(
     DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/Waywallen/Display/
-    DESTINATION org.waywallen.kde/contents/ui/WaywallenDisplay
+    DESTINATION org.waywallen.kde/contents/ui/WaywallenDisplayEmbed
     COMPONENT kde_extension
     EXCLUDE_FROM_ALL)
