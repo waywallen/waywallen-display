@@ -106,7 +106,11 @@ void WaywallenDisplay::c_on_textures_releasing(void *ud,
     {
         QMutexLocker lk(&self->m_pendingMutex);
         if (self->m_pendingVk.valid && self->m_pendingVk.releaseSyncobjFd >= 0) {
-            ::close(self->m_pendingVk.releaseSyncobjFd);
+            // Signal then close: closing alone leaves the daemon reaper
+            // waiting the full BUCKET_TIMEOUT for this release_point.
+            // Same fix the EGL teardown path (~line 277) already applies.
+            (void)waywallen_display_signal_release_syncobj(
+                self->m_pendingVk.releaseSyncobjFd);
         }
         self->m_pendingVk = PendingVkFrame{};
     }
@@ -159,12 +163,15 @@ void WaywallenDisplay::c_on_frame_ready(void *ud,
 
 #ifdef WW_HAVE_VULKAN
     if (self->m_activeBackend == BackendVulkan) {
-        // Hand-off to render thread. Drop any prior unblitted frame —
-        // close its release_syncobj_fd so the daemon's reaper times the
-        // slot out instead of waiting forever. Better than leaking the fd.
+        // Hand-off to render thread. If a prior frame is still queued
+        // (render thread didn't blit it yet), drop it: signal its
+        // release_syncobj so the daemon reaper closes the bucket
+        // immediately instead of waiting BUCKET_TIMEOUT (500ms). The
+        // buffer is "released" — we never read it.
         QMutexLocker lk(&self->m_pendingMutex);
         if (self->m_pendingVk.valid && self->m_pendingVk.releaseSyncobjFd >= 0) {
-            ::close(self->m_pendingVk.releaseSyncobjFd);
+            (void)waywallen_display_signal_release_syncobj(
+                self->m_pendingVk.releaseSyncobjFd);
         }
         self->m_pendingVk.valid = true;
         self->m_pendingVk.slot = static_cast<int>(f->buffer_index);
@@ -184,10 +191,11 @@ void WaywallenDisplay::c_on_frame_ready(void *ud,
         }
         self->m_pendingEglReleaseSyncobjFd = f->release_syncobj_fd;
     } else if (f->release_syncobj_fd >= 0) {
-        // No active backend yet (textures haven't arrived). Close the
-        // fd so the daemon's reaper times out the bucket and continues
-        // — leaking the fd would tie up the syncobj forever.
-        ::close(f->release_syncobj_fd);
+        // No active backend yet (textures haven't arrived). Signal +
+        // close so the daemon reaper closes the bucket immediately
+        // rather than waiting BUCKET_TIMEOUT (500ms) and force-flushing.
+        (void)waywallen_display_signal_release_syncobj(
+            f->release_syncobj_fd);
     }
 
     emit self->framesReceivedChanged();
@@ -283,7 +291,8 @@ void WaywallenDisplay::cleanup() {
     {
         QMutexLocker lk(&m_pendingMutex);
         if (m_pendingVk.valid && m_pendingVk.releaseSyncobjFd >= 0) {
-            ::close(m_pendingVk.releaseSyncobjFd);
+            (void)waywallen_display_signal_release_syncobj(
+                m_pendingVk.releaseSyncobjFd);
         }
         m_pendingVk = PendingVkFrame{};
     }
@@ -727,7 +736,8 @@ void WaywallenDisplay::onWindowReady() {
                 {
                     QMutexLocker lk(&m_pendingMutex);
                     if (m_pendingVk.valid && m_pendingVk.releaseSyncobjFd >= 0) {
-                        ::close(m_pendingVk.releaseSyncobjFd);
+                        (void)waywallen_display_signal_release_syncobj(
+                            m_pendingVk.releaseSyncobjFd);
                     }
                     m_pendingVk = PendingVkFrame{};
                 }
