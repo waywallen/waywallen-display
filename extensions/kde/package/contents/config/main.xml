@@ -8,9 +8,6 @@
         <entry name="DisplayName" type="String">
             <default></default>
         </entry>
-        <entry name="ClearColor" type="Color">
-            <default>0,0,0</default>
-        </entry>
         <entry name="SurfaceMode" type="String">
             <default>embed</default>
         </entry>

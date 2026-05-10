@@ -25,7 +25,6 @@ ApplicationWindow {
         displayWidth: root.width
         displayHeight: root.height
         autoReconnect: reconnectToggle.checked
-        clearColor: colorField.text
     }
 
     // Semi-transparent control panel.
@@ -158,14 +157,25 @@ ApplicationWindow {
                 onTextChanged: wallpaper.socketPath = text
             }
 
-            // --- Clear color ---
+            // --- Clear color (reported by the renderer via `report_state`) ---
             Label { color: "#a6adc8"; text: "Clear color:" }
-            TextField {
-                id: colorField
+            RowLayout {
                 Layout.fillWidth: true
-                text: "#1e1e2e"
-                color: "#cdd6f4"
-                background: Rectangle { color: "#45475a"; radius: 4 }
+                spacing: 8
+                Rectangle {
+                    Layout.preferredWidth: 18
+                    Layout.preferredHeight: 18
+                    radius: 3
+                    border.width: 1
+                    border.color: "#45475a"
+                    color: wallpaper.clearColor
+                }
+                Label {
+                    Layout.fillWidth: true
+                    color: "#cdd6f4"
+                    font.family: "monospace"
+                    text: wallpaper.clearColor.toString()
+                }
             }
 
             // --- Auto-reconnect ---

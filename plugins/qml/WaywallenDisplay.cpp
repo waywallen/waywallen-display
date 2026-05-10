@@ -364,13 +364,6 @@ void WaywallenDisplay::pushSizeUpdate() {
     m_lastPushedHeight = m_displayHeight;
 }
 
-void WaywallenDisplay::setClearColor(const QColor &color) {
-    if (m_clearColor == color) return;
-    m_clearColor = color;
-    emit clearColorChanged();
-    update();
-}
-
 void WaywallenDisplay::setAutoReconnect(bool enabled) {
     if (m_autoReconnect == enabled) return;
     m_autoReconnect = enabled;

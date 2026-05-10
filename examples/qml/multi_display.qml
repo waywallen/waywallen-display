@@ -33,7 +33,6 @@ Window {
                 displayName: "qml-left"
                 displayWidth: parent.width
                 displayHeight: parent.height
-                clearColor: "#1e1e2e"
             }
 
             DiagBox {
@@ -53,7 +52,6 @@ Window {
                 displayName: "qml-right"
                 displayWidth: parent.width
                 displayHeight: parent.height
-                clearColor: "#181825"
             }
 
             DiagBox {
@@ -91,6 +89,7 @@ Window {
                               + "x" + Screen.desktopAvailableHeight
                       + "\n  dpr=" + Screen.devicePixelRatio
                               + "  density=" + Screen.pixelDensity.toFixed(2) + " px/mm"
+                      + "\nclear: " + box.wallpaper.clearColor.toString()
                 if (box.wallpaper.lastDisconnectReason !== WaywallenDisplay.None) {
                     s += "\nreason: " + box.reasonLabel(box.wallpaper.lastDisconnectReason)
                     if (box.wallpaper.lastDisconnectMessage.length > 0)

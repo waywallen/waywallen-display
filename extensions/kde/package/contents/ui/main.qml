@@ -41,9 +41,13 @@ WallpaperItem {
         });
     }
 
+    // Background is owned by the renderer (via the daemon's
+    // `set_config.clear_*`); the surface itself paints any letterbox
+    // bars. Show opaque black until the surface attaches so a slow
+    // daemon doesn't flash the desktop wallpaper through.
     Rectangle {
         anchors.fill: parent
-        color: root.configuration.ClearColor
+        color: "black"
     }
 
     readonly property string surfaceSource: root.configuration.SurfaceMode === "system"
@@ -65,7 +69,6 @@ WallpaperItem {
                     ? root.configuration.DisplayName
                     : root.defaultDisplayName);
             item.instanceIdBinding     = Qt.binding(() => root.configuration.DisplayInstanceId);
-            item.clearColorBinding     = Qt.binding(() => root.configuration.ClearColor);
             item.displayWidthBinding   = Qt.binding(() => Math.round(root.width  * Screen.devicePixelRatio));
             item.displayHeightBinding  = Qt.binding(() => Math.round(root.height * Screen.devicePixelRatio));
             item.mouseForwardBinding   = Qt.binding(() => root.configuration.MouseForward);

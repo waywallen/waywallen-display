@@ -47,8 +47,9 @@ class WaywallenDisplay : public QQuickItem {
                    NOTIFY lastDisconnectChanged)
     Q_PROPERTY(QString lastDisconnectMessage READ lastDisconnectMessage
                    NOTIFY lastDisconnectChanged)
-    Q_PROPERTY(QColor clearColor READ clearColor WRITE setClearColor
-                   NOTIFY clearColorChanged)
+    // Read-only: the renderer publishes the clear color via the
+    // daemon's `set_config` event; consumers do NOT override it.
+    Q_PROPERTY(QColor clearColor READ clearColor NOTIFY clearColorChanged)
     Q_PROPERTY(bool autoReconnect READ autoReconnect WRITE setAutoReconnect
                    NOTIFY autoReconnectChanged)
     Q_PROPERTY(bool mouseForwardEnabled READ mouseForwardEnabled
@@ -114,7 +115,6 @@ public:
     QString lastDisconnectMessage() const { return m_lastMessage; }
 
     QColor clearColor() const { return m_clearColor; }
-    void setClearColor(const QColor &color);
 
     bool autoReconnect() const { return m_autoReconnect; }
     void setAutoReconnect(bool enabled);

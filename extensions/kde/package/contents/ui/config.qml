@@ -6,7 +6,6 @@ import QtQuick
 import QtQuick.Controls as QQC2
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
-import org.kde.kquickcontrols as KQuickControls
 
 ColumnLayout {
     id: root
@@ -14,7 +13,6 @@ ColumnLayout {
     spacing: Kirigami.Units.largeSpacing
 
     property string cfg_DisplayName
-    property color  cfg_ClearColor
     property string cfg_SurfaceMode
     property bool   cfg_ShowDiagnostics
     property bool   cfg_MouseForward
@@ -73,13 +71,6 @@ ColumnLayout {
             placeholderText: i18nd("plasma_wallpaper_org.waywallen.kde", "Auto-generated per screen")
             text: cfg_DisplayName
             onTextChanged: cfg_DisplayName = text
-        }
-
-        KQuickControls.ColorButton {
-            Kirigami.FormData.label: i18nd("plasma_wallpaper_org.waywallen.kde", "Clear color:")
-            color: cfg_ClearColor
-            onColorChanged: cfg_ClearColor = color
-            dialogTitle: i18nd("plasma_wallpaper_org.waywallen.kde", "Select clear color")
         }
 
         QQC2.ComboBox {

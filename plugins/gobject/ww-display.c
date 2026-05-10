@@ -15,6 +15,7 @@ G_DEFINE_FINAL_TYPE(WwDisplay, ww_display, G_TYPE_OBJECT)
 enum {
     SIGNAL_TEXTURES_READY,
     SIGNAL_TEXTURES_RELEASING,
+    SIGNAL_CONFIG,
     SIGNAL_FRAME_READY,
     SIGNAL_DISCONNECTED,
     LAST_SIGNAL
@@ -46,10 +47,19 @@ on_textures_releasing_cb(void *user_data, const waywallen_textures_t *t)
 static void
 on_config_cb(void *user_data, const waywallen_config_t *c)
 {
-    /* v1: no signal exposed yet; stub the callback so the C lib doesn't
-     * see a NULL pointer crash. */
-    (void)user_data;
-    (void)c;
+    /* Forward source/dest rect, transform, and the renderer-published
+     * RGBA clear color the daemon supplied via set_config. Consumers
+     * MUST treat clear color as authoritative — it's owned by the
+     * renderer and there's no display-side knob. */
+    WwDisplay *self = WW_DISPLAY(user_data);
+    g_signal_emit(self, signals[SIGNAL_CONFIG], 0,
+                  (gdouble)c->source_rect.x, (gdouble)c->source_rect.y,
+                  (gdouble)c->source_rect.w, (gdouble)c->source_rect.h,
+                  (gdouble)c->dest_rect.x,   (gdouble)c->dest_rect.y,
+                  (gdouble)c->dest_rect.w,   (gdouble)c->dest_rect.h,
+                  (guint)c->transform,
+                  (gdouble)c->clear_color[0], (gdouble)c->clear_color[1],
+                  (gdouble)c->clear_color[2], (gdouble)c->clear_color[3]);
 }
 
 static void
@@ -114,6 +124,21 @@ ww_display_class_init(WwDisplayClass *klass)
         G_SIGNAL_RUN_LAST,
         0, NULL, NULL, NULL,
         G_TYPE_NONE, 0);
+
+    /* (src_x, src_y, src_w, src_h,
+     *  dst_x, dst_y, dst_w, dst_h,
+     *  transform, clear_r, clear_g, clear_b, clear_a) — clear_* is
+     * the renderer-published RGBA letterbox color. */
+    signals[SIGNAL_CONFIG] = g_signal_new(
+        "config",
+        G_TYPE_FROM_CLASS(klass),
+        G_SIGNAL_RUN_LAST,
+        0, NULL, NULL, NULL,
+        G_TYPE_NONE, 13,
+        G_TYPE_DOUBLE, G_TYPE_DOUBLE, G_TYPE_DOUBLE, G_TYPE_DOUBLE,
+        G_TYPE_DOUBLE, G_TYPE_DOUBLE, G_TYPE_DOUBLE, G_TYPE_DOUBLE,
+        G_TYPE_UINT,
+        G_TYPE_DOUBLE, G_TYPE_DOUBLE, G_TYPE_DOUBLE, G_TYPE_DOUBLE);
 
     /* (buffer_index, seq, release_syncobj_fd) */
     signals[SIGNAL_FRAME_READY] = g_signal_new(

@@ -21,7 +21,9 @@ Window {
     height: 720
     visible: true
     title: "waywallen — minimal"
-    color: "#1e1e2e"
+    // Window backdrop tracks the renderer-reported clear color (pushed
+    // via `report_state` on waywallen_ipc_v1).
+    color: wallpaper.clearColor
 
     WaywallenDisplay {
         id: wallpaper
@@ -60,6 +62,7 @@ Window {
                 s += "\nconn:   " + connText(wallpaper.connState)
                       + "  stream: " + streamText(wallpaper.streamState)
                 s += "\nframes: " + wallpaper.framesReceived
+                s += "\nclear:  " + wallpaper.clearColor.toString()
                 if (wallpaper.lastDisconnectReason !== WaywallenDisplay.None) {
                     s += "\nreason: " + reasonText(wallpaper.lastDisconnectReason)
                     if (wallpaper.lastDisconnectMessage.length > 0)
