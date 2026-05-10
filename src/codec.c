@@ -151,10 +151,9 @@ static int do_recv(int fd,
     size_t hdr_filled = 0;
     size_t received_fds = 0;
 
-    /* Phase 1: read the 4-byte header via recvmsg, harvesting any
-     * SCM_RIGHTS ancillary data that rode the first byte of the
-     * frame. SOCK_STREAM may return fewer than 4 bytes in one call;
-     * loop until the header is complete. */
+    /* Read the 4-byte header via recvmsg, harvesting any SCM_RIGHTS
+     * ancillary data that rode the first byte of the frame. SOCK_STREAM
+     * may return fewer than 4 bytes per call; loop until complete. */
     while (hdr_filled < 4) {
         struct iovec iov;
         iov.iov_base = hdr + hdr_filled;
@@ -278,8 +277,8 @@ int ww_codec_recv_partial(int fd, ww_codec_recv_state_t *st) {
     if (fd < 0) return -EBADF;
     if (!st)    return -EINVAL;
 
-    /* Phase 1: header. SCM_RIGHTS rides the first byte of the frame
-     * per the kernel's UDS contract; we harvest cmsg on every recvmsg
+    /* Header read. SCM_RIGHTS rides the first byte of the frame per
+     * the kernel's UDS contract; we harvest cmsg on every recvmsg
      * defensively (cf. do_recv comment in this file). */
     while (st->hdr_filled < 4) {
         struct iovec iov;
@@ -353,7 +352,8 @@ int ww_codec_recv_partial(int fd, ww_codec_recv_state_t *st) {
     }
     st->body_len = total - 4;
 
-    /* Phase 2: body. fds were already drained in phase 1; plain recv. */
+    /* Body read. fds were already drained from the header recvmsg
+     * above; plain recv suffices here. */
     while (st->body_filled < st->body_len) {
         ssize_t n = recv(fd, st->body + st->body_filled,
                          st->body_len - st->body_filled, MSG_DONTWAIT);

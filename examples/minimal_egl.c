@@ -43,8 +43,6 @@ struct state {
     int64_t frames_seen;
     int64_t max_frames;
     int disconnected;
-    uint32_t last_idx;
-    uint64_t last_seq;
     int textures_valid;
 };
 
@@ -81,8 +79,6 @@ static void on_config(void *ud, const waywallen_config_t *c) {
 static void on_frame_ready(void *ud, const waywallen_frame_t *f) {
     struct state *s = (struct state *)ud;
     s->frames_seen++;
-    s->last_idx = f->buffer_index;
-    s->last_seq = f->seq;
     fprintf(stderr,
         "[egl] frame #%lld: idx=%u seq=%llu (sync already waited by library)\n",
         (long long)s->frames_seen, f->buffer_index,
@@ -200,8 +196,6 @@ int main(int argc, char **argv) {
         .frames_seen = 0,
         .max_frames = max_frames,
         .disconnected = 0,
-        .last_idx = 0,
-        .last_seq = 0,
         .textures_valid = 0,
     };
     waywallen_display_callbacks_t cb = {
@@ -224,7 +218,7 @@ int main(int argc, char **argv) {
     int rc = waywallen_display_bind_egl(d, &egl_ctx);
     if (rc != WAYWALLEN_OK) {
         fprintf(stderr, "bind_egl failed: %d\n", rc);
-        waywallen_display_destroy(d);
+        waywallen_display_shutdown(d);
         goto cleanup_ctx;
     }
     fprintf(stderr, "connecting to %s...\n",
@@ -233,12 +227,12 @@ int main(int argc, char **argv) {
 
     /* Async handshake — same shape as a GUI host using QSocketNotifier:
      * begin_connect kicks things off non-blocking, advance_handshake is
-     * driven by poll readiness until DONE. The legacy waywallen_display_connect
-     * would do the same blockingly in one call. */
-    rc = waywallen_display_begin_connect(d, socket_path, name, 640, 480, 60000);
+     * driven by poll readiness until DONE. */
+    rc = waywallen_display_begin_connect(d, socket_path, name, NULL,
+                                         640, 480, 60000);
     if (rc != WAYWALLEN_OK) {
         fprintf(stderr, "begin_connect failed: %d\n", rc);
-        waywallen_display_destroy(d);
+        waywallen_display_shutdown(d);
         goto cleanup_ctx;
     }
     int ww_fd = waywallen_display_get_fd(d);
@@ -247,7 +241,7 @@ int main(int argc, char **argv) {
         if (rc == WAYWALLEN_HS_DONE) break;
         if (rc < 0) {
             fprintf(stderr, "handshake failed: %d\n", rc);
-            waywallen_display_destroy(d);
+            waywallen_display_shutdown(d);
             goto cleanup_ctx;
         }
         struct pollfd hp = { .fd = ww_fd, .events = 0, .revents = 0 };
@@ -267,9 +261,6 @@ int main(int argc, char **argv) {
         if (pfd.revents & POLLIN) {
             int r = waywallen_display_dispatch(d);
             if (r < 0) break;
-            if (st.frames_seen > 0) {
-                waywallen_display_release_frame(d, st.last_idx, st.last_seq);
-            }
             if (st.max_frames > 0 && st.frames_seen >= st.max_frames) {
                 fprintf(stderr, "max-frames reached\n");
                 break;
@@ -288,8 +279,7 @@ int main(int argc, char **argv) {
         exit_code = 1;
     }
 
-    waywallen_display_disconnect(d);
-    waywallen_display_destroy(d);
+    waywallen_display_shutdown(d);
 
 cleanup_ctx:
     eglMakeCurrent(egl_dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);

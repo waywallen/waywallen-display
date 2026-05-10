@@ -7,8 +7,8 @@
  *
  * This example has no GL/Vk — its job is to prove the library can
  * drive a full session against the real Rust daemon and log what
- * flows through. A later phase will add `minimal_egl.c` that actually
- * imports the dma-buf handles and renders them.
+ * flows through. See `minimal_egl.c` for a sibling that actually
+ * imports the dma-buf handles via EGL.
  *
  * Usage:
  *   minimal_headless [--socket PATH] [--name STR]
@@ -40,8 +40,6 @@ struct run_state {
     int64_t frames_seen;
     int64_t max_frames;
     int disconnected;
-    uint32_t last_buffer_index;
-    uint64_t last_seq;
 };
 
 static void on_textures_ready(void *ud, const waywallen_textures_t *t) {
@@ -71,8 +69,6 @@ static void on_config(void *ud, const waywallen_config_t *c) {
 static void on_frame_ready(void *ud, const waywallen_frame_t *f) {
     struct run_state *rs = (struct run_state *)ud;
     rs->frames_seen++;
-    rs->last_buffer_index = f->buffer_index;
-    rs->last_seq = f->seq;
     fprintf(stderr,
         "[cb] frame_ready #%lld: idx=%u seq=%llu\n",
         (long long)rs->frames_seen, f->buffer_index, (unsigned long long)f->seq);
@@ -153,8 +149,6 @@ int main(int argc, char **argv) {
         .frames_seen = 0,
         .max_frames = a.max_frames,
         .disconnected = 0,
-        .last_buffer_index = 0,
-        .last_seq = 0,
     };
 
     waywallen_display_callbacks_t cb = {
@@ -175,14 +169,13 @@ int main(int argc, char **argv) {
     fprintf(stderr, "connecting to %s...\n",
             a.socket_path ? a.socket_path : "$XDG_RUNTIME_DIR/waywallen/display.sock");
 
-    /* Demonstrates event-loop-friendly handshake. For a one-shot CLI
-     * the legacy `waywallen_display_connect()` would do the same
-     * (blocking) thing in a single call. */
-    int rc = waywallen_display_begin_connect(d, a.socket_path, a.name,
+    /* Event-loop-friendly handshake. For a one-shot CLI a single
+     * blocking `waywallen_display_connect()` call would do the same. */
+    int rc = waywallen_display_begin_connect(d, a.socket_path, a.name, NULL,
                                              a.width, a.height, a.refresh_mhz);
     if (rc != WAYWALLEN_OK) {
         fprintf(stderr, "begin_connect failed: %d\n", rc);
-        waywallen_display_destroy(d);
+        waywallen_display_shutdown(d);
         return 1;
     }
     int fd = waywallen_display_get_fd(d);
@@ -191,7 +184,7 @@ int main(int argc, char **argv) {
         if (rc == WAYWALLEN_HS_DONE) break;
         if (rc < 0) {
             fprintf(stderr, "handshake failed: %d\n", rc);
-            waywallen_display_destroy(d);
+            waywallen_display_shutdown(d);
             return 1;
         }
         struct pollfd hp = { .fd = fd, .events = 0, .revents = 0 };
@@ -220,13 +213,6 @@ int main(int argc, char **argv) {
                 /* on_disconnected has fired */
                 break;
             }
-            /* Host responsibility: release each frame after GPU work
-             * completes. Phase 2 skips GPU work entirely, so release
-             * immediately. */
-            if (rs.frames_seen > 0) {
-                (void)waywallen_display_release_frame(
-                    d, rs.last_buffer_index, rs.last_seq);
-            }
             if (rs.max_frames >= 0 && rs.frames_seen >= rs.max_frames) {
                 fprintf(stderr, "max-frames reached\n");
                 break;
@@ -234,7 +220,6 @@ int main(int argc, char **argv) {
         }
     }
 
-    waywallen_display_disconnect(d);
-    waywallen_display_destroy(d);
+    waywallen_display_shutdown(d);
     return 0;
 }

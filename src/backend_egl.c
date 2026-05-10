@@ -9,11 +9,6 @@
  *   1. DMA-BUF → EGLImageKHR  (ww_egl_import_dmabuf)
  *   2. EGLImageKHR → GL_TEXTURE_2D  (ww_egl_texture_from_image)
  *   3. dma_fence sync_fd → EGLSyncKHR wait  (ww_egl_wait_sync_fd)
- *
- * All operations are compile-only validated in this phase — the
- * developer box has libEGL/libGLESv2 but no display to actually
- * exercise the import path. Runtime validation arrives in Phase 3b
- * alongside producer-side sync_fd export.
  */
 
 #ifdef WW_HAVE_EGL
@@ -21,6 +16,7 @@
 #define _GNU_SOURCE
 
 #include "backend_egl.h"
+#include "drm_fourcc_internal.h"
 #include "log_internal.h"
 
 #include <dlfcn.h>
@@ -104,7 +100,7 @@ int ww_egl_backend_load(ww_egl_backend_t *backend,
     if (!backend) return -EINVAL;
     memset(backend, 0, sizeof(*backend));
 
-    /* Step 1: resolve eglGetProcAddress. Priority:
+    /* Resolve eglGetProcAddress. Priority:
      *   host-provided loader → dlsym(libEGL.so.1) → fail. */
     PFNEGLGETPROCADDRESSPROC egl_getproc = NULL;
     if (host_get_proc_address) {
@@ -128,9 +124,9 @@ int ww_egl_backend_load(ww_egl_backend_t *backend,
     }
     backend->eglGetProcAddress = egl_getproc;
 
-    /* Step 2: open libGLESv2.so.2 as a symbol source for core GLES
-     * entries. Most drivers also expose these through
-     * eglGetProcAddress, but dlsym is the canonical fallback. */
+    /* Open libGLESv2.so.2 as a symbol source for core GLES entries.
+     * Most drivers also expose these through eglGetProcAddress, but
+     * dlsym is the canonical fallback. */
     if (!s_libgles) {
         (void)load_from_dl("libGLESv2.so.2", &s_libgles);
     }
@@ -486,7 +482,7 @@ int ww_egl_query_format_caps(const ww_egl_backend_t *backend,
         return -ENOSYS;
     }
 
-    /* Step 1: enumerate fourccs the driver imports. */
+    /* Enumerate fourccs the driver imports. */
     EGLint num_fmts = 0;
     if (!backend->eglQueryDmaBufFormatsEXT(egl_display, 0, NULL, &num_fmts)
         || num_fmts <= 0) {
@@ -500,11 +496,15 @@ int ww_egl_query_format_caps(const ww_egl_backend_t *backend,
         return -EIO;
     }
 
-    /* Step 2: per fourcc, enumerate modifiers + filter external_only.
-     * Skip fourccs that report 0 modifiers — they're typically formats
-     * the driver lists but can't actually import (NVIDIA/Mesa quirk). */
+    /* Per fourcc, enumerate modifiers + filter external_only. Skip
+     * fourccs not in our 8-entry RGBA whitelist (the daemon negotiator
+     * only matches against this set; reporting YUV / single-channel /
+     * depth formats just bloats consumer_caps for no gain). Skip
+     * fourccs that report 0 modifiers — they're typically formats the
+     * driver lists but can't actually import (NVIDIA/Mesa quirk). */
     int worst_rc = 0;
     for (EGLint i = 0; i < num_fmts; ++i) {
+        if (!ww_drm_fourcc_supported((uint32_t)fmts[i])) continue;
         EGLint num_mods = 0;
         if (!backend->eglQueryDmaBufModifiersEXT(egl_display, fmts[i], 0,
                                                  NULL, NULL, &num_mods)) {

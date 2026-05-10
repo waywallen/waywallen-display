@@ -9,15 +9,34 @@
 #include <QMouseEvent>
 #include <QQuickGraphicsConfiguration>
 #include <QQuickWindow>
+#include <QRunnable>
+#include <QOpenGLContext>
+#include <QOpenGLExtraFunctions>
 #include <QSGRendererInterface>
 #include <QSGSimpleTextureNode>
 #include <QWheelEvent>
 #include <QtGui/qopenglcontext_platform.h>
 #include <QtQuick/qsgtexture_platform.h>
+#include <cstring>
 #include <unistd.h>
 
 
 Q_LOGGING_CATEGORY(lcWD, "waywallen.display")
+
+namespace {
+/* Tiny QRunnable adapter so cleanup() can post a render-thread shutdown
+ * without keeping the QML item alive for the duration. The lib's
+ * shutdown is bounded (close + 4 drain iterations + free), so no
+ * watchdog needed here. */
+class FnRunnable : public QRunnable {
+public:
+    explicit FnRunnable(std::function<void()> fn)
+        : m_fn(std::move(fn)) { setAutoDelete(true); }
+    void run() override { if (m_fn) m_fn(); }
+private:
+    std::function<void()> m_fn;
+};
+}  // namespace
 
 // Linux input event codes — matches wlroots / Wayland convention so
 // renderer plugins consuming forwarded events get a familiar enum.
@@ -157,9 +176,6 @@ void WaywallenDisplay::c_on_frame_ready(void *ud,
     self->flushPendingRelease();
     self->m_framesReceived++;
     self->m_currentSlot = static_cast<int>(f->buffer_index);
-    self->m_pendingReleaseIdx = f->buffer_index;
-    self->m_pendingReleaseSeq = f->seq;
-    self->m_pendingRelease = true;
 
 #ifdef WW_HAVE_VULKAN
     if (self->m_activeBackend == BackendVulkan) {
@@ -241,22 +257,99 @@ WaywallenDisplay::~WaywallenDisplay() {
     cleanup();
 }
 
+// Render-thread teardown. Called either:
+//   - from sceneGraphInvalidated lambda (render thread, SG dying), or
+//   - from the FnRunnable cleanup() schedules onto the render thread.
+// Idempotent. Owns the GPU-touching shutdown: lib's close+drain+free
+// (lib's drain processes the pending-destroy list it deferred from the
+// I/O thread) and the blitter shutdown.
+void WaywallenDisplay::renderThreadFinalize() {
+    auto *d = m_display;
+    m_display = nullptr;
+    if (d) waywallen_display_shutdown(d);
+#ifdef WW_HAVE_VULKAN
+    if (m_vkBlitterInited) {
+        ww_vk_blitter_shutdown(&m_vkBlitter);
+        m_vkBlitterInited = false;
+    }
+#endif
+    /* EGL shadow: GL objects on the QSG render context. Same render
+     * thread that's calling us, so the GL ops in destroyEglShadow
+     * land on the right context. */
+    destroyEglShadow();
+}
+
 void WaywallenDisplay::cleanup() {
     if (m_filterInstalled && window()) {
         window()->removeEventFilter(this);
     }
     m_filterInstalled = false;
 
+    /* Notifiers live on GUI thread — direct delete. cleanup() always
+     * runs on GUI thread (called from ~WaywallenDisplay or
+     * handleDisconnect). The sceneGraphInvalidated path uses a
+     * different teardown route via deleteLater. */
     delete m_notifier;
     m_notifier = nullptr;
     delete m_notifierWrite;
     m_notifierWrite = nullptr;
 
-    if (m_display) {
-        waywallen_display_disconnect(m_display);
-        waywallen_display_destroy(m_display);
-        m_display = nullptr;
+    /* Drop any unsignaled release_syncobj fds before tearing down the
+     * lib handle — signaling (vs. just closing) lets the daemon's
+     * reaper observe the release immediately instead of waiting the
+     * full BUCKET_TIMEOUT for the slot. */
+    if (m_pendingEglReleaseSyncobjFd >= 0) {
+        (void)waywallen_display_signal_release_syncobj(
+            m_pendingEglReleaseSyncobjFd);
+        m_pendingEglReleaseSyncobjFd = -1;
     }
+#ifdef WW_HAVE_VULKAN
+    {
+        QMutexLocker lk(&m_pendingMutex);
+        if (m_pendingVk.valid && m_pendingVk.releaseSyncobjFd >= 0) {
+            (void)waywallen_display_signal_release_syncobj(
+                m_pendingVk.releaseSyncobjFd);
+        }
+        m_pendingVk = PendingVkFrame{};
+    }
+#endif
+
+    if (m_display) {
+        QQuickWindow *w = window();
+        if (w && w->isSceneGraphInitialized() && w->isExposed()) {
+            /* Hop ownership to the render thread; it will run the
+             * full close+drain+free sequence plus blitter shutdown
+             * via renderThreadFinalize. NoStage posts a WMJobEvent
+             * straight to the render-thread event loop — no
+             * polishAndSync cooperation needed, so this works even
+             * if the GUI thread is busy. We do NOT block waiting
+             * for it: the lib's shutdown is bounded and GUI-thread
+             * stalls on display teardown are user-visible jank. */
+            auto *self = this;
+            w->scheduleRenderJob(new FnRunnable([self]() {
+                self->renderThreadFinalize();
+            }), QQuickWindow::NoStage);
+        } else {
+            /* No render thread to safely drain on — Plasma extension
+             * likely tearing the whole window down. Close the socket
+             * (any thread, idempotent) so the daemon sees us go away;
+             * the GPU resources leak until process exit. We can't
+             * call free() — it would abort on the pending pools that
+             * close() just enqueued. */
+            qCCritical(lcWD,
+                "no render context for shutdown; closing socket and "
+                "leaking GPU resources (process exit will reclaim)");
+            waywallen_display_close(m_display);
+            m_display = nullptr;
+#ifdef WW_HAVE_VULKAN
+            if (m_vkBlitterInited) {
+                std::memset(&m_vkBlitter, 0, sizeof(m_vkBlitter));
+                m_vkBlitterInited = false;
+            }
+#endif
+        }
+    }
+
     m_updateSizeTimer.stop();
     m_lastPushedWidth  = -1;
     m_lastPushedHeight = -1;
@@ -268,39 +361,12 @@ void WaywallenDisplay::cleanup() {
     m_vkImages.clear();
     m_currentSlot = -1;
     m_textureCount = 0;
-    m_pendingRelease = false;
     m_activeBackend = BackendNone;
 
     if (m_displayId != 0) {
         m_displayId = 0;
         emit displayIdChanged();
     }
-
-    // Drop any unsignaled EGL release_syncobj fd. We *signal* it on
-    // teardown rather than closing it: closing alone doesn't progress
-    // the syncobj, so the daemon's reaper would still wait the full
-    // WAIT_TIMEOUT for this point. Signaling lets the reaper observe
-    // the release and TRANSFER cleanly.
-    if (m_pendingEglReleaseSyncobjFd >= 0) {
-        (void)waywallen_display_signal_release_syncobj(
-            m_pendingEglReleaseSyncobjFd);
-        m_pendingEglReleaseSyncobjFd = -1;
-    }
-
-#ifdef WW_HAVE_VULKAN
-    {
-        QMutexLocker lk(&m_pendingMutex);
-        if (m_pendingVk.valid && m_pendingVk.releaseSyncobjFd >= 0) {
-            (void)waywallen_display_signal_release_syncobj(
-                m_pendingVk.releaseSyncobjFd);
-        }
-        m_pendingVk = PendingVkFrame{};
-    }
-    if (m_vkBlitterInited) {
-        ww_vk_blitter_shutdown(&m_vkBlitter);
-        m_vkBlitterInited = false;
-    }
-#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -362,6 +428,7 @@ void WaywallenDisplay::pushSizeUpdate() {
     }
     m_lastPushedWidth = m_displayWidth;
     m_lastPushedHeight = m_displayHeight;
+    armWriteNotifier();
 }
 
 void WaywallenDisplay::setAutoReconnect(bool enabled) {
@@ -447,6 +514,7 @@ bool WaywallenDisplay::eventFilter(QObject *obj, QEvent *ev) {
     default:
         break;
     }
+    armWriteNotifier();
     return false;
 }
 
@@ -700,31 +768,13 @@ void WaywallenDisplay::onWindowReady() {
 
     if (m_display) return;
 
-    // Release GPU resources (VkImage, EGLImage, GL textures) before Qt
-    // destroys its Vulkan device / GL context. This signal fires on the
-    // render thread — only touch the C library handle, not Qt objects.
+    // sceneGraphInvalidated: SG is being torn down (window closing,
+    // renderer reset, etc). Fires on render thread with DirectConnection.
+    // We have to release GPU resources NOW — by the time this returns
+    // Qt will start destroying its VkDevice / GL context.
     connect(window(), &QQuickWindow::sceneGraphInvalidated, this,
             [this]() {
                 qCInfo(lcWD, "sceneGraphInvalidated: releasing GPU resources");
-                // Destroy the C library handle (which releases VkImage,
-                // EGLImage, semaphores etc.) while Qt's device is still alive.
-                // Null out the handle first so the on_disconnected callback
-                // (which fires from disconnect) becomes a no-op.
-                auto *d = m_display;
-                m_display = nullptr;
-                if (d) {
-                    waywallen_display_disconnect(d);
-                    waywallen_display_destroy(d);
-                }
-                m_eglImagesValid = false;
-                m_glTexturesCreated = false;
-                m_glTextures.clear();
-                m_vkImagesValid = false;
-                m_vkImages.clear();
-                m_currentSlot = -1;
-                m_textureCount = 0;
-                m_pendingRelease = false;
-                m_activeBackend = BackendNone;
 #ifdef WW_HAVE_VULKAN
                 {
                     QMutexLocker lk(&m_pendingMutex);
@@ -734,11 +784,25 @@ void WaywallenDisplay::onWindowReady() {
                     }
                     m_pendingVk = PendingVkFrame{};
                 }
-                if (m_vkBlitterInited) {
-                    ww_vk_blitter_shutdown(&m_vkBlitter);
-                    m_vkBlitterInited = false;
-                }
 #endif
+                renderThreadFinalize();
+                // Notifiers live on GUI thread; this lambda is on render
+                // thread. deleteLater is documented thread-safe; it
+                // posts a destruction event back to the notifier's GUI
+                // thread. QPointer ensures we don't double-free if
+                // cleanup() also runs in parallel.
+                if (m_notifier)      m_notifier->deleteLater();
+                if (m_notifierWrite) m_notifierWrite->deleteLater();
+                m_notifier.clear();
+                m_notifierWrite.clear();
+                m_eglImagesValid = false;
+                m_glTexturesCreated = false;
+                m_glTextures.clear();
+                m_vkImagesValid = false;
+                m_vkImages.clear();
+                m_currentSlot = -1;
+                m_textureCount = 0;
+                m_activeBackend = BackendNone;
             },
             Qt::DirectConnection);
 
@@ -822,7 +886,7 @@ void WaywallenDisplay::tryConnect() {
     const QByteArray sockPath = m_socketPath.toUtf8();
     const QByteArray name = m_displayName.toUtf8();
     const QByteArray instanceId = m_instanceId.toUtf8();
-    int rc = waywallen_display_begin_connect_v2(
+    int rc = waywallen_display_begin_connect(
         m_display,
         sockPath.isEmpty() ? nullptr : sockPath.constData(),
         name.constData(),
@@ -833,7 +897,7 @@ void WaywallenDisplay::tryConnect() {
 
     if (rc != WAYWALLEN_OK) {
         qCWarning(lcWD, "begin_connect failed: %d (waiting for daemon DBus signal)", rc);
-        waywallen_display_destroy(m_display);
+        waywallen_display_free(m_display);
         m_display = nullptr;
         setConnState(Disconnected);
         return;
@@ -848,7 +912,7 @@ void WaywallenDisplay::tryConnect() {
     int fd = waywallen_display_get_fd(m_display);
     if (fd < 0) {
         qCWarning(lcWD, "begin_connect returned no fd");
-        waywallen_display_destroy(m_display);
+        waywallen_display_free(m_display);
         m_display = nullptr;
         setConnState(Disconnected);
         return;
@@ -867,9 +931,9 @@ void WaywallenDisplay::tryConnect() {
     connect(m_notifierWrite, &QSocketNotifier::activated,
             this, &WaywallenDisplay::onHandshakeIO);
 
-    // First step always involves writing (either completing connect or
-    // sending hello). Read is armed in case the kernel completed connect
-    // already and a welcome arrives immediately.
+    // Initial arming: write is needed for either completing connect or
+    // sending hello; read is armed too in case the kernel completed
+    // connect already and a welcome arrives immediately.
     m_notifier->setEnabled(true);
     m_notifierWrite->setEnabled(true);
 }
@@ -879,17 +943,27 @@ void WaywallenDisplay::onHandshakeIO() {
     int rc = waywallen_display_advance_handshake(m_display);
     if (rc == WAYWALLEN_HS_DONE) {
         qCInfo(lcWD, "handshake complete");
-        // Tear down the write notifier; post-handshake dispatch is
-        // read-only. Reuse the existing read notifier but redirect it
-        // to onSocketReadable.
-        delete m_notifierWrite;
-        m_notifierWrite = nullptr;
+        // Repurpose both notifiers post-handshake:
+        //   read  → onSocketReadable (drives lib's dispatch)
+        //   write → onSocketWritable (drives lib's outbox flush)
+        // The write notifier stays disabled by default; we only arm
+        // it when the outbox has unsent bytes, via wants_writable
+        // probes after each enqueue. This keeps non-blocking sends
+        // from spinning on EAGAIN.
         if (m_notifier) {
             disconnect(m_notifier, &QSocketNotifier::activated,
                        this, &WaywallenDisplay::onHandshakeIO);
             connect(m_notifier, &QSocketNotifier::activated,
                     this, &WaywallenDisplay::onSocketReadable);
             m_notifier->setEnabled(true);
+        }
+        if (m_notifierWrite) {
+            disconnect(m_notifierWrite, &QSocketNotifier::activated,
+                       this, &WaywallenDisplay::onHandshakeIO);
+            connect(m_notifierWrite, &QSocketNotifier::activated,
+                    this, &WaywallenDisplay::onSocketWritable);
+            m_notifierWrite->setEnabled(
+                waywallen_display_wants_writable(m_display));
         }
         setStreamState(Inactive);
         setConnState(Connected);
@@ -928,6 +1002,22 @@ void WaywallenDisplay::onSocketReadable() {
     // do not require a GL context. GL textures are created lazily
     // in updatePaintNode on the render thread.
     waywallen_display_dispatch(m_display);
+    // dispatch may have queued an outgoing message (e.g. unbind_done
+    // from handle_unbind). Re-arm POLLOUT if anything stayed queued.
+    armWriteNotifier();
+}
+
+void WaywallenDisplay::onSocketWritable() {
+    if (!m_display) return;
+    waywallen_display_handle_writable(m_display);
+    armWriteNotifier();
+}
+
+void WaywallenDisplay::armWriteNotifier() {
+    if (m_notifierWrite && m_display) {
+        m_notifierWrite->setEnabled(
+            waywallen_display_wants_writable(m_display));
+    }
 }
 
 void WaywallenDisplay::flushPendingRelease() {
@@ -945,14 +1035,6 @@ void WaywallenDisplay::flushPendingRelease() {
                 "(daemon will time out the slot)", rc);
         }
         m_pendingEglReleaseSyncobjFd = -1;
-    }
-    if (m_pendingRelease && m_display) {
-        // Deprecated stub since v1 dropped the BufferRelease wire
-        // request; kept around so any future re-introduction has a
-        // hook. Has no effect today.
-        waywallen_display_release_frame(
-            m_display, m_pendingReleaseIdx, m_pendingReleaseSeq);
-        m_pendingRelease = false;
     }
 }
 
@@ -995,16 +1077,160 @@ void WaywallenDisplay::ensureGlTextures() {
     }
 }
 
+bool WaywallenDisplay::blitEglShadow(int slot) {
+    if (slot < 0 || slot >= m_glTextures.size()) return false;
+    auto *ctx = QOpenGLContext::currentContext();
+    if (!ctx) return false;
+    auto *gl = ctx->extraFunctions();
+    if (!gl) return false;
+
+    const int w = m_texWidth;
+    const int h = m_texHeight;
+    if (w <= 0 || h <= 0) return false;
+
+    /* Save Qt's current FBO binding so we don't disturb its renderer
+     * state. We restore both READ and DRAW targets at the end. */
+    GLint prevDraw = 0, prevRead = 0;
+    gl->glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevDraw);
+    gl->glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prevRead);
+
+    /* Lazy-allocate / resize the shadow texture. RGBA8 storage —
+     * matches the 8 fourccs in src/drm_fourcc_internal.h. */
+    if (m_eglShadowTex == 0) {
+        gl->glGenTextures(1, &m_eglShadowTex);
+        gl->glBindTexture(GL_TEXTURE_2D, m_eglShadowTex);
+        gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    }
+    if (m_eglShadowW != w || m_eglShadowH != h) {
+        gl->glBindTexture(GL_TEXTURE_2D, m_eglShadowTex);
+        gl->glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0,
+                         GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        m_eglShadowW = w;
+        m_eglShadowH = h;
+        m_eglShadowHasContent = false;
+    }
+
+    if (m_eglShadowFbo == 0) {
+        gl->glGenFramebuffers(1, &m_eglShadowFbo);
+        gl->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_eglShadowFbo);
+        gl->glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                   GL_TEXTURE_2D, m_eglShadowTex, 0);
+    } else {
+        /* Re-attach in case the shadow tex's storage was orphaned by a
+         * resize above; safe even when no resize happened. */
+        gl->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_eglShadowFbo);
+        gl->glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                   GL_TEXTURE_2D, m_eglShadowTex, 0);
+    }
+    if (m_eglReadFbo == 0) {
+        gl->glGenFramebuffers(1, &m_eglReadFbo);
+    }
+    gl->glBindFramebuffer(GL_READ_FRAMEBUFFER, m_eglReadFbo);
+    gl->glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                               GL_TEXTURE_2D, m_glTextures[slot], 0);
+
+    /* Both FBOs are RGBA8 of identical size — NEAREST is fine and the
+     * fastest path on every driver. */
+    gl->glBlitFramebuffer(0, 0, w, h, 0, 0, w, h,
+                          GL_COLOR_BUFFER_BIT, GL_NEAREST);
+
+    /* Detach the imported texture so Qt RHI's later reaping of it
+     * (when the lib's pending pool drains) doesn't trip an FBO-
+     * incompleteness check on the read FBO. */
+    gl->glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                               GL_TEXTURE_2D, 0, 0);
+
+    gl->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, prevDraw);
+    gl->glBindFramebuffer(GL_READ_FRAMEBUFFER, prevRead);
+
+    m_eglShadowHasContent = true;
+    return true;
+}
+
+void WaywallenDisplay::destroyEglShadow() {
+    auto *ctx = QOpenGLContext::currentContext();
+    if (ctx) {
+        auto *gl = ctx->extraFunctions();
+        if (gl) {
+            if (m_eglShadowFbo) gl->glDeleteFramebuffers(1, &m_eglShadowFbo);
+            if (m_eglReadFbo)   gl->glDeleteFramebuffers(1, &m_eglReadFbo);
+            if (m_eglShadowTex) gl->glDeleteTextures(1, &m_eglShadowTex);
+        }
+    }
+    /* Even if no current context (sceneGraph already torn down), zero
+     * the names — better to leak GL objects than to call into a dead
+     * context. Qt destroys its driver state shortly after this anyway. */
+    m_eglShadowFbo = 0;
+    m_eglReadFbo   = 0;
+    m_eglShadowTex = 0;
+    m_eglShadowW = 0;
+    m_eglShadowH = 0;
+    m_eglShadowHasContent = false;
+}
+
 // ---------------------------------------------------------------------------
 // Scene graph
 // ---------------------------------------------------------------------------
 
 QSGNode *WaywallenDisplay::updatePaintNode(QSGNode *oldNode,
                                            UpdatePaintNodeData *) {
-    // EGL path: create GL textures lazily on the render thread.
+    // Run library-deferred pool destructions on the render thread,
+    // where (a) Qt's GL context is current for glDeleteTextures (EGL
+    // path) and (b) we can guarantee no in-flight vkQueueSubmit on
+    // the blitter is still referencing the released VkImages (Vulkan
+    // path). The library itself never calls vkDeviceWaitIdle from the
+    // I/O thread anymore — that's what was racing with Qt's RHI on
+    // radv and surfacing as VK_ERROR_DEVICE_LOST during rapid
+    // wallpaper switches.
+    if (m_display) {
+#ifdef WW_HAVE_VULKAN
+        // Vulkan: skip drain when the blitter's fence is in-flight —
+        // its cmd buffer may still be reading the most recently
+        // released pool's VkImage (only happens after a post-submit
+        // timeout; in steady state fence is cleared between blits).
+        // Next iteration's pre-submit wait will clear it and we
+        // drain then.
+        const bool blitterBusy =
+            m_vkBlitterInited && m_vkBlitter.fence_armed;
+        if (!blitterBusy) {
+            (void)waywallen_display_drain(m_display);
+        }
+#else
+        (void)waywallen_display_drain(m_display);
+#endif
+    }
+
+#ifdef WW_HAVE_VULKAN
+    // Sweep the blitter's deferred-destroy queue. Old shadows
+    // queued by ensure_shadow on size change get vkDestroyImage'd
+    // here once their per-entry frame countdown elapses — by then
+    // Qt RHI has cycled at least one frame boundary and reaped its
+    // dependent VkImageView. (Inline destroy in ensure_shadow
+    // would race with Qt's release queue and trip
+    // VUID-vkDestroyImage-image-01000.)
+    if (m_vkBlitterInited) {
+        ww_vk_blitter_tick_pending_destroys(&m_vkBlitter);
+    }
+#endif
+
+    // EGL path: create GL textures lazily on the render thread, then
+    // blit the current frame into a host-owned shadow texture. The
+    // shadow is what Qt samples — same continuity invariant the Vulkan
+    // path provides via ww_vk_blitter_shadow: on `unbind` the lib's
+    // imported textures get queued for destruction, but the shadow
+    // stays untouched, so the prior frame remains on screen until the
+    // next pool's first frame arrives.
     if (m_activeBackend == BackendEGL && m_eglImagesValid
         && !m_glTexturesCreated) {
         ensureGlTextures();
+    }
+    if (m_activeBackend == BackendEGL && m_glTexturesCreated
+        && m_currentSlot >= 0 && m_currentSlot < m_glTextures.size()
+        && m_texWidth > 0 && m_texHeight > 0) {
+        (void)blitEglShadow(m_currentSlot);
     }
 
 #ifdef WW_HAVE_VULKAN
@@ -1029,23 +1255,51 @@ QSGNode *WaywallenDisplay::updatePaintNode(QSGNode *oldNode,
             m_vkBlitterInited = true;
         }
 
-        // VkFormat must match the imported image's format. Library maps
-        // DRM_FORMAT_ABGR8888/XBGR8888 -> R8G8B8A8_UNORM, ARGB/XRGB ->
-        // B8G8R8A8_UNORM. Mirror that here.
+        // VkFormat must match the imported image's format. Mirror the
+        // 8-entry RGBA whitelist in src/drm_fourcc_internal.h /
+        // backend_vulkan.c — daemon negotiator picks across this exact
+        // set, so any fourcc the producer can emit must map cleanly here.
         VkFormat shadowFmt = VK_FORMAT_UNDEFINED;
         switch (m_vkFourcc) {
-        case 0x34325241: case 0x34325258: shadowFmt = VK_FORMAT_B8G8R8A8_UNORM; break;
-        case 0x34324241: case 0x34324258: shadowFmt = VK_FORMAT_R8G8B8A8_UNORM; break;
+        // R8G8B8A8 channel order (memory layout R,G,B,A).
+        case 0x34324241: /* AB24 — DRM_FORMAT_ABGR8888 */
+        case 0x34324258: /* XB24 — DRM_FORMAT_XBGR8888 */
+        case 0x41424752: /* RGBA — DRM_FORMAT_RGBA8888 */
+        case 0x58424752: /* RGBX — DRM_FORMAT_RGBX8888 */
+            shadowFmt = VK_FORMAT_R8G8B8A8_UNORM; break;
+        // B8G8R8A8 channel order (memory layout B,G,R,A).
+        case 0x34325241: /* AR24 — DRM_FORMAT_ARGB8888 */
+        case 0x34325258: /* XR24 — DRM_FORMAT_XRGB8888 */
+        case 0x41524742: /* BGRA — DRM_FORMAT_BGRA8888 */
+        case 0x58524742: /* BGRX — DRM_FORMAT_BGRX8888 */
+            shadowFmt = VK_FORMAT_B8G8R8A8_UNORM; break;
         default:
             qCWarning(lcWD, "vk blitter: unsupported fourcc 0x%08x; skipping frame",
                       m_vkFourcc);
             delete oldNode;
             return nullptr;
         }
-        if (ww_vk_blitter_ensure_shadow(&m_vkBlitter,
-                                         static_cast<uint32_t>(m_texWidth),
-                                         static_cast<uint32_t>(m_texHeight),
-                                         shadowFmt) != 0) {
+        // If the shadow size/format is about to change, the prior
+        // QSGTexture (set on oldNode) holds a VkImageView referencing
+        // the old shadow VkImage. ww_vk_blitter_ensure_shadow's
+        // vkDestroyImage would then trip
+        // VUID-vkDestroyImage-image-01000. Drop the entire node so Qt
+        // tears the QSGVulkanTexture (and its view) down cleanly via
+        // ownsTexture=true; the rest of updatePaintNode will build a
+        // fresh node. (Calling setTexture(nullptr) on oldNode in place
+        // crashes in QSGSimpleTextureNode::setTexture on some Qt
+        // configurations — the safe path is whole-node replacement.)
+        const uint32_t newW = static_cast<uint32_t>(m_texWidth);
+        const uint32_t newH = static_cast<uint32_t>(m_texHeight);
+        if (oldNode
+            && (m_vkBlitter.shadow_image == VK_NULL_HANDLE
+                || m_vkBlitter.shadow_w != newW
+                || m_vkBlitter.shadow_h != newH
+                || m_vkBlitter.shadow_fmt != shadowFmt)) {
+            delete oldNode;
+            oldNode = nullptr;
+        }
+        if (ww_vk_blitter_ensure_shadow(&m_vkBlitter, newW, newH, shadowFmt) != 0) {
             delete oldNode;
             return nullptr;
         }
@@ -1061,21 +1315,32 @@ QSGNode *WaywallenDisplay::updatePaintNode(QSGNode *oldNode,
             auto imported = reinterpret_cast<VkImage>(m_vkImages[frame.slot]);
             auto acquireSem = reinterpret_cast<VkSemaphore>(frame.acquireSem);
             // blit consumes ownership of releaseSyncobjFd unconditionally.
-            ww_vk_blitter_blit(&m_vkBlitter, imported,
-                               static_cast<uint32_t>(m_texWidth),
-                               static_cast<uint32_t>(m_texHeight),
-                               acquireSem,
-                               frame.releaseSyncobjFd);
+            ww_vk_blitter_blit(&m_vkBlitter, imported, newW, newH,
+                               acquireSem, frame.releaseSyncobjFd);
         }
     }
 #endif
 
     const bool hasTexture =
-        (m_activeBackend == BackendEGL && m_glTexturesCreated
-         && m_currentSlot >= 0 && m_currentSlot < m_glTextures.size())
+        // EGL gate: only expose the shadow once at least one frame has
+        // been blitted into it, otherwise we'd sample uninitialized
+        // GPU memory. After the first frame the shadow stays valid
+        // across pool transitions, which is what gives the EGL path
+        // the same "keep last frame on switch" continuity the Vulkan
+        // path has.
+        (m_activeBackend == BackendEGL && m_eglShadowTex != 0
+         && m_eglShadowHasContent)
 #ifdef WW_HAVE_VULKAN
+        // Gate Vulkan-side sampling on actually having a blitted shadow.
+        // A bare ensure_shadow leaves the image in VK_IMAGE_LAYOUT_UNDEFINED
+        // until the first blit transitions it; sampling an UNDEFINED image
+        // trips VUID-vkCmdDraw-None-09600 and on NVIDIA cascades into
+        // VK_ERROR_DEVICE_LOST. This happens whenever textures_ready
+        // arrives before frame_ready and Qt schedules a paint between
+        // the two — common during rapid wallpaper switches.
         || (m_activeBackend == BackendVulkan && m_vkBlitterInited
-            && ww_vk_blitter_shadow(&m_vkBlitter) != VK_NULL_HANDLE)
+            && ww_vk_blitter_shadow(&m_vkBlitter) != VK_NULL_HANDLE
+            && ww_vk_blitter_shadow_has_content(&m_vkBlitter))
 #endif
         ;
 
@@ -1091,13 +1356,16 @@ QSGNode *WaywallenDisplay::updatePaintNode(QSGNode *oldNode,
         node->setOwnsTexture(true);
     }
 
-    QSize texSize(m_texWidth, m_texHeight);
+    QSize texSize(m_eglShadowW > 0 ? m_eglShadowW : m_texWidth,
+                  m_eglShadowH > 0 ? m_eglShadowH : m_texHeight);
+    if (m_activeBackend == BackendVulkan) {
+        texSize = QSize(m_texWidth, m_texHeight);
+    }
     QSGTexture *sgTex = nullptr;
 
     if (m_activeBackend == BackendEGL) {
-        uint glTex = m_glTextures[m_currentSlot];
         sgTex = QNativeInterface::QSGOpenGLTexture::fromNative(
-            glTex, window(), texSize,
+            m_eglShadowTex, window(), texSize,
             QQuickWindow::TextureHasAlphaChannel);
     } else if (m_activeBackend == BackendVulkan) {
 #ifdef WW_HAVE_VULKAN

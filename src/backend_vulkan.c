@@ -14,6 +14,7 @@
 #define _GNU_SOURCE
 
 #include "backend_vulkan.h"
+#include "drm_fourcc_internal.h"
 #include "log_internal.h"
 
 #include <dlfcn.h>
@@ -153,9 +154,7 @@ int ww_vk_backend_load(ww_vk_backend_t *backend,
      * union to keep -Wpedantic happy. */
     union { void *obj; void (*func)(void); } cvt;
 
-    /* Step 1: obtain a vkGetDeviceProcAddr.
-     *
-     * Priority:
+    /* Obtain vkGetDeviceProcAddr. Priority:
      *   host_get_proc(instance, "vkGetDeviceProcAddr")
      *     — preferred when the host has already resolved the loader;
      *   dlopen("libvulkan.so.1") + dlsym("vkGetInstanceProcAddr")
@@ -309,24 +308,33 @@ void ww_vk_backend_unload(ww_vk_backend_t *backend) {
 /*  DMA-BUF import                                                     */
 /* ------------------------------------------------------------------ */
 
-/*
- * Map DRM fourcc codes to VkFormat. This is a minimal table covering
- * the formats the Rust `waywallen_renderer` and the C++ ExSwapchain
- * currently produce. Extend as needed.
- */
+/* Single source of truth for fourcc ↔ VkFormat mapping. Same 8
+ * entries as the bridge's `pool_vulkan.c` — daemon negotiator picks
+ * (fourcc, modifier) by exact integer match, so probe + import must
+ * agree on the supported set. */
+struct ww_vk_fourcc_entry {
+    uint32_t fourcc;
+    VkFormat vk_format;
+};
+static const struct ww_vk_fourcc_entry s_vk_fourcc_table[] = {
+    { WW_DRM_FORMAT_ABGR8888, VK_FORMAT_R8G8B8A8_UNORM },
+    { WW_DRM_FORMAT_XBGR8888, VK_FORMAT_R8G8B8A8_UNORM },
+    { WW_DRM_FORMAT_ARGB8888, VK_FORMAT_B8G8R8A8_UNORM },
+    { WW_DRM_FORMAT_XRGB8888, VK_FORMAT_B8G8R8A8_UNORM },
+    { WW_DRM_FORMAT_RGBA8888, VK_FORMAT_R8G8B8A8_UNORM },
+    { WW_DRM_FORMAT_BGRA8888, VK_FORMAT_B8G8R8A8_UNORM },
+    { WW_DRM_FORMAT_RGBX8888, VK_FORMAT_R8G8B8A8_UNORM },
+    { WW_DRM_FORMAT_BGRX8888, VK_FORMAT_B8G8R8A8_UNORM },
+};
+
 static VkFormat drm_fourcc_to_vk(uint32_t fourcc) {
-    switch (fourcc) {
-        /* DRM_FORMAT_ARGB8888 / XRGB8888 — B8G8R8A8 in Vulkan order. */
-        case 0x34325241: /* AR24 */
-        case 0x34325258: /* XR24 */
-            return VK_FORMAT_B8G8R8A8_UNORM;
-        /* DRM_FORMAT_ABGR8888 / XBGR8888 — R8G8B8A8. */
-        case 0x34324241: /* AB24 */
-        case 0x34324258: /* XB24 */
-            return VK_FORMAT_R8G8B8A8_UNORM;
-        default:
-            return VK_FORMAT_UNDEFINED;
+    for (size_t i = 0;
+         i < sizeof(s_vk_fourcc_table) / sizeof(s_vk_fourcc_table[0]);
+         ++i) {
+        if (s_vk_fourcc_table[i].fourcc == fourcc)
+            return s_vk_fourcc_table[i].vk_format;
     }
+    return VK_FORMAT_UNDEFINED;
 }
 
 int ww_vk_import_dmabuf(const ww_vk_backend_t *backend,
@@ -709,33 +717,9 @@ int ww_vk_query_drm_render_node(const ww_vk_backend_t *backend,
 /*  Format/modifier capability probe                                   */
 /* ------------------------------------------------------------------ */
 
-/*
- * Drm fourccs we probe and their Vulkan counterparts. The mapping
- * follows Mesa's drm-format ↔ VkFormat table for the 32-bit RGBA
- * permutations actually used in this codebase. Drivers that don't
- * support a fourcc just report 0 modifiers and we skip it.
- */
-struct ww_vk_fourcc_entry {
-    uint32_t fourcc;
-    VkFormat vk_format;
-};
-static const struct ww_vk_fourcc_entry s_vk_fourcc_table[] = {
-    { 0x34324241, VK_FORMAT_R8G8B8A8_UNORM }, /* AB24 — DRM_FORMAT_ABGR8888 */
-    { 0x34324258, VK_FORMAT_R8G8B8A8_UNORM }, /* XB24 — DRM_FORMAT_XBGR8888 */
-    { 0x34325241, VK_FORMAT_B8G8R8A8_UNORM }, /* AR24 — DRM_FORMAT_ARGB8888 */
-    { 0x34325258, VK_FORMAT_B8G8R8A8_UNORM }, /* XR24 — DRM_FORMAT_XRGB8888 */
-    /* Mirror the producer's full candidate list (waywallen/plugins/mpv/src
-     * /main.cpp:pick_export_format). The values match WW_DRM_FORMAT_*
-     * in waywallen/bridge/include/waywallen-bridge/drm_fourcc.h — the
-     * daemon negotiator compares these by exact integer, so producer
-     * and consumer must agree on the same bag of bits. Vulkan silently
-     * reports 0 modifiers for any (VkFormat, fourcc) the driver can't
-     * import, so a fourcc the GPU doesn't actually support is a no-op. */
-    { 0x41424752, VK_FORMAT_R8G8B8A8_UNORM }, /* RGBA — DRM_FORMAT_RGBA8888 */
-    { 0x41524742, VK_FORMAT_B8G8R8A8_UNORM }, /* BGRA — DRM_FORMAT_BGRA8888 */
-    { 0x58424752, VK_FORMAT_R8G8B8A8_UNORM }, /* RGBX — DRM_FORMAT_RGBX8888 */
-    { 0x58524742, VK_FORMAT_B8G8R8A8_UNORM }, /* BGRX — DRM_FORMAT_BGRX8888 */
-};
+/* Probe table is the unified s_vk_fourcc_table at the top of this
+ * file. Drivers that don't support a fourcc just report 0 modifiers
+ * and we skip them. */
 
 int ww_vk_query_format_caps(const ww_vk_backend_t *backend,
                             uint32_t want_features,

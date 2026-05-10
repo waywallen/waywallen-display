@@ -1,13 +1,15 @@
 /*
  * libwaywallen_display — lifecycle + state machine.
  *
- * Phase 2: full wire handshake + dispatch loop + release path.
- * Backend bindings are recorded but no texture import is performed;
- * `on_textures_ready` fires with `backend = NONE` and NULL handle
- * arrays. Incoming dma-buf fds and acquire sync_fds are closed by
- * the library without being surfaced to the host. All protocol /
- * IO errors transition the state machine to DEAD and invoke
- * `on_disconnected`. No code path aborts or exits.
+ * Drives the wire handshake (hello / welcome / register_display /
+ * display_accepted / consumer_caps), the post-handshake dispatch
+ * loop (bind_buffers, set_config, frame_ready, unbind), and the
+ * close → drain → free shutdown sequence. EGL and Vulkan backend
+ * bindings (when compiled in) handle DMA-BUF import; surfaced to
+ * the host as `on_textures_ready` with the matching handle arrays.
+ * All protocol / IO errors latch into DEAD and the queued
+ * `on_disconnected` fires from the next host-facing entry. No code
+ * path aborts or exits except `free` on undrained pending pools.
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -15,6 +17,7 @@
 #include "waywallen_display.h"
 
 #include "codec.h"
+#include "drm_fourcc_internal.h"
 #include "ww_proto.h"
 
 #ifdef WW_HAVE_EGL
@@ -28,6 +31,7 @@
 #include <fcntl.h>
 #include <inttypes.h>
 #include <poll.h>
+#include <pthread.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -46,7 +50,7 @@
 
 /* Keep in sync with the project() VERSION in the top-level CMakeLists.txt. */
 waywallen_display_version_t waywallen_display_version(void) {
-    return (waywallen_display_version_t){ .major = 0, .minor = 1, .patch = 3 };
+    return (waywallen_display_version_t){ .major = 0, .minor = 1, .patch = 5 };
 }
 
 /* ------------------------------------------------------------------ */
@@ -104,11 +108,36 @@ typedef enum ww_handshake_state {
     WW_HS_READY         = 6,
 } ww_handshake_state_t;
 
-/* Sized to comfortably hold the largest plausible handshake message
- * (hello: 3 short strings; register_display: name string + small
- * scalars + empty kv_list). 1 KiB leaves headroom without bloating
- * every display instance. */
-#define WW_HS_SEND_BUF_BYTES 1024
+/* Outbox: heap-allocated growing buffer. Reused for handshake
+ * (hello / register_display / consumer_caps — caps can be 6 KB+ when
+ * the backend reports many fourcc/modifier pairs) and post-handshake
+ * requests (update_size, pointer events, unbind_done, bye). Starts
+ * small and grows on demand up to WW_OUTBOX_MAX. */
+#define WW_OUTBOX_INITIAL  4096
+#define WW_OUTBOX_MAX     65536  /* one wire frame's worth (u16 length) */
+
+/* Pool teardown is split: the I/O-thread bind_buffers handler enqueues
+ * the previous pool's GPU resources here, and the host's render-thread
+ * call to waywallen_display_drain() actually runs
+ * vkDestroyImage / glDeleteTextures / etc. Decoupling the threads is
+ * what closes the cross-thread race documented on the public API. */
+#ifdef WW_HAVE_VULKAN
+struct ww_vk_pending_pool {
+    ww_vk_imported_image_t *images;     /* count entries */
+    VkSemaphore            *semaphores; /* count entries */
+    uint32_t                count;
+    struct ww_vk_pending_pool *next;
+};
+#endif
+#ifdef WW_HAVE_EGL
+struct ww_egl_pending_pool {
+    void     **images;        /* EGLImageKHR; count entries */
+    uint32_t  *gl_textures;   /* GLuint; count entries (zero entries skipped) */
+    uint32_t   count;
+    void      *egl_display;   /* EGLDisplay snapshot, NOT owned */
+    struct ww_egl_pending_pool *next;
+};
+#endif
 
 struct waywallen_display {
     waywallen_display_callbacks_t cb;
@@ -124,9 +153,14 @@ struct waywallen_display {
     /* Handshake state machine. Only meaningful while conn is
      * CONNECTING; reset to IDLE on disconnect/dead. */
     ww_handshake_state_t hs_state;
-    uint8_t  hs_send_buf[WW_HS_SEND_BUF_BYTES];
-    size_t   hs_send_len;       /* total bytes queued (header + body) */
-    size_t   hs_send_pos;       /* bytes flushed so far */
+    /* Outbox: heap-allocated framed bytes pending sendmsg. Used
+     * during handshake (hello / register_display / consumer_caps)
+     * and post-handshake (update_size, pointer events, unbind_done,
+     * bye). Capacity grows on demand up to WW_OUTBOX_MAX. */
+    uint8_t *out_buf;
+    size_t   out_cap;       /* allocated capacity */
+    size_t   out_len;       /* bytes queued; out_pos..out_len is unsent */
+    size_t   out_pos;       /* bytes already sent into the kernel buffer */
     ww_codec_recv_state_t hs_recv;
     /* Saved register_display params, captured in begin_connect and
      * applied when WELCOME_WAIT transitions to REGISTER_PEND. */
@@ -160,13 +194,23 @@ struct waywallen_display {
     uint32_t egl_import_count;
     void **egl_images;
     uint32_t *egl_gl_textures;
+    /* Released-but-not-yet-destroyed pools, drained by the host's
+     * render thread via waywallen_display_drain. */
+    struct ww_egl_pending_pool *egl_pending;
 #endif
 #ifdef WW_HAVE_VULKAN
     ww_vk_backend_t vk_backend;
     uint32_t vk_import_count;
     ww_vk_imported_image_t *vk_images;   /* length = vk_import_count */
     VkSemaphore *vk_semaphores;          /* one per buffer slot */
+    /* Released-but-not-yet-destroyed pools (see above). */
+    struct ww_vk_pending_pool *vk_pending;
 #endif
+
+    /* Guards `vk_pending` / `egl_pending` against concurrent push from
+     * the I/O thread (bind_buffers handler) and drain from the host's
+     * render thread. */
+    pthread_mutex_t pending_mutex;
 
     /* Current bound buffer pool metadata — kept so
      * `on_textures_releasing` can fire with the same descriptor when
@@ -176,12 +220,22 @@ struct waywallen_display {
     waywallen_textures_t current_textures;
 
     /* Last categorised disconnect reason + a fixed-buffer copy of the
-     * accompanying message. Updated by fire_disconnected_r before the
-     * `on_disconnected` callback fires, so hosts can read them
-     * synchronously from inside the callback. Reset to NONE when a
-     * subsequent connect reaches CONNECTED. */
+     * accompanying message. Updated by fire_disconnected_r at the
+     * moment of latching, so hosts can read them synchronously from
+     * inside the on_disconnected callback (which the lib fires later
+     * from flush_dead_event in a host-facing entry). Reset to NONE
+     * when a subsequent connect reaches CONNECTED. */
     waywallen_disconnect_reason_t last_reason;
     char last_message[256];
+    /* Latched disconnect notification: fire_disconnected_r sets state
+     * to DEAD and queues this flag; the host-facing entry that drove
+     * the disconnect (dispatch / advance_handshake / handle_writable
+     * / send_pointer_* etc.) calls flush_dead_event as its very last
+     * action. That way `on_disconnected` always fires from a frame
+     * the host can safely free `d` from — no more "callback may free
+     * me, lib must not touch d after" UAF foot-gun. */
+    bool dead_event_pending;
+    int  dead_err;
 };
 
 /* ------------------------------------------------------------------ */
@@ -196,6 +250,10 @@ static waywallen_disconnect_reason_t map_daemon_error_code(uint32_t code) {
     }
 }
 
+/* Latch the display into DEAD state and queue an `on_disconnected`
+ * notification. Does NOT call the callback — that happens via
+ * flush_dead_event from a host-facing entry. Idempotent on already-
+ * dead displays; the first reason wins. */
 static void fire_disconnected_r(waywallen_display_t *d,
                                 waywallen_disconnect_reason_t reason,
                                 int err, const char *msg) {
@@ -213,15 +271,35 @@ static void fire_disconnected_r(waywallen_display_t *d,
         d->last_message[0] = '\0';
     }
     ww_codec_recv_state_reset(&d->hs_recv);
-    d->hs_send_len = 0;
-    d->hs_send_pos = 0;
-    if (d->cb.on_disconnected) {
-        d->cb.on_disconnected(d->cb.user_data, err, msg);
-    }
+    d->out_len = 0;
+    d->out_pos = 0;
     if (d->fd >= 0) {
         close(d->fd);
         d->fd = -1;
     }
+    d->dead_err = err;
+    d->dead_event_pending = true;
+}
+
+/* Fire the queued on_disconnected callback if any. MUST be called as
+ * the very last statement of the host-facing function that drove the
+ * transition: the host is allowed to `waywallen_display_free(d)`
+ * from inside the callback, so any access to `d` after the callback
+ * returns is a use-after-free. The caller's compiled return path
+ * must not touch `d` afterwards. */
+static void flush_dead_event(waywallen_display_t *d) {
+    if (!d || !d->dead_event_pending) return;
+    d->dead_event_pending = false;
+    waywallen_display_callbacks_t cb = d->cb;
+    int err = d->dead_err;
+    /* Snapshot the message pointer into d's own buffer; the lib's API
+     * doc says it stays valid for d's lifetime. The host MAY free d
+     * from inside on_disconnected — after that, the buffer is gone. */
+    const char *msg = d->last_message;
+    if (cb.on_disconnected) {
+        cb.on_disconnected(cb.user_data, err, msg);
+    }
+    /* d may have been freed by the callback. DO NOT TOUCH IT. */
 }
 
 /* Default-categorised wrapper for IO/syscall paths. Specific callsites
@@ -255,11 +333,60 @@ static int default_socket_path(char *out, size_t cap) {
     return WAYWALLEN_OK;
 }
 
-/* Blocking helper: encode a request body into a scratch buf, hand it
- * to the codec, free the buf. */
-static int send_request_msg(waywallen_display_t *d, uint16_t opcode,
-                            int (*encode)(const void *, ww_buf_t *),
-                            const void *msg) {
+/* Try one non-blocking send of the head of the outbox. Returns:
+ *  >= 0  bytes sent (caller doesn't need to act; outbox advanced)
+ *  < 0   -errno fatal IO
+ * On full drain (out_pos == out_len) both counters reset to 0 so the
+ * next append starts at the head of the buffer. */
+static int outbox_flush_one(waywallen_display_t *d) {
+    if (d->fd < 0) return -EBADF;
+    if (d->out_pos >= d->out_len) {
+        d->out_pos = d->out_len = 0;
+        return 0;
+    }
+    ssize_t n = ww_codec_send_partial(d->fd,
+                                      d->out_buf + d->out_pos,
+                                      d->out_len - d->out_pos);
+    if (n < 0) return (int)n;
+    d->out_pos += (size_t)n;
+    if (d->out_pos >= d->out_len) {
+        d->out_pos = d->out_len = 0;
+    }
+    return (int)n;
+}
+
+/* Grow the outbox to hold at least `needed` bytes. Caps at
+ * WW_OUTBOX_MAX (one wire frame's worth). Returns 0 on success or
+ * -ENOMEM if we hit the cap or realloc fails. */
+static int outbox_reserve(waywallen_display_t *d, size_t needed) {
+    if (needed <= d->out_cap) return 0;
+    if (needed > WW_OUTBOX_MAX) return -ENOMEM;
+    size_t cap = d->out_cap ? d->out_cap : WW_OUTBOX_INITIAL;
+    while (cap < needed) {
+        if (cap >= WW_OUTBOX_MAX / 2) { cap = WW_OUTBOX_MAX; break; }
+        cap *= 2;
+    }
+    uint8_t *nb = (uint8_t *)realloc(d->out_buf, cap);
+    if (!nb) return -ENOMEM;
+    d->out_buf = nb;
+    d->out_cap = cap;
+    return 0;
+}
+
+/* Encode and append `msg` to the outbox, then best-effort try to
+ * flush. Returns OK on enqueue (whether or not it actually sent), or
+ * WAYWALLEN_ERR_NOMEM if the message exceeds the outbox cap.
+ * On fatal sendmsg failure the outbox keeps the encoded bytes in
+ * case the connection recovers — caller's dispatch/handle_writable
+ * will surface the error.
+ *
+ * Pre: d->fd >= 0 && d->conn != WW_CONN_DEAD. */
+static int outbox_enqueue_request(waywallen_display_t *d, uint16_t opcode,
+                                  int (*encode)(const void *, ww_buf_t *),
+                                  const void *msg) {
+    if (!d || d->fd < 0 || d->conn == WW_CONN_DEAD) {
+        return WAYWALLEN_ERR_NOTCONN;
+    }
     ww_buf_t body;
     ww_buf_init(&body);
     int rc = encode(msg, &body);
@@ -267,14 +394,39 @@ static int send_request_msg(waywallen_display_t *d, uint16_t opcode,
         ww_buf_free(&body);
         return WAYWALLEN_ERR_NOMEM;
     }
-    rc = ww_codec_send_request(d->fd, opcode, body.data, body.len, NULL, 0);
+    size_t total = 4u + body.len;
+    if (total > UINT16_MAX) {
+        ww_buf_free(&body);
+        return WAYWALLEN_ERR_INVAL;
+    }
+    if (outbox_reserve(d, d->out_len + total) != 0) {
+        ww_log(WAYWALLEN_LOG_ERROR,
+               "outbox grow failed (need %zu, cap max %u); dropping op=0x%04x",
+               d->out_len + total, WW_OUTBOX_MAX, opcode);
+        ww_buf_free(&body);
+        return WAYWALLEN_ERR_NOMEM;
+    }
+    uint8_t *p = d->out_buf + d->out_len;
+    p[0] = (uint8_t)(opcode & 0xff);
+    p[1] = (uint8_t)((opcode >> 8) & 0xff);
+    p[2] = (uint8_t)(total & 0xff);
+    p[3] = (uint8_t)((total >> 8) & 0xff);
+    if (body.len > 0) memcpy(p + 4, body.data, body.len);
+    d->out_len += total;
     ww_buf_free(&body);
-    if (rc < 0) return WAYWALLEN_ERR_IO;
+
+    /* Optimistic immediate flush: most callsites land in an empty
+     * outbox with kernel buffer headroom, so this completes inline.
+     * On EAGAIN (returns 0) the host will arm POLLOUT next iteration
+     * via wants_writable(). On fatal IO we return success here — the
+     * encoded bytes stay queued and the next dispatch/handle_writable
+     * will surface the error. */
+    (void)outbox_flush_one(d);
     return WAYWALLEN_OK;
 }
 
-/* Encoder trampolines with void-pointer signature so send_request_msg
- * can call them generically. */
+/* Encoder trampolines with void-pointer signature so the outbox/
+ * handshake helpers can call them generically. */
 static int enc_hello(const void *m, ww_buf_t *out) {
     return ww_req_hello_encode((const ww_req_hello_t *)m, out);
 }
@@ -290,6 +442,9 @@ static int enc_update(const void *m, ww_buf_t *out) {
 static int enc_consumer_caps(const void *m, ww_buf_t *out) {
     return ww_req_consumer_caps_encode((const ww_req_consumer_caps_t *)m, out);
 }
+static int enc_unbind_done(const void *m, ww_buf_t *out) {
+    return ww_req_unbind_done_encode((const ww_req_unbind_done_t *)m, out);
+}
 
 /* Modifier-negotiation v2 — bit constants. Mirrored from
  * waywallen/src/negotiate.rs; keep in sync.
@@ -304,9 +459,8 @@ static int enc_consumer_caps(const void *m, ww_buf_t *out) {
 #define WW_COLOR_ENC_SRGB         (1u << 0)
 #define WW_COLOR_RANGE_LIMITED    (1u << 6)
 #define WW_COLOR_ALPHA_PREMUL     (1u << 7)
-#define WW_DRM_FORMAT_ABGR8888    0x34324241u
-#define WW_DRM_FORMAT_XRGB8888    0x34325258u
-#define WW_DRM_FORMAT_MOD_LINEAR  0ULL
+/* DRM fourcc whitelist + WW_DRM_FORMAT_MOD_LINEAR live in
+ * drm_fourcc_internal.h (included near the top of this file). */
 
 /* Per-(fourcc, modifier) accumulator used while probing the active
  * backend. Grows by doubling. */
@@ -391,8 +545,8 @@ static int ww_caps_group_fourccs(const ww_caps_buf_t *flat,
 
 /* Build + send a `consumer_caps` request to the daemon. Called from
  * the handshake state machine right after `display_accepted` and
- * before transitioning to READY. Synchronous; uses the same blocking
- * codec path as `send_request_msg`.
+ * before transitioning to READY. Goes through the outbox like every
+ * other post-handshake send.
  *
  * Probes the active backend (EGL or Vulkan) for its real
  * (fourcc, modifier) import set + device UUID. Falls back to a
@@ -544,7 +698,7 @@ static int send_consumer_caps_blocking(waywallen_display_t *d) {
     m.extent_max_w        = 16384;
     m.extent_max_h        = 16384;
 
-    int rc = send_request_msg(d, WW_REQ_CONSUMER_CAPS, enc_consumer_caps, &m);
+    int rc = outbox_enqueue_request(d, WW_REQ_CONSUMER_CAPS, enc_consumer_caps, &m);
     free(grp_fourccs);
     free(grp_counts);
     ww_caps_buf_free(&buf);
@@ -583,16 +737,88 @@ waywallen_display_t *waywallen_display_new(const waywallen_display_callbacks_t *
     d->backend = WAYWALLEN_BACKEND_NONE;
     d->hs_state = WW_HS_IDLE;
     ww_codec_recv_state_init(&d->hs_recv);
+    if (pthread_mutex_init(&d->pending_mutex, NULL) != 0) {
+        free(d);
+        return NULL;
+    }
     return d;
 }
 
-void waywallen_display_destroy(waywallen_display_t *d) {
+void waywallen_display_free(waywallen_display_t *d) {
     if (!d) return;
     if (d->fd >= 0) {
         close(d->fd);
         d->fd = -1;
     }
+    /* free() is intentionally NOT a GPU-resource cleanup path. The
+     * backend handles (VkImage / VkDeviceMemory / VkSemaphore /
+     * EGLImageKHR / GL textures) live on the host's render thread; we
+     * cannot know which thread called free and therefore cannot
+     * safely vkDeviceWaitIdle / vkDestroyImage / glDeleteTextures
+     * from here. ABORT loudly if any pool is still bound or pending —
+     * silently leaking GPU handles is worse than a crash, since the
+     * driver's tracking will eventually wedge anyway. The host's
+     * shutdown sequence (close → drain → free) is what gets us
+     * here cleanly. */
+    bool leak = false;
+#ifdef WW_HAVE_VULKAN
+    if (d->vk_pending) {
+        uint32_t pool_n = 0, handle_n = 0;
+        for (struct ww_vk_pending_pool *p = d->vk_pending; p; p = p->next) {
+            pool_n++;
+            handle_n += p->count;
+        }
+        ww_log(WAYWALLEN_LOG_ERROR,
+               "free: %u Vulkan pending pool(s) (%u image+memory pairs, "
+               "%u semaphores) not drained — host must call "
+               "waywallen_display_drain on its render thread",
+               pool_n, handle_n, handle_n);
+        leak = true;
+    }
+    if (d->vk_import_count > 0
+        && (d->vk_images != NULL || d->vk_semaphores != NULL)) {
+        ww_log(WAYWALLEN_LOG_ERROR,
+               "free: %u Vulkan imports still bound — host must call "
+               "waywallen_display_close before free",
+               d->vk_import_count);
+        leak = true;
+    }
+#endif
+#ifdef WW_HAVE_EGL
+    if (d->egl_pending) {
+        uint32_t pool_n = 0, handle_n = 0;
+        for (struct ww_egl_pending_pool *p = d->egl_pending; p; p = p->next) {
+            pool_n++;
+            handle_n += p->count;
+        }
+        ww_log(WAYWALLEN_LOG_ERROR,
+               "free: %u EGL pending pool(s) (%u EGLImages + GL textures) "
+               "not drained — host must call waywallen_display_drain on "
+               "its render thread",
+               pool_n, handle_n);
+        leak = true;
+    }
+    if (d->egl_import_count > 0
+        && (d->egl_images != NULL || d->egl_gl_textures != NULL)) {
+        ww_log(WAYWALLEN_LOG_ERROR,
+               "free: %u EGL imports still bound — host must call "
+               "waywallen_display_close before free",
+               d->egl_import_count);
+        leak = true;
+    }
+#endif
+    if (leak) abort();
+
+    if (d->has_textures) {
+        /* The void** arrays we built for the on_textures_ready
+         * callback payload — not GPU handles, just heap, safe to
+         * free here regardless of thread. */
+        free(d->current_textures.vk_images);
+        free(d->current_textures.vk_memories);
+    }
+    pthread_mutex_destroy(&d->pending_mutex);
     ww_codec_recv_state_reset(&d->hs_recv);
+    free(d->out_buf);
     free(d);
 }
 
@@ -723,7 +949,7 @@ static int open_uds_nonblock(const char *path, bool *out_in_progress) {
 }
 
 /* Encode `msg` via `encode` into a temp ww_buf_t, then frame
- * (header + body) into d->hs_send_buf for the partial sender to drain. */
+ * (header + body) into d->out_buf for the partial sender to drain. */
 static int hs_queue_request(waywallen_display_t *d, uint16_t opcode,
                             int (*encode)(const void *, ww_buf_t *),
                             const void *msg) {
@@ -735,18 +961,17 @@ static int hs_queue_request(waywallen_display_t *d, uint16_t opcode,
         return WAYWALLEN_ERR_NOMEM;
     }
     size_t total = 4 + body.len;
-    if (total > sizeof(d->hs_send_buf)) {
-        /* Should never happen for a handshake message. */
+    if (total > UINT16_MAX || outbox_reserve(d, total) != 0) {
         ww_buf_free(&body);
         return WAYWALLEN_ERR_NOMEM;
     }
-    d->hs_send_buf[0] = (uint8_t)(opcode & 0xff);
-    d->hs_send_buf[1] = (uint8_t)((opcode >> 8) & 0xff);
-    d->hs_send_buf[2] = (uint8_t)(total & 0xff);
-    d->hs_send_buf[3] = (uint8_t)((total >> 8) & 0xff);
-    if (body.len > 0) memcpy(d->hs_send_buf + 4, body.data, body.len);
-    d->hs_send_len = total;
-    d->hs_send_pos = 0;
+    d->out_buf[0] = (uint8_t)(opcode & 0xff);
+    d->out_buf[1] = (uint8_t)((opcode >> 8) & 0xff);
+    d->out_buf[2] = (uint8_t)(total & 0xff);
+    d->out_buf[3] = (uint8_t)((total >> 8) & 0xff);
+    if (body.len > 0) memcpy(d->out_buf + 4, body.data, body.len);
+    d->out_len = total;
+    d->out_pos = 0;
     ww_buf_free(&body);
     return WAYWALLEN_OK;
 }
@@ -776,7 +1001,7 @@ static int hs_queue_register(waywallen_display_t *d) {
     return hs_queue_request(d, WW_REQ_REGISTER_DISPLAY, enc_register, &reg);
 }
 
-int waywallen_display_begin_connect_v2(waywallen_display_t *d,
+int waywallen_display_begin_connect(waywallen_display_t *d,
                                        const char *socket_path,
                                        const char *display_name,
                                        const char *instance_id,
@@ -821,8 +1046,10 @@ int waywallen_display_begin_connect_v2(waywallen_display_t *d,
     d->conn = WW_CONN_CONNECTING;
     d->stream = WW_STREAM_INACTIVE;
     ww_codec_recv_state_reset(&d->hs_recv);
-    d->hs_send_len = 0;
-    d->hs_send_pos = 0;
+    d->out_len = 0;
+    d->out_pos = 0;
+    d->dead_event_pending = false;
+    d->dead_err = 0;
 
     if (in_progress) {
         d->hs_state = WW_HS_CONNECTING;
@@ -840,16 +1067,6 @@ int waywallen_display_begin_connect_v2(waywallen_display_t *d,
         d->hs_state = WW_HS_HELLO_PENDING;
     }
     return WAYWALLEN_OK;
-}
-
-int waywallen_display_begin_connect(waywallen_display_t *d,
-                                    const char *socket_path,
-                                    const char *display_name,
-                                    uint32_t width,
-                                    uint32_t height,
-                                    uint32_t refresh_mhz) {
-    return waywallen_display_begin_connect_v2(d, socket_path, display_name,
-                                              NULL, width, height, refresh_mhz);
 }
 
 waywallen_handshake_state_t waywallen_display_handshake_state(waywallen_display_t *d) {
@@ -889,22 +1106,22 @@ static int hs_advance_one(waywallen_display_t *d) {
     case WW_HS_HELLO_PENDING:
     case WW_HS_REGISTER_PEND: {
         ssize_t n = ww_codec_send_partial(d->fd,
-                                          d->hs_send_buf + d->hs_send_pos,
-                                          d->hs_send_len - d->hs_send_pos);
+                                          d->out_buf + d->out_pos,
+                                          d->out_len - d->out_pos);
         if (n < 0) {
             fire_disconnected(d, WAYWALLEN_ERR_IO, "send handshake");
             return WAYWALLEN_ERR_IO;
         }
         if (n == 0) return WAYWALLEN_HS_NEED_WRITE;
-        d->hs_send_pos += (size_t)n;
-        if (d->hs_send_pos < d->hs_send_len) return WAYWALLEN_HS_NEED_WRITE;
+        d->out_pos += (size_t)n;
+        if (d->out_pos < d->out_len) return WAYWALLEN_HS_NEED_WRITE;
         if (d->hs_state == WW_HS_HELLO_PENDING) {
             d->hs_state = WW_HS_WELCOME_WAIT;
         } else {
             d->hs_state = WW_HS_ACCEPTED_WAIT;
         }
-        d->hs_send_len = 0;
-        d->hs_send_pos = 0;
+        d->out_len = 0;
+        d->out_pos = 0;
         return WAYWALLEN_HS_PROGRESS;
     }
 
@@ -925,7 +1142,11 @@ static int hs_advance_one(waywallen_display_t *d) {
             const char *msg = "server error";
             if (ww_evt_error_decode(d->hs_recv.body, d->hs_recv.body_len, &er) == WW_OK) {
                 if (er.message) msg = er.message;
-                fire_disconnected_r(d, map_daemon_error_code(er.code),
+                /* Capture code BEFORE fire_disconnected_r — the
+                 * callback may free d via destroy(), but `er` is on
+                 * our stack and safe to free unconditionally below. */
+                uint32_t code = er.code;
+                fire_disconnected_r(d, map_daemon_error_code(code),
                                     WAYWALLEN_ERR_PROTO, msg);
                 ww_evt_error_free(&er);
             } else {
@@ -933,13 +1154,14 @@ static int hs_advance_one(waywallen_display_t *d) {
                                     WAYWALLEN_ERR_PROTO,
                                     "server error (decode failed)");
             }
-            ww_codec_recv_state_reset(&d->hs_recv);
+            /* fire_disconnected_r already reset hs_recv internally;
+             * d may have been freed by the callback so we MUST NOT
+             * touch it here. */
             return WAYWALLEN_ERR_PROTO;
         }
         if (d->hs_recv.op != WW_EVT_WELCOME) {
             fire_disconnected_r(d, WAYWALLEN_DISCONNECT_HANDSHAKE_FAILED,
                                 WAYWALLEN_ERR_PROTO, "expected welcome");
-            ww_codec_recv_state_reset(&d->hs_recv);
             return WAYWALLEN_ERR_PROTO;
         }
         /* Decode purely for diagnostics — `welcome` is informational
@@ -951,7 +1173,6 @@ static int hs_advance_one(waywallen_display_t *d) {
                                   &welcome) != WW_OK) {
             fire_disconnected_r(d, WAYWALLEN_DISCONNECT_HANDSHAKE_FAILED,
                                 WAYWALLEN_ERR_PROTO, "decode welcome");
-            ww_codec_recv_state_reset(&d->hs_recv);
             return WAYWALLEN_ERR_PROTO;
         }
         ww_evt_welcome_free(&welcome);
@@ -981,7 +1202,8 @@ static int hs_advance_one(waywallen_display_t *d) {
             const char *msg = "server error";
             if (ww_evt_error_decode(d->hs_recv.body, d->hs_recv.body_len, &er) == WW_OK) {
                 if (er.message) msg = er.message;
-                fire_disconnected_r(d, map_daemon_error_code(er.code),
+                uint32_t code = er.code;
+                fire_disconnected_r(d, map_daemon_error_code(code),
                                     WAYWALLEN_ERR_PROTO, msg);
                 ww_evt_error_free(&er);
             } else {
@@ -989,13 +1211,12 @@ static int hs_advance_one(waywallen_display_t *d) {
                                     WAYWALLEN_ERR_PROTO,
                                     "server error (decode failed)");
             }
-            ww_codec_recv_state_reset(&d->hs_recv);
+            /* d may be freed; do not touch. */
             return WAYWALLEN_ERR_PROTO;
         }
         if (d->hs_recv.op != WW_EVT_DISPLAY_ACCEPTED) {
             fire_disconnected_r(d, WAYWALLEN_DISCONNECT_HANDSHAKE_FAILED,
                                 WAYWALLEN_ERR_PROTO, "expected display_accepted");
-            ww_codec_recv_state_reset(&d->hs_recv);
             return WAYWALLEN_ERR_PROTO;
         }
         ww_evt_display_accepted_t accepted;
@@ -1004,7 +1225,7 @@ static int hs_advance_one(waywallen_display_t *d) {
                                            &accepted) != WW_OK) {
             fire_disconnected_r(d, WAYWALLEN_DISCONNECT_HANDSHAKE_FAILED,
                                 WAYWALLEN_ERR_PROTO, "decode display_accepted");
-            ww_codec_recv_state_reset(&d->hs_recv);
+            /* d may be freed; do not touch. */
             return WAYWALLEN_ERR_PROTO;
         }
         d->display_id = accepted.display_id;
@@ -1037,23 +1258,28 @@ int waywallen_display_advance_handshake(waywallen_display_t *d) {
     /* Loop while the state machine reports PROGRESS so the caller only
      * sees terminal codes (DONE / NEED_* / error). Bounded by the
      * number of state transitions (≤4). */
+    int rc;
     for (;;) {
-        int rc = hs_advance_one(d);
+        rc = hs_advance_one(d);
         if (rc == WAYWALLEN_HS_PROGRESS) continue;
-        return rc;
+        break;
     }
+    /* MUST be the last touch on d — flush_dead_event may invoke a
+     * host callback that frees d. */
+    flush_dead_event(d);
+    return rc;
 }
 
-int waywallen_display_connect_v2(waywallen_display_t *d,
-                                 const char *socket_path,
-                                 const char *display_name,
-                                 const char *instance_id,
-                                 uint32_t width,
-                                 uint32_t height,
-                                 uint32_t refresh_mhz) {
-    int rc = waywallen_display_begin_connect_v2(d, socket_path, display_name,
-                                                instance_id, width, height,
-                                                refresh_mhz);
+int waywallen_display_connect(waywallen_display_t *d,
+                              const char *socket_path,
+                              const char *display_name,
+                              const char *instance_id,
+                              uint32_t width,
+                              uint32_t height,
+                              uint32_t refresh_mhz) {
+    int rc = waywallen_display_begin_connect(d, socket_path, display_name,
+                                             instance_id, width, height,
+                                             refresh_mhz);
     if (rc != WAYWALLEN_OK) return rc;
     int fd = waywallen_display_get_fd(d);
     for (;;) {
@@ -1074,16 +1300,6 @@ int waywallen_display_connect_v2(waywallen_display_t *d,
     }
 }
 
-int waywallen_display_connect(waywallen_display_t *d,
-                              const char *socket_path,
-                              const char *display_name,
-                              uint32_t width,
-                              uint32_t height,
-                              uint32_t refresh_mhz) {
-    return waywallen_display_connect_v2(d, socket_path, display_name, NULL,
-                                        width, height, refresh_mhz);
-}
-
 int waywallen_display_update_size(waywallen_display_t *d,
                                   uint32_t width,
                                   uint32_t height) {
@@ -1097,11 +1313,10 @@ int waywallen_display_update_size(waywallen_display_t *d,
     upd.height = height;
     upd.properties.count = 0;
     upd.properties.data = NULL;
-    int rc = send_request_msg(d, WW_REQ_UPDATE_DISPLAY, enc_update, &upd);
-    if (rc != WAYWALLEN_OK) {
-        fire_disconnected(d, rc, "send update_display");
-    }
-    return rc;
+    /* Outbox-full (ERR_IO) is recoverable — the host can retry on the
+     * next size change. The connection itself is fine; only fatal
+     * dispatch / handle_writable transitions surface fire_disconnected. */
+    return outbox_enqueue_request(d, WW_REQ_UPDATE_DISPLAY, enc_update, &upd);
 }
 
 static int enc_pointer_motion(const void *m, ww_buf_t *out) {
@@ -1121,7 +1336,7 @@ int waywallen_display_send_pointer_motion(waywallen_display_t *d,
     if (!d) return WAYWALLEN_ERR_INVAL;
     if (d->conn != WW_CONN_CONNECTED) return WAYWALLEN_ERR_STATE;
     ww_req_pointer_motion_t msg = { x, y, timestamp_us, modifiers };
-    return send_request_msg(d, WW_REQ_POINTER_MOTION, enc_pointer_motion, &msg);
+    return outbox_enqueue_request(d, WW_REQ_POINTER_MOTION, enc_pointer_motion, &msg);
 }
 
 int waywallen_display_send_pointer_button(waywallen_display_t *d,
@@ -1135,7 +1350,7 @@ int waywallen_display_send_pointer_button(waywallen_display_t *d,
     ww_req_pointer_button_t msg = {
         x, y, button, (uint32_t)state, timestamp_us, modifiers
     };
-    return send_request_msg(d, WW_REQ_POINTER_BUTTON, enc_pointer_button, &msg);
+    return outbox_enqueue_request(d, WW_REQ_POINTER_BUTTON, enc_pointer_button, &msg);
 }
 
 int waywallen_display_send_pointer_axis(waywallen_display_t *d,
@@ -1149,7 +1364,7 @@ int waywallen_display_send_pointer_axis(waywallen_display_t *d,
     ww_req_pointer_axis_t msg = {
         x, y, delta_x, delta_y, (uint32_t)source, timestamp_us, modifiers
     };
-    return send_request_msg(d, WW_REQ_POINTER_AXIS, enc_pointer_axis, &msg);
+    return outbox_enqueue_request(d, WW_REQ_POINTER_AXIS, enc_pointer_axis, &msg);
 }
 
 int waywallen_display_get_fd(waywallen_display_t *d) {
@@ -1157,15 +1372,70 @@ int waywallen_display_get_fd(waywallen_display_t *d) {
     return d->fd;
 }
 
+bool waywallen_display_wants_writable(waywallen_display_t *d) {
+    if (!d || d->fd < 0 || d->conn == WW_CONN_DEAD) return false;
+    /* During handshake, the state machine (driven by advance_handshake)
+     * owns POLLOUT arming via its NEED_WRITE return code; report false
+     * here so the host does not double-arm. Post-handshake (READY or
+     * the brief CONNECTED-pre-READY window when consumer_caps may
+     * still be queued) the outbox owns it. */
+    if (d->hs_state != WW_HS_IDLE && d->hs_state != WW_HS_READY) {
+        return false;
+    }
+    return d->out_pos < d->out_len;
+}
+
+int waywallen_display_handle_writable(waywallen_display_t *d) {
+    if (!d) return WAYWALLEN_ERR_INVAL;
+    if (d->fd < 0 || d->conn == WW_CONN_DEAD) return WAYWALLEN_ERR_NOTCONN;
+    int sent = outbox_flush_one(d);
+    int ret = WAYWALLEN_OK;
+    if (sent < 0) {
+        fire_disconnected(d, WAYWALLEN_ERR_IO, "outbox flush");
+        ret = WAYWALLEN_ERR_IO;
+    }
+    flush_dead_event(d);  /* must be last; may free d */
+    return ret;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Dispatch                                                           */
 /* ------------------------------------------------------------------ */
 
 #ifdef WW_HAVE_EGL
-/* Destroy any cached EGL resources associated with the current bound
- * pool. Called from fire_textures_releasing_if_any and on disconnect. */
+/* Destroy a snapshotted pool's EGL/GL resources. Caller owns `p`'s
+ * heap allocation; we free the embedded arrays here, free `p` itself
+ * outside. Must be called from a thread with the host's GL context
+ * current (glDeleteTextures requires it). */
+static void egl_destroy_pending_pool_inplace(waywallen_display_t *d,
+                                             struct ww_egl_pending_pool *p) {
+    if (!p) return;
+    if (d->egl_backend.loaded) {
+        if (p->gl_textures) {
+            d->egl_backend.glDeleteTextures((int)p->count, p->gl_textures);
+        }
+        if (p->images && p->egl_display) {
+            for (uint32_t i = 0; i < p->count; i++) {
+                if (p->images[i]) {
+                    ww_egl_destroy_image(&d->egl_backend,
+                                         (EGLDisplay)p->egl_display,
+                                         (EGLImageKHR)p->images[i]);
+                }
+            }
+        }
+    }
+    free(p->images);
+    free(p->gl_textures);
+}
+
+/* Move the current EGL pool onto the pending-destroy queue. Runs on
+ * the I/O thread (bind_buffers / unbind / disconnect handlers) — the
+ * actual destruction is deferred to
+ * `waywallen_display_drain` so it happens on the
+ * thread holding the host's GL context. */
 static void egl_release_current_pool(waywallen_display_t *d) {
-    if (!d->egl_backend.loaded || d->egl_import_count == 0) {
+    if (d->egl_import_count == 0
+        || (!d->egl_images && !d->egl_gl_textures)) {
         free(d->egl_images);
         free(d->egl_gl_textures);
         d->egl_images = NULL;
@@ -1173,29 +1443,83 @@ static void egl_release_current_pool(waywallen_display_t *d) {
         d->egl_import_count = 0;
         return;
     }
-    if (d->egl_gl_textures) {
-        d->egl_backend.glDeleteTextures((int)d->egl_import_count,
-                                        d->egl_gl_textures);
+    struct ww_egl_pending_pool *p =
+        (struct ww_egl_pending_pool *)calloc(1, sizeof(*p));
+    if (!p) {
+        /* Allocation failed: leak the GL/EGL handles rather than
+         * destroying them on the wrong thread (silent UB). The host's
+         * waywallen_display_free leak-detect path will catch any
+         * in-band leak via subsequent drains. */
+        ww_log(WAYWALLEN_LOG_WARN,
+               "egl_release_current_pool: pending alloc failed; "
+               "leaking %u EGLImages / GL textures",
+               d->egl_import_count);
+        free(d->egl_images);
+        free(d->egl_gl_textures);
+        d->egl_images = NULL;
+        d->egl_gl_textures = NULL;
+        d->egl_import_count = 0;
+        return;
     }
-    if (d->egl_images) {
-        for (uint32_t i = 0; i < d->egl_import_count; i++) {
-            if (d->egl_images[i]) {
-                ww_egl_destroy_image(&d->egl_backend, d->egl.egl_display,
-                                     (EGLImageKHR)d->egl_images[i]);
-            }
-        }
-    }
-    free(d->egl_images);
-    free(d->egl_gl_textures);
+    p->images = d->egl_images;
+    p->gl_textures = d->egl_gl_textures;
+    p->count = d->egl_import_count;
+    p->egl_display = d->egl.egl_display;
     d->egl_images = NULL;
     d->egl_gl_textures = NULL;
     d->egl_import_count = 0;
+
+    pthread_mutex_lock(&d->pending_mutex);
+    p->next = d->egl_pending;
+    d->egl_pending = p;
+    unsigned len = 0;
+    for (struct ww_egl_pending_pool *cur = d->egl_pending; cur; cur = cur->next) len++;
+    pthread_mutex_unlock(&d->pending_mutex);
+    /* Visibility: host should drain on its render thread every frame.
+     * If the list grows beyond a few entries the host either stopped
+     * calling drain or its render thread is stuck. */
+    if (len > 4) {
+        ww_log(WAYWALLEN_LOG_WARN,
+               "egl pending pool list grew to %u — host render thread "
+               "is not draining", len);
+    }
 }
 #endif
 
 #ifdef WW_HAVE_VULKAN
+/* Destroy a snapshotted pool's Vulkan resources. Caller is responsible
+ * for guaranteeing no in-flight VkQueueSubmit references the handles
+ * (host's render thread, post fence-wait) — we deliberately do NOT
+ * vkDeviceWaitIdle here since that's the call that races with
+ * vkQueueSubmit elsewhere. */
+static void vk_destroy_pending_pool_inplace(waywallen_display_t *d,
+                                            struct ww_vk_pending_pool *p) {
+    if (!p) return;
+    if (d->vk_backend.loaded) {
+        if (p->images) {
+            for (uint32_t i = 0; i < p->count; i++) {
+                ww_vk_destroy_imported_image(&d->vk_backend, &p->images[i]);
+            }
+        }
+        if (p->semaphores) {
+            for (uint32_t i = 0; i < p->count; i++) {
+                if (p->semaphores[i] != VK_NULL_HANDLE) {
+                    d->vk_backend.vkDestroySemaphore(
+                        d->vk_backend.device, p->semaphores[i], NULL);
+                }
+            }
+        }
+    }
+    free(p->images);
+    free(p->semaphores);
+}
+
+/* Move the current Vulkan pool onto the pending-destroy queue. Runs
+ * on the I/O thread; deferred destruction is what closes the race
+ * with the host's render-thread vkQueueSubmit. */
 static void vk_release_current_pool(waywallen_display_t *d) {
-    if (!d->vk_backend.loaded || d->vk_import_count == 0) {
+    if (d->vk_import_count == 0
+        || (!d->vk_images && !d->vk_semaphores)) {
         free(d->vk_images);
         free(d->vk_semaphores);
         d->vk_images = NULL;
@@ -1203,42 +1527,89 @@ static void vk_release_current_pool(waywallen_display_t *d) {
         d->vk_import_count = 0;
         return;
     }
-    /* Drain the device before tearing down imported VkImages /
-     * VkDeviceMemory. Consumers (e.g. the QML plugin) clear their
-     * pointer caches in on_textures_releasing but do not synchronize
-     * with their own render thread, so without this barrier in-flight
-     * descriptor writes / command buffers reference freed memory
-     * (UNASSIGNED-VkDescriptorImageInfo-BoundResourceFreedMemoryAccess
-     * and VUID-VkImageMemoryBarrier-image-parameter). */
-    if (d->vk_backend.vkDeviceWaitIdle) {
-        VkResult wr = d->vk_backend.vkDeviceWaitIdle(d->vk_backend.device);
-        if (wr != VK_SUCCESS) {
-            ww_log(WAYWALLEN_LOG_WARN,
-                   "vk_release_current_pool: vkDeviceWaitIdle returned %d; "
-                   "destroying anyway",
-                   (int)wr);
-        }
+    struct ww_vk_pending_pool *p =
+        (struct ww_vk_pending_pool *)calloc(1, sizeof(*p));
+    if (!p) {
+        /* Same fallback rationale as the EGL path: leaking the imports
+         * is preferable to destroying them on the wrong thread, where
+         * vkDestroyImage may race with an in-flight vkQueueSubmit. */
+        ww_log(WAYWALLEN_LOG_WARN,
+               "vk_release_current_pool: pending alloc failed; "
+               "leaking %u imported VkImages / semaphores",
+               d->vk_import_count);
+        free(d->vk_images);
+        free(d->vk_semaphores);
+        d->vk_images = NULL;
+        d->vk_semaphores = NULL;
+        d->vk_import_count = 0;
+        return;
     }
-    if (d->vk_images) {
-        for (uint32_t i = 0; i < d->vk_import_count; i++) {
-            ww_vk_destroy_imported_image(&d->vk_backend, &d->vk_images[i]);
-        }
-    }
-    if (d->vk_semaphores) {
-        for (uint32_t i = 0; i < d->vk_import_count; i++) {
-            if (d->vk_semaphores[i] != VK_NULL_HANDLE) {
-                d->vk_backend.vkDestroySemaphore(
-                    d->vk_backend.device, d->vk_semaphores[i], NULL);
-            }
-        }
-    }
-    free(d->vk_images);
-    free(d->vk_semaphores);
+    p->images = d->vk_images;
+    p->semaphores = d->vk_semaphores;
+    p->count = d->vk_import_count;
     d->vk_images = NULL;
     d->vk_semaphores = NULL;
     d->vk_import_count = 0;
+
+    pthread_mutex_lock(&d->pending_mutex);
+    p->next = d->vk_pending;
+    d->vk_pending = p;
+    unsigned len = 0;
+    for (struct ww_vk_pending_pool *cur = d->vk_pending; cur; cur = cur->next) len++;
+    pthread_mutex_unlock(&d->pending_mutex);
+    if (len > 4) {
+        ww_log(WAYWALLEN_LOG_WARN,
+               "vk pending pool list grew to %u — host render thread "
+               "is not draining", len);
+    }
 }
 #endif
+
+int waywallen_display_drain(waywallen_display_t *d) {
+    if (!d) return WAYWALLEN_ERR_INVAL;
+    int drained = 0;
+
+#ifdef WW_HAVE_VULKAN
+    struct ww_vk_pending_pool *vk_head = NULL;
+#endif
+#ifdef WW_HAVE_EGL
+    struct ww_egl_pending_pool *egl_head = NULL;
+#endif
+
+    /* Snapshot both lists under the lock, then destroy outside it so
+     * driver calls (which can be slow) don't block the I/O thread's
+     * next push. */
+    pthread_mutex_lock(&d->pending_mutex);
+#ifdef WW_HAVE_VULKAN
+    vk_head = d->vk_pending;
+    d->vk_pending = NULL;
+#endif
+#ifdef WW_HAVE_EGL
+    egl_head = d->egl_pending;
+    d->egl_pending = NULL;
+#endif
+    pthread_mutex_unlock(&d->pending_mutex);
+
+#ifdef WW_HAVE_VULKAN
+    while (vk_head) {
+        struct ww_vk_pending_pool *next = vk_head->next;
+        vk_destroy_pending_pool_inplace(d, vk_head);
+        free(vk_head);
+        vk_head = next;
+        drained++;
+    }
+#endif
+#ifdef WW_HAVE_EGL
+    while (egl_head) {
+        struct ww_egl_pending_pool *next = egl_head->next;
+        egl_destroy_pending_pool_inplace(d, egl_head);
+        free(egl_head);
+        egl_head = next;
+        drained++;
+    }
+#endif
+    return drained;
+}
 
 static void fire_textures_releasing_if_any(waywallen_display_t *d) {
     if (!d->has_textures) return;
@@ -1652,9 +2023,19 @@ static int handle_unbind(waywallen_display_t *d,
         fire_disconnected(d, WAYWALLEN_ERR_PROTO, "decode unbind");
         return WAYWALLEN_ERR_PROTO;
     }
+    uint64_t buffer_generation = ub.buffer_generation;
     ww_evt_unbind_free(&ub);
     fire_textures_releasing_if_any(d);
     d->stream = WW_STREAM_INACTIVE;
+    /* Send unbind_done so the daemon knows our host-side teardown has
+     * been initiated and it's safe to proceed with the producer's
+     * Shutdown. The actual GPU drain is async (host runs it on its
+     * render thread) but the producer's exported acquire dma_fence
+     * will signal cleanly because the producer's own exit drains its
+     * device first. Best-effort: send failure means the daemon falls
+     * back to its timeout, no correctness issue. */
+    ww_req_unbind_done_t done = { .buffer_generation = buffer_generation };
+    (void)outbox_enqueue_request(d, WW_REQ_UNBIND_DONE, enc_unbind_done, &done);
     return WAYWALLEN_OK;
 }
 
@@ -1688,27 +2069,34 @@ int waywallen_display_dispatch(waywallen_display_t *d) {
     size_t body_len;
     int fd_buf[WW_CODEC_MAX_FDS_PER_MSG];
     size_t n_fds;
+    int ret;
     int rc = recv_event_frame(d, &op, body_buf, &body_len, fd_buf,
                               WW_CODEC_MAX_FDS_PER_MSG, &n_fds);
     if (rc != WAYWALLEN_OK) {
         fire_disconnected(d, rc, "recv event");
-        return rc;
+        ret = rc;
+        goto out;
     }
 
     switch (op) {
         case WW_EVT_BIND_BUFFERS:
-            return handle_bind_buffers(d, body_buf, body_len, fd_buf, n_fds);
+            ret = handle_bind_buffers(d, body_buf, body_len, fd_buf, n_fds);
+            break;
         case WW_EVT_SET_CONFIG:
             close_all_fds(fd_buf, n_fds);
-            return handle_set_config(d, body_buf, body_len);
+            ret = handle_set_config(d, body_buf, body_len);
+            break;
         case WW_EVT_FRAME_READY:
-            return handle_frame_ready(d, body_buf, body_len, fd_buf, n_fds);
+            ret = handle_frame_ready(d, body_buf, body_len, fd_buf, n_fds);
+            break;
         case WW_EVT_UNBIND:
             close_all_fds(fd_buf, n_fds);
-            return handle_unbind(d, body_buf, body_len);
+            ret = handle_unbind(d, body_buf, body_len);
+            break;
         case WW_EVT_ERROR:
             close_all_fds(fd_buf, n_fds);
-            return handle_error(d, body_buf, body_len);
+            ret = handle_error(d, body_buf, body_len);
+            break;
         case WW_EVT_WELCOME:
         case WW_EVT_DISPLAY_ACCEPTED:
             /* Legal only during handshake. Seeing them again is a
@@ -1716,29 +2104,17 @@ int waywallen_display_dispatch(waywallen_display_t *d) {
             close_all_fds(fd_buf, n_fds);
             fire_disconnected(d, WAYWALLEN_ERR_PROTO,
                               "unexpected handshake event");
-            return WAYWALLEN_ERR_PROTO;
+            ret = WAYWALLEN_ERR_PROTO;
+            break;
         default:
             /* Unknown opcodes are forward-compat: log + drop. */
             close_all_fds(fd_buf, n_fds);
-            return WAYWALLEN_OK;
+            ret = WAYWALLEN_OK;
+            break;
     }
-}
-
-/* ------------------------------------------------------------------ */
-/*  Release / disconnect                                               */
-/* ------------------------------------------------------------------ */
-
-int waywallen_display_release_frame(waywallen_display_t *d,
-                                    uint32_t buffer_index,
-                                    uint64_t seq) {
-    /* DEPRECATED — v1 dropped the BufferRelease wire request. Release
-     * is now signaled via the per-frame `release_syncobj_fd` on the
-     * frame_ready callback. This stub remains so existing callers
-     * link, but it does not communicate with the daemon. */
-    (void)buffer_index;
-    (void)seq;
-    if (!d) return WAYWALLEN_ERR_INVAL;
-    return WAYWALLEN_OK;
+out:
+    flush_dead_event(d);  /* must be last; may free d */
+    return ret;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1831,7 +2207,7 @@ int waywallen_display_signal_release_syncobj(int fd) {
     return rc;
 }
 
-void waywallen_display_disconnect(waywallen_display_t *d) {
+void waywallen_display_close(waywallen_display_t *d) {
     if (!d) return;
     if (d->fd >= 0) {
         /* Best-effort bye; ignore errors. Only meaningful once the
@@ -1840,7 +2216,7 @@ void waywallen_display_disconnect(waywallen_display_t *d) {
         if (d->conn == WW_CONN_CONNECTED) {
             ww_req_bye_t bye;
             memset(&bye, 0, sizeof(bye));
-            (void)send_request_msg(d, WW_REQ_BYE, enc_bye, &bye);
+            (void)outbox_enqueue_request(d, WW_REQ_BYE, enc_bye, &bye);
         }
         close(d->fd);
         d->fd = -1;
@@ -1850,8 +2226,30 @@ void waywallen_display_disconnect(waywallen_display_t *d) {
     d->stream = WW_STREAM_INACTIVE;
     d->hs_state = WW_HS_IDLE;
     ww_codec_recv_state_reset(&d->hs_recv);
-    d->hs_send_len = 0;
-    d->hs_send_pos = 0;
+    d->out_len = 0;
+    d->out_pos = 0;
+    /* Drop any latched dead-event — host called us, we don't want to
+     * fire on_disconnected back at them. */
+    d->dead_event_pending = false;
+    d->dead_err = 0;
+}
+
+void waywallen_display_shutdown(waywallen_display_t *d) {
+    if (!d) return;
+    waywallen_display_close(d);
+    /* Drain in a bounded loop. Each iteration destroys whatever pools
+     * the previous bind_buffers handler queued; in practice 1 pass is
+     * always enough, but a few extra absorb late-binding edge cases. */
+    for (int i = 0; i < 4; i++) {
+        if (waywallen_display_drain(d) <= 0) {
+            waywallen_display_free(d);
+            return;
+        }
+    }
+    /* Drain still has work after 4 iterations — the host's render
+     * thread context is wedged or someone is concurrently pushing
+     * pools. free's abort will catch it. */
+    waywallen_display_free(d);
 }
 
 /* ------------------------------------------------------------------ */

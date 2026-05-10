@@ -471,9 +471,9 @@ static void test_connect_to_nonexistent_socket(void) {
     waywallen_display_t *d = make_client(&ts);
     int rc = waywallen_display_begin_connect(d, ts.sock_path,
                                              "test-display",
-                                             1920, 1080, 60000);
+                                             NULL, 1920, 1080, 60000);
     assert(rc != WAYWALLEN_OK);
-    waywallen_display_destroy(d);
+    waywallen_display_free(d);
     printf("  ok test_connect_to_nonexistent_socket (rc=%d)\n", rc);
 }
 
@@ -484,11 +484,11 @@ static void test_legacy_blocking_connect(void) {
 
     waywallen_display_t *d = make_client(&ts);
     int rc = waywallen_display_connect(d, ts.sock_path, "test-display",
-                                       1920, 1080, 60000);
+                                       NULL, 1920, 1080, 60000);
     assert(rc == WAYWALLEN_OK);
     assert(ts.on_disconnected_count == 0);
-    waywallen_display_disconnect(d);
-    waywallen_display_destroy(d);
+    waywallen_display_close(d);
+    waywallen_display_free(d);
 
     pthread_join(srv, NULL);
     ts_teardown(&ts);
@@ -502,7 +502,7 @@ static void test_begin_connect_immediate(void) {
 
     waywallen_display_t *d = make_client(&ts);
     int rc = waywallen_display_begin_connect(d, ts.sock_path, "test-display",
-                                             640, 480, 60000);
+                                             NULL, 640, 480, 60000);
     assert(rc == WAYWALLEN_OK);
     assert(waywallen_display_get_fd(d) >= 0);
     /* On a sync accept the kernel completes connect immediately, so the
@@ -516,8 +516,8 @@ static void test_begin_connect_immediate(void) {
     rc = drive_handshake(d, 1000);
     assert(rc == WAYWALLEN_OK);
 
-    waywallen_display_disconnect(d);
-    waywallen_display_destroy(d);
+    waywallen_display_close(d);
+    waywallen_display_free(d);
     pthread_join(srv, NULL);
     ts_teardown(&ts);
     printf("  ok test_begin_connect_immediate\n");
@@ -530,7 +530,7 @@ static void test_full_handshake_via_async_api(void) {
 
     waywallen_display_t *d = make_client(&ts);
     int rc = waywallen_display_begin_connect(d, ts.sock_path, "test-display",
-                                             1920, 1080, 60000);
+                                             NULL, 1920, 1080, 60000);
     assert(rc == WAYWALLEN_OK);
     rc = drive_handshake(d, 2000);
     assert(rc == WAYWALLEN_OK);
@@ -538,8 +538,8 @@ static void test_full_handshake_via_async_api(void) {
     assert(waywallen_display_conn_state(d) == WAYWALLEN_CONN_CONNECTED);
     assert(ts.on_disconnected_count == 0);
 
-    waywallen_display_disconnect(d);
-    waywallen_display_destroy(d);
+    waywallen_display_close(d);
+    waywallen_display_free(d);
     pthread_join(srv, NULL);
     ts_teardown(&ts);
     printf("  ok test_full_handshake_via_async_api\n");
@@ -558,7 +558,7 @@ static void test_consumer_caps_signals_linear_only_when_no_backend(void) {
 
     waywallen_display_t *d = make_client(&ts);
     int rc = waywallen_display_begin_connect(d, ts.sock_path, "test-display",
-                                             1920, 1080, 60000);
+                                             NULL, 1920, 1080, 60000);
     assert(rc == WAYWALLEN_OK);
     rc = drive_handshake(d, 2000);
     assert(rc == WAYWALLEN_OK);
@@ -584,8 +584,8 @@ static void test_consumer_caps_signals_linear_only_when_no_backend(void) {
            == (WW_SYNC_SYNCOBJ_BINARY | WW_SYNC_SYNCOBJ_TIMELINE)
            && "sync_caps must advertise BINARY+TIMELINE");
 
-    waywallen_display_disconnect(d);
-    waywallen_display_destroy(d);
+    waywallen_display_close(d);
+    waywallen_display_free(d);
     ts_teardown(&ts);
     printf("  ok test_consumer_caps_signals_linear_only_when_no_backend "
            "(mem_hints=0x%x sync_caps=0x%x)\n",
@@ -599,14 +599,14 @@ static void test_partial_welcome(void) {
 
     waywallen_display_t *d = make_client(&ts);
     int rc = waywallen_display_begin_connect(d, ts.sock_path, "test-display",
-                                             1920, 1080, 60000);
+                                             NULL, 1920, 1080, 60000);
     assert(rc == WAYWALLEN_OK);
     rc = drive_handshake(d, 2000);
     assert(rc == WAYWALLEN_OK);
     assert(ts.on_disconnected_count == 0);
 
-    waywallen_display_disconnect(d);
-    waywallen_display_destroy(d);
+    waywallen_display_close(d);
+    waywallen_display_free(d);
     pthread_join(srv, NULL);
     ts_teardown(&ts);
     printf("  ok test_partial_welcome\n");
@@ -619,13 +619,13 @@ static void test_server_closes_during_welcome_wait(void) {
 
     waywallen_display_t *d = make_client(&ts);
     int rc = waywallen_display_begin_connect(d, ts.sock_path, "test-display",
-                                             1920, 1080, 60000);
+                                             NULL, 1920, 1080, 60000);
     assert(rc == WAYWALLEN_OK);
     rc = drive_handshake(d, 1000);
     assert(rc == WAYWALLEN_ERR_NOTCONN);
     assert(ts.on_disconnected_count == 1);
 
-    waywallen_display_destroy(d);
+    waywallen_display_free(d);
     pthread_join(srv, NULL);
     ts_teardown(&ts);
     printf("  ok test_server_closes_during_welcome_wait\n");
@@ -638,14 +638,14 @@ static void test_server_sends_error_event(void) {
 
     waywallen_display_t *d = make_client(&ts);
     int rc = waywallen_display_begin_connect(d, ts.sock_path, "test-display",
-                                             1920, 1080, 60000);
+                                             NULL, 1920, 1080, 60000);
     assert(rc == WAYWALLEN_OK);
     rc = drive_handshake(d, 1000);
     assert(rc == WAYWALLEN_ERR_PROTO);
     assert(ts.on_disconnected_count == 1);
     assert(strcmp(ts.last_disconnect_msg, "nope") == 0);
 
-    waywallen_display_destroy(d);
+    waywallen_display_free(d);
     pthread_join(srv, NULL);
     ts_teardown(&ts);
     printf("  ok test_server_sends_error_event\n");

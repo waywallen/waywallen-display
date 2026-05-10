@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 project(waywallen_display
-    VERSION 0.1.3
+    VERSION 0.2.0
     LANGUAGES C
     DESCRIPTION "C library for the waywallen-display-v1 protocol")
 

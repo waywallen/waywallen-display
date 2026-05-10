@@ -95,8 +95,7 @@ ww_display_finalize(GObject *object)
 {
     WwDisplay *self = WW_DISPLAY(object);
     if (self->handle) {
-        waywallen_display_disconnect(self->handle);
-        waywallen_display_destroy(self->handle);
+        waywallen_display_shutdown(self->handle);
         self->handle = NULL;
     }
     G_OBJECT_CLASS(ww_display_parent_class)->finalize(object);
@@ -217,7 +216,7 @@ ww_display_begin_connect(WwDisplay *self,
     g_return_val_if_fail(WW_IS_DISPLAY(self), FALSE);
     g_return_val_if_fail(display_name != NULL, FALSE);
 
-    int rc = waywallen_display_begin_connect_v2(
+    int rc = waywallen_display_begin_connect(
         self->handle,
         socket_path,
         display_name,
@@ -323,7 +322,7 @@ void
 ww_display_disconnect(WwDisplay *self)
 {
     g_return_if_fail(WW_IS_DISPLAY(self));
-    waywallen_display_disconnect(self->handle);
+    waywallen_display_close(self->handle);
     self->connected = FALSE;
 }
 

@@ -60,6 +60,35 @@ typedef struct ww_vk_blitter {
     uint32_t        shadow_w;
     uint32_t        shadow_h;
     VkFormat        shadow_fmt;
+    /* false until the first ww_vk_blitter_blit succeeds for this
+     * shadow; reset to false on every shadow recreate. The host
+     * checks this before exposing the shadow to Qt RHI as a sampled
+     * texture — sampling a shadow whose layout is still UNDEFINED
+     * (because no blit ran yet, e.g. textures_ready arrived but
+     * frame_ready didn't) trips
+     * VUID-vkCmdDraw-None-09600 and on NVIDIA ends in DEVICE_LOST. */
+    bool shadow_has_content;
+
+    /* Old shadows queued for delayed destruction. When the host's
+     * size changes, the prior QSGVulkanTexture's VkImageView is
+     * scheduled for destruction by Qt RHI's release queue but
+     * doesn't actually go away until the *next* frame's
+     * sync/render. Calling vkDestroyImage on the old shadow
+     * inline trips VUID-vkDestroyImage-image-01000. We park the
+     * old shadow handles here and the host calls
+     * `ww_vk_blitter_tick_pending_destroys` once per frame; when
+     * the per-entry countdown reaches zero (default 2 frames,
+     * comfortably above Qt RHI's typical 1-frame deferred
+     * release), we run vkDestroyImage / vkFreeMemory then. The
+     * queue is small (4) — rapid simultaneous size changes beyond
+     * that fall back to immediate destroy with a best-effort
+     * vkDeviceWaitIdle, which is racy but unlikely. */
+    struct {
+        VkImage         image;
+        VkDeviceMemory  memory;
+        int             frames_remaining;
+    } pending_shadow_destroy[4];
+    int pending_shadow_destroy_count;
 
     bool initialized;
 } ww_vk_blitter_t;
@@ -117,6 +146,22 @@ static inline VkImageLayout ww_vk_blitter_shadow_layout(const ww_vk_blitter_t *b
 static inline bool ww_vk_blitter_initialized(const ww_vk_blitter_t *b) {
     return b && b->initialized;
 }
+
+/* True once at least one blit has populated the current shadow. The
+ * host MUST gate any sampling of the shadow on this — see the comment
+ * on `shadow_has_content` for the failure mode if it doesn't. */
+static inline bool ww_vk_blitter_shadow_has_content(const ww_vk_blitter_t *b) {
+    return b && b->shadow_has_content;
+}
+
+/* Process the deferred-destroy queue: decrement each entry's frame
+ * countdown; for entries whose countdown reaches 0, run
+ * vkDestroyImage + vkFreeMemory. Call this once per frame from the
+ * host's render thread (typically at the top of updatePaintNode),
+ * AFTER any Qt RHI frame boundary that would have processed its
+ * own release queue — i.e. one frame after `ensure_shadow` queued
+ * the old shadow. */
+void ww_vk_blitter_tick_pending_destroys(ww_vk_blitter_t *b);
 
 #ifdef __cplusplus
 } /* extern "C" */

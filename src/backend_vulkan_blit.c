@@ -173,6 +173,74 @@ static void destroy_shadow(ww_vk_blitter_t *b) {
     b->shadow_fmt = VK_FORMAT_UNDEFINED;
 }
 
+/* Push the current shadow onto the deferred-destroy queue without
+ * touching it. Used by ensure_shadow on size/format change so that
+ * Qt RHI's still-live VkImageView (deleted via Qt's release queue at
+ * the next frame boundary) doesn't trip
+ * VUID-vkDestroyImage-image-01000. When the queue is full, force the
+ * oldest entry's countdown to zero and tick once to free a slot —
+ * this only sacrifices the extra frame of jitter slack, never falls
+ * back to vkDeviceWaitIdle (which is precisely the race we deferred
+ * destruction to avoid). */
+static void enqueue_shadow_destroy(ww_vk_blitter_t *b) {
+    if (b->shadow_image == VK_NULL_HANDLE && b->shadow_mem == VK_NULL_HANDLE) {
+        return;
+    }
+    const int cap = (int)(sizeof(b->pending_shadow_destroy)
+                          / sizeof(b->pending_shadow_destroy[0]));
+    if (b->pending_shadow_destroy_count >= cap) {
+        int oldest = 0;
+        for (int i = 1; i < b->pending_shadow_destroy_count; i++) {
+            if (b->pending_shadow_destroy[i].frames_remaining
+                < b->pending_shadow_destroy[oldest].frames_remaining) {
+                oldest = i;
+            }
+        }
+        ww_log(WAYWALLEN_LOG_WARN,
+               "vk blitter: pending_shadow_destroy queue full; forcing "
+               "oldest entry (frames_remaining=%d) to fire now",
+               b->pending_shadow_destroy[oldest].frames_remaining);
+        b->pending_shadow_destroy[oldest].frames_remaining = 1;
+        ww_vk_blitter_tick_pending_destroys(b);
+    }
+    int idx = b->pending_shadow_destroy_count++;
+    b->pending_shadow_destroy[idx].image  = b->shadow_image;
+    b->pending_shadow_destroy[idx].memory = b->shadow_mem;
+    /* 2 frames: Qt RHI typically releases on next frame boundary,
+     * one extra frame of slack absorbs jitter. */
+    b->pending_shadow_destroy[idx].frames_remaining = 2;
+    b->shadow_image = VK_NULL_HANDLE;
+    b->shadow_mem   = VK_NULL_HANDLE;
+    b->shadow_w = 0;
+    b->shadow_h = 0;
+    b->shadow_fmt = VK_FORMAT_UNDEFINED;
+}
+
+void ww_vk_blitter_tick_pending_destroys(ww_vk_blitter_t *b) {
+    if (!b || b->pending_shadow_destroy_count == 0) return;
+    int j = 0;
+    for (int i = 0; i < b->pending_shadow_destroy_count; i++) {
+        if (--b->pending_shadow_destroy[i].frames_remaining > 0) {
+            /* Still parked; keep it. */
+            if (j != i) b->pending_shadow_destroy[j] = b->pending_shadow_destroy[i];
+            j++;
+            continue;
+        }
+        /* Countdown elapsed: Qt RHI has had at least one frame
+         * boundary to process its release queue, so the dependent
+         * VkImageView is gone. Safe to destroy now. */
+        if (b->pending_shadow_destroy[i].image != VK_NULL_HANDLE) {
+            b->backend.vkDestroyImage(b->backend.device,
+                                      b->pending_shadow_destroy[i].image, NULL);
+        }
+        if (b->pending_shadow_destroy[i].memory != VK_NULL_HANDLE) {
+            b->backend.vkFreeMemory(b->backend.device,
+                                    b->pending_shadow_destroy[i].memory, NULL);
+        }
+    }
+    b->pending_shadow_destroy_count = j;
+}
+
 int ww_vk_blitter_ensure_shadow(ww_vk_blitter_t *b,
                                 uint32_t w, uint32_t h, VkFormat fmt) {
     if (!b || !b->initialized) return -EINVAL;
@@ -183,14 +251,34 @@ int ww_vk_blitter_ensure_shadow(ww_vk_blitter_t *b,
     }
 
     /* Drain any in-flight blit referencing the old shadow before
-     * tearing it down. */
+     * tearing it down. Bounded wait: if the fence is wedged the GPU
+     * is effectively hung — Qt RHI's own next submit will hit the
+     * same hang and trip DEVICE_LOST, which triggers
+     * sceneGraphInvalidated → cleanup → blitter shutdown. Stalling
+     * for 2s per frame here is bounded recovery time, not infinite. */
+    static const uint64_t WW_SHADOW_DRAIN_NS = 2ull * 1000ull * 1000ull * 1000ull;
     if (b->fence_armed) {
-        b->vkWaitForFences(b->backend.device, 1, &b->fence, VK_TRUE,
-                           UINT64_MAX);
+        VkResult vrw = b->vkWaitForFences(b->backend.device, 1, &b->fence,
+                                           VK_TRUE, WW_SHADOW_DRAIN_NS);
+        if (vrw == VK_TIMEOUT) {
+            ww_log(WAYWALLEN_LOG_WARN,
+                   "vk blitter: shadow-drain fence wait timed out (>2s); "
+                   "GPU likely hung, leaving fence armed and bailing — "
+                   "sceneGraphInvalidated will recover us");
+            /* Cannot vkResetFences on an in-flight fence (UB), nor
+             * vkDestroyFence / vkFreeCommandBuffers on resources still
+             * referenced by an in-flight submission. Bail out, keep
+             * fence_armed=true, leak old shadow until shutdown. */
+            return -EIO;
+        }
         b->vkResetFences(b->backend.device, 1, &b->fence);
         b->fence_armed = false;
     }
-    destroy_shadow(b);
+    /* Defer the actual vkDestroyImage to a later frame so Qt RHI's
+     * released VkImageView (which Qt processes async on its release
+     * queue at frame boundaries) doesn't trip
+     * VUID-vkDestroyImage-image-01000. */
+    enqueue_shadow_destroy(b);
 
     VkImageCreateInfo ici = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
@@ -265,6 +353,10 @@ int ww_vk_blitter_ensure_shadow(ww_vk_blitter_t *b,
     b->shadow_w = w;
     b->shadow_h = h;
     b->shadow_fmt = fmt;
+    /* Fresh image; layout is VK_IMAGE_LAYOUT_UNDEFINED. Until the
+     * first blit transitions it to SHADER_READ_ONLY_OPTIMAL, the
+     * host MUST NOT expose this shadow as a sampled texture. */
+    b->shadow_has_content = false;
     ww_log(WAYWALLEN_LOG_INFO,
            "vk blitter: shadow %ux%u fmt=%d ready (mtype=%u size=%" PRIu64 ")",
            w, h, (int)fmt, mtype, (uint64_t)req.size);
@@ -303,9 +395,26 @@ int ww_vk_blitter_blit(ww_vk_blitter_t *b,
         return -EINVAL;
     }
 
+    /* 2 s is well above any plausible blit duration (hundreds of µs
+     * even on AMD with DCC). Producer death between FrameReady and
+     * its acquire dma_fence signal is the only realistic path to a
+     * stuck wait — we'd rather log + bail than freeze the QML render
+     * thread for 10s+ until the kernel TDR fires. */
+    static const uint64_t WW_BLIT_FENCE_WAIT_NS = 2ull * 1000ull * 1000ull * 1000ull;
     if (b->fence_armed) {
         VkResult vrw = b->vkWaitForFences(b->backend.device, 1, &b->fence,
-                                           VK_TRUE, UINT64_MAX);
+                                           VK_TRUE, WW_BLIT_FENCE_WAIT_NS);
+        if (vrw == VK_TIMEOUT) {
+            /* Fence is still in flight; vkResetFences would be UB and
+             * submitting a new cmd buffer to the same fence is forbidden.
+             * Bail out, keep fence_armed=true. The next call retries. */
+            ww_log(WAYWALLEN_LOG_WARN,
+                   "vk blitter: pre-submit fence wait timed out (>%llu ms); "
+                   "skipping this blit",
+                   (unsigned long long)(WW_BLIT_FENCE_WAIT_NS / 1000000ull));
+            if (release_syncobj_fd >= 0) close(release_syncobj_fd);
+            return -EIO;
+        }
         if (vrw != VK_SUCCESS) {
             ww_log(WAYWALLEN_LOG_WARN,
                    "vk blitter: vkWaitForFences failed: %s",
@@ -436,10 +545,21 @@ int ww_vk_blitter_blit(ww_vk_blitter_t *b,
     }
     b->fence_armed = true;
 
-    /* Wait now so subsequent sample sees finished writes. CPU stall
-     * is acceptable for wallpaper-rate; revisit for compositor overlay. */
+    /* Bounded wait: see WW_BLIT_FENCE_WAIT_NS comment above for the
+     * 2 s rationale. On VK_TIMEOUT the fence is still in-flight, so
+     * we leave fence_armed=true and let the next blit's pre-submit
+     * wait try again — the daemon will time out the buffer slot if
+     * we never recover. */
     vr = b->vkWaitForFences(b->backend.device, 1, &b->fence, VK_TRUE,
-                            UINT64_MAX);
+                            WW_BLIT_FENCE_WAIT_NS);
+    if (vr == VK_TIMEOUT) {
+        ww_log(WAYWALLEN_LOG_WARN,
+               "vk blitter: post-submit fence wait timed out (>%llu ms); "
+               "shadow may be stale until GPU recovers",
+               (unsigned long long)(WW_BLIT_FENCE_WAIT_NS / 1000000ull));
+        if (release_syncobj_fd >= 0) close(release_syncobj_fd);
+        return -EIO;
+    }
     if (vr != VK_SUCCESS) {
         ww_log(WAYWALLEN_LOG_ERROR,
                "vk blitter: vkWaitForFences post-submit failed: %s",
@@ -449,6 +569,9 @@ int ww_vk_blitter_blit(ww_vk_blitter_t *b,
     }
     b->vkResetFences(b->backend.device, 1, &b->fence);
     b->fence_armed = false;
+    /* Blit transitioned shadow into SHADER_READ_ONLY_OPTIMAL; the
+     * host can now safely sample it. */
+    b->shadow_has_content = true;
 
     if (release_syncobj_fd >= 0) {
         int rc = waywallen_display_signal_release_syncobj(release_syncobj_fd);
@@ -472,6 +595,23 @@ void ww_vk_blitter_shutdown(ww_vk_blitter_t *b) {
     if (b->backend.device != VK_NULL_HANDLE && b->backend.vkDeviceWaitIdle) {
         b->backend.vkDeviceWaitIdle(b->backend.device);
     }
+    /* Drain anything still parked in the deferred-destroy queue.
+     * vkDeviceWaitIdle above ensures no in-flight cmd buffer
+     * references these; we don't strictly need Qt RHI's view to be
+     * gone by now (the host is tearing the whole session down) but
+     * if it isn't, validation will yell — that's acceptable on
+     * shutdown. */
+    for (int i = 0; i < b->pending_shadow_destroy_count; i++) {
+        if (b->pending_shadow_destroy[i].image != VK_NULL_HANDLE) {
+            b->backend.vkDestroyImage(b->backend.device,
+                                      b->pending_shadow_destroy[i].image, NULL);
+        }
+        if (b->pending_shadow_destroy[i].memory != VK_NULL_HANDLE) {
+            b->backend.vkFreeMemory(b->backend.device,
+                                    b->pending_shadow_destroy[i].memory, NULL);
+        }
+    }
+    b->pending_shadow_destroy_count = 0;
     destroy_shadow(b);
     if (b->fence != VK_NULL_HANDLE && b->vkDestroyFence) {
         b->vkDestroyFence(b->backend.device, b->fence, NULL);

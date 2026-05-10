@@ -14,7 +14,7 @@
  *
  * Deliberately does NOT call `eglInitialize`, `eglCreateImageKHR`,
  * or any other real EGL/GL function — runtime validation requires a
- * GPU + display and is out of Phase 3 scope.
+ * GPU + display and is out of scope here.
  */
 
 #define _GNU_SOURCE

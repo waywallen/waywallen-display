@@ -2,6 +2,7 @@
 
 #include <QColor>
 #include <QMutex>
+#include <QPointer>
 #include <QQuickItem>
 #include <QRectF>
 #include <QSocketNotifier>
@@ -131,6 +132,13 @@ public:
 
     bool eventFilter(QObject *obj, QEvent *event) override;
 
+    // Tear down GPU-touching state (m_display + m_vkBlitter). Runs on
+    // the render thread when invoked via the cleanup() scheduleRenderJob
+    // hop, or inline on the GUI thread as the best-effort fallback.
+    // Public so the file-local TeardownJob in WaywallenDisplay.cpp can
+    // call it without a friend declaration.
+    void renderThreadFinalize();
+
 signals:
     void socketPathChanged();
     void displayNameChanged();
@@ -153,6 +161,7 @@ protected:
 
 private slots:
     void onSocketReadable();
+    void onSocketWritable();
     void onHandshakeIO();
     void onWindowReady();
     void onDaemonNameOwnerChanged(const QString &name,
@@ -169,10 +178,20 @@ private:
     void handleDisconnect(int errCode, const char *msg);
     void setConnState(ConnState s);
     void setStreamState(StreamState s);
+    /* Probe wants_writable and toggle m_notifierWrite::setEnabled.
+     * Call after any post-handshake send that may have left bytes
+     * queued in the lib's outbox (update_size, pointer events). */
+    void armWriteNotifier();
 
     bool bindEglBackend();
     bool bindVulkanBackend();
     void ensureGlTextures();
+    /* Blit imported GL texture at `slot` into m_eglShadowTex; resize
+     * shadow if dims changed. Called once per updatePaintNode on the
+     * EGL path. Returns true if shadow now has valid content. */
+    bool blitEglShadow(int slot);
+    /* Tear down shadow tex/FBOs. Render thread only. */
+    void destroyEglShadow();
 
     // C callback trampolines.
     static void c_on_textures_ready(void *ud, const waywallen_textures_t *t);
@@ -200,8 +219,14 @@ private:
 
     // C library handle.
     waywallen_display_t *m_display { nullptr };
-    QSocketNotifier *m_notifier { nullptr };
-    QSocketNotifier *m_notifierWrite { nullptr };
+    /* QPointer so cross-thread access (sceneGraphInvalidated lambda
+     * runs on render thread) is safe — QPointer auto-clears when the
+     * underlying QObject is destroyed via deleteLater, and reads of
+     * a destroyed QPointer are well-defined (return nullptr). Raw
+     * pointers here used to require careful disconnect+deleteLater+
+     * null-write ordering across threads. */
+    QPointer<QSocketNotifier> m_notifier;
+    QPointer<QSocketNotifier> m_notifierWrite;
 
     // Coalesces a flood of width/height changes during a window resize
     // into a single `update_display` wire message. Last reported size is
@@ -222,6 +247,19 @@ private:
     int m_texHeight { 0 };
     uint32_t m_textureCount { 0 };
     int m_currentSlot { -1 };
+
+    // Host-owned shadow GL texture for the EGL path. Mirrors the
+    // Vulkan blitter's shadow image: each frame we blit imported
+    // → shadow, and Qt samples the shadow. Decouples the visible
+    // texture from pool transitions so that on `unbind` the prior
+    // frame stays on screen until the next pool's first frame
+    // arrives — same continuity the Vulkan path gets for free.
+    uint m_eglShadowTex { 0 };
+    uint m_eglShadowFbo { 0 };  // draw target for blit
+    uint m_eglReadFbo   { 0 };  // src side for blit
+    int  m_eglShadowW   { 0 };
+    int  m_eglShadowH   { 0 };
+    bool m_eglShadowHasContent { false };
 
     // Vulkan texture state.
     bool m_vkImagesValid { false };
@@ -260,11 +298,6 @@ private:
     // Config from on_config.
     QRectF m_sourceRect;
     QRectF m_destRect;
-
-    // Frame release tracking.
-    bool m_pendingRelease { false };
-    uint32_t m_pendingReleaseIdx { 0 };
-    uint64_t m_pendingReleaseSeq { 0 };
 
     // EGL path: per-frame release_syncobj fd handed to us via
     // on_frame_ready. We signal it on the *next* frame_ready (in

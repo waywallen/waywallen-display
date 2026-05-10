@@ -12,26 +12,32 @@
  *     duration of the callback invocation; copy before returning.
  *   - File descriptors the library receives from the wire (dma_buf
  *     fds, acquire sync_fds) are owned by the library and closed
- *     automatically. The host never sees raw fds in Phase 2.
+ *     automatically. The host never sees raw fds.
  *
  * Threading:
- *   A single `waywallen_display_t` is NOT thread-safe. All methods
- *   except `waywallen_display_get_fd` must be called on the same
- *   thread that owns the host's render context. `get_fd` is safe to
- *   poll from an I/O thread as long as `dispatch` never runs
- *   concurrently with any other method on the same handle.
+ *   A single `waywallen_display_t` is NOT thread-safe. Most methods
+ *   must be called on the same thread (the lib's "session thread").
+ *   Two exceptions, intended for cross-thread integration:
+ *     - `waywallen_display_get_fd` is safe to read from any thread.
+ *     - `waywallen_display_drain` is safe to call from a different
+ *       thread than `dispatch`/`handle_writable`/etc., because it
+ *       only touches the internally-locked pending-destroy list.
+ *       This is what lets QML hosts run drain on the render thread
+ *       while session I/O lives on the GUI thread.
  *
  * Error handling:
  *   Functions return 0 on success and a negative errno-ish value on
- *   failure (see `ww_err_t` enum). On fatal session errors the
- *   library invokes `on_disconnected` and transitions to DEAD state;
- *   the host must call `disconnect` to clean up and may re-create or
- *   reconnect the handle.
+ *   failure (see `waywallen_err_t` below). On fatal session errors
+ *   the library latches into DEAD state and fires `on_disconnected`
+ *   from the next host-facing entry (dispatch / advance_handshake /
+ *   handle_writable); the host then calls close → drain → free (or
+ *   the `shutdown` convenience) and may reconnect a fresh handle.
  */
 
 #ifndef WAYWALLEN_DISPLAY_H
 #define WAYWALLEN_DISPLAY_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -40,7 +46,7 @@ extern "C" {
 #endif
 
 #define WAYWALLEN_DISPLAY_VERSION_MAJOR 0
-#define WAYWALLEN_DISPLAY_VERSION_MINOR 1
+#define WAYWALLEN_DISPLAY_VERSION_MINOR 2
 
 /*
  * On-the-wire protocol version. Independent of the library API/ABI
@@ -49,7 +55,7 @@ extern "C" {
  * `hello.client_protocol_version`. The daemon owns the supported
  * range and rejects out-of-range clients with `error{code=2}`.
  */
-#define WAYWALLEN_DISPLAY_PROTOCOL_VERSION 5
+#define WAYWALLEN_DISPLAY_PROTOCOL_VERSION 6
 
 /*
  * Library version baked in at build time.
@@ -74,7 +80,7 @@ typedef enum waywallen_err {
     WAYWALLEN_ERR_IO = -4,          /* socket / syscall error */
     WAYWALLEN_ERR_PROTO = -5,       /* wire format / state machine violation */
     WAYWALLEN_ERR_NOTCONN = -6,     /* not connected */
-    WAYWALLEN_ERR_NOT_IMPL = -7,    /* feature not implemented in this phase */
+    WAYWALLEN_ERR_NOT_IMPL = -7,    /* feature not implemented */
 } waywallen_err_t;
 
 /* -------------------------------------------------------------------------
@@ -153,7 +159,7 @@ typedef enum waywallen_handshake_state {
 #define WAYWALLEN_HS_PROGRESS   4   /* state advanced, more I/O needed    */
 
 /* -------------------------------------------------------------------------
- * Backends (Phase 2: enum is recorded but not honoured beyond that)
+ * Backends
  * ------------------------------------------------------------------------- */
 
 typedef enum waywallen_backend {
@@ -187,12 +193,11 @@ typedef struct waywallen_rect {
 } waywallen_rect_t;
 
 /* Texture set handed to the host after a successful bind_buffers.
- *
- * Phase 2: `backend == NONE`, all handle arrays are NULL, only the
- * descriptor metadata (count / width / height / fourcc / modifier) is
- * meaningful. Phase 3 fills in the real handles based on the backend
- * the host selected via `bind_egl` / `bind_vulkan`.
- */
+ * Only one of the handle arrays (egl_images / gl_textures or
+ * vk_images / vk_memories) is non-NULL, depending on which backend
+ * the host bound via `bind_egl` / `bind_vulkan`. If no backend was
+ * bound, `backend == NONE` and all handle arrays are NULL — only the
+ * descriptor metadata is meaningful. */
 typedef struct waywallen_textures {
     uint32_t count;
     uint32_t tex_width;
@@ -263,7 +268,43 @@ typedef struct waywallen_display_callbacks {
  * ------------------------------------------------------------------------- */
 
 waywallen_display_t *waywallen_display_new(const waywallen_display_callbacks_t *cb);
-void                 waywallen_display_destroy(waywallen_display_t *d);
+
+/*
+ * Shutdown sequence: close → drain → free. See
+ * `waywallen_display_shutdown` below for a same-thread convenience
+ * that does all three in order.
+ *
+ *   waywallen_display_close(d)   // any thread
+ *     Closes the wire socket. Moves the current bound pool's GPU
+ *     resources to a pending-destroy queue. After this returns the
+ *     lib is fully detached from the daemon: no callbacks fire, no
+ *     writes happen.
+ *
+ *   waywallen_display_drain(d)   // render thread (or whichever
+ *     thread owns the bound GPU context). Returns the number of
+ *     pending pools destroyed this call. Must be called until it
+ *     returns 0 (typically once after close, but pools that built
+ *     up over the session may need a second pass).
+ *
+ *   waywallen_display_free(d)    // any thread
+ *     Frees the struct. ABORTs if pending pools still exist (host
+ *     skipped drain); the abort is intentional — leaking a VkImage
+ *     that nobody will ever destroy silently corrupts GPU memory
+ *     tracking, so we'd rather crash loudly.
+ */
+void                 waywallen_display_close(waywallen_display_t *d);
+int                  waywallen_display_drain(waywallen_display_t *d);
+void                 waywallen_display_free(waywallen_display_t *d);
+
+/*
+ * Convenience: same-thread shutdown. Equivalent to
+ *   close(d); while (drain(d) > 0) {} free(d);
+ *
+ * MUST be called from the thread on which the bound GPU context is
+ * current. Aborts if drain doesn't complete in 4 iterations
+ * (catastrophic GPU state — caller has bigger problems than a leak).
+ */
+void                 waywallen_display_shutdown(waywallen_display_t *d);
 
 /* -------------------------------------------------------------------------
  * Backend binding (must be called before `connect`)
@@ -323,19 +364,10 @@ int waywallen_display_set_drm_render_node(waywallen_display_t *d,
  * into per-display settings. Pass NULL or "" if the host has no stable
  * id; the daemon will fall back to indexing settings by display_name.
  */
-int waywallen_display_begin_connect_v2(waywallen_display_t *d,
-                                       const char *socket_path,
-                                       const char *display_name,
-                                       const char *instance_id,
-                                       uint32_t width,
-                                       uint32_t height,
-                                       uint32_t refresh_mhz);
-
-/* Legacy entry point — equivalent to `_v2` with instance_id=NULL. */
-__attribute__((deprecated("use waywallen_display_begin_connect_v2")))
 int waywallen_display_begin_connect(waywallen_display_t *d,
                                     const char *socket_path,
                                     const char *display_name,
+                                    const char *instance_id,
                                     uint32_t width,
                                     uint32_t height,
                                     uint32_t refresh_mhz);
@@ -355,21 +387,12 @@ waywallen_handshake_state_t waywallen_display_handshake_state(waywallen_display_
  * NEVER call from a thread that runs an event loop — use the async
  * primitives above instead.
  *
- * See `_begin_connect_v2` for the meaning of `instance_id`.
+ * See `begin_connect` for the meaning of `instance_id`.
  */
-int waywallen_display_connect_v2(waywallen_display_t *d,
-                                 const char *socket_path,
-                                 const char *display_name,
-                                 const char *instance_id,
-                                 uint32_t width,
-                                 uint32_t height,
-                                 uint32_t refresh_mhz);
-
-/* Legacy entry point — equivalent to `_v2` with instance_id=NULL. */
-__attribute__((deprecated("use waywallen_display_connect_v2")))
 int waywallen_display_connect(waywallen_display_t *d,
                               const char *socket_path,
                               const char *display_name,
+                              const char *instance_id,
                               uint32_t width,
                               uint32_t height,
                               uint32_t refresh_mhz);
@@ -385,6 +408,24 @@ int waywallen_display_update_size(waywallen_display_t *d,
 int waywallen_display_get_fd(waywallen_display_t *d);
 
 /*
+ * Outbox protocol — drives non-blocking POLLOUT for post-handshake
+ * sends (update_size, pointer events, unbind_done, bye). The library
+ * queues each outgoing request into an internal buffer and tries an
+ * immediate non-blocking flush; whatever doesn't fit in the kernel
+ * buffer stays queued. The host arms POLLOUT iff `wants_writable`
+ * returns true and calls `handle_writable` when the fd becomes
+ * writable. During the handshake the lib's own state machine owns
+ * POLLOUT (advance_handshake's NEED_WRITE return); `wants_writable`
+ * returns false in that window so hosts don't double-arm.
+ *
+ * On fatal IO error during flush the lib transitions to DEAD and
+ * fires `on_disconnected`; hosts can treat handle_writable's return
+ * the same as dispatch's.
+ */
+bool waywallen_display_wants_writable(waywallen_display_t *d);
+int  waywallen_display_handle_writable(waywallen_display_t *d);
+
+/*
  * Consume whatever bytes are currently readable on the socket,
  * decode frames, fire callbacks synchronously. Safe to call from
  * a poll loop. Returns the number of frames dispatched on success
@@ -392,17 +433,6 @@ int waywallen_display_get_fd(waywallen_display_t *d);
  * failure `on_disconnected` has already been invoked.
  */
 int waywallen_display_dispatch(waywallen_display_t *d);
-
-/*
- * DEPRECATED — v1 dropped the BufferRelease wire request. Release is
- * now signaled by the host flipping the `release_syncobj_fd` that
- * arrived on the matching frame_ready. This function is a no-op kept
- * for ABI compatibility during the transition; new hosts should not
- * call it.
- */
-int waywallen_display_release_frame(waywallen_display_t *d,
-                                    uint32_t buffer_index,
-                                    uint64_t seq);
 
 /*
  * Convenience: SIGNAL the binary drm_syncobj at `fd` and close it.
@@ -424,8 +454,6 @@ int waywallen_display_release_frame(waywallen_display_t *d,
  * been closed.
  */
 int waywallen_display_signal_release_syncobj(int fd);
-
-void waywallen_display_disconnect(waywallen_display_t *d);
 
 /* -------------------------------------------------------------------------
  * Pointer event forwarding
