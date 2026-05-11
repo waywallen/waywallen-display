@@ -203,7 +203,15 @@ extern "C" {
     pub fn waywallen_display_new(
         cb: *const waywallen_display_callbacks_t,
     ) -> *mut waywallen_display_t;
-    pub fn waywallen_display_destroy(d: *mut waywallen_display_t);
+
+    /// Async tear-down primitives. `close` is any-thread, `drain` is
+    /// the render-thread step that destroys backend resources queued
+    /// by callbacks, `free` releases the handle. `shutdown` is the
+    /// same-thread convenience that does close + drain + free.
+    pub fn waywallen_display_close(d: *mut waywallen_display_t);
+    pub fn waywallen_display_drain(d: *mut waywallen_display_t) -> c_int;
+    pub fn waywallen_display_free(d: *mut waywallen_display_t);
+    pub fn waywallen_display_shutdown(d: *mut waywallen_display_t);
 
     pub fn waywallen_display_bind_egl(
         d: *mut waywallen_display_t,
@@ -220,21 +228,11 @@ extern "C" {
         minor: u32,
     ) -> c_int;
 
-    pub fn waywallen_display_begin_connect_v2(
-        d: *mut waywallen_display_t,
-        socket_path: *const c_char,
-        display_name: *const c_char,
-        instance_id: *const c_char,
-        width: u32,
-        height: u32,
-        refresh_mhz: u32,
-    ) -> c_int;
-
-    #[deprecated(note = "use waywallen_display_begin_connect_v2")]
     pub fn waywallen_display_begin_connect(
         d: *mut waywallen_display_t,
         socket_path: *const c_char,
         display_name: *const c_char,
+        instance_id: *const c_char,
         width: u32,
         height: u32,
         refresh_mhz: u32,
@@ -246,21 +244,11 @@ extern "C" {
         d: *mut waywallen_display_t,
     ) -> waywallen_handshake_state_t;
 
-    pub fn waywallen_display_connect_v2(
-        d: *mut waywallen_display_t,
-        socket_path: *const c_char,
-        display_name: *const c_char,
-        instance_id: *const c_char,
-        width: u32,
-        height: u32,
-        refresh_mhz: u32,
-    ) -> c_int;
-
-    #[deprecated(note = "use waywallen_display_connect_v2")]
     pub fn waywallen_display_connect(
         d: *mut waywallen_display_t,
         socket_path: *const c_char,
         display_name: *const c_char,
+        instance_id: *const c_char,
         width: u32,
         height: u32,
         refresh_mhz: u32,
@@ -282,8 +270,6 @@ extern "C" {
     ) -> c_int;
 
     pub fn waywallen_display_signal_release_syncobj(fd: c_int) -> c_int;
-
-    pub fn waywallen_display_disconnect(d: *mut waywallen_display_t);
 
     pub fn waywallen_display_conn_state(d: *mut waywallen_display_t) -> waywallen_conn_state_t;
     pub fn waywallen_display_stream_state(d: *mut waywallen_display_t) -> waywallen_stream_state_t;
