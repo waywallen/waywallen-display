@@ -190,6 +190,10 @@ private:
      * shadow if dims changed. Render thread only. Returns true if
      * shadow now has valid content. */
     bool blitEglShadow(int slot);
+    /* Render-thread job: drains m_pendingEgl, ensures GL textures,
+     * runs blitEglShadow. Scheduled from c_on_frame_ready via
+     * scheduleRenderJob(BeforeSynchronizingStage). */
+    void renderThreadBlitEgl();
     /* Tear down shadow tex/FBOs. Render thread only. */
     void destroyEglShadow();
 

@@ -213,14 +213,23 @@ void WaywallenDisplay::c_on_frame_ready(void *ud,
             self->m_pendingEglReleaseSyncobjFd = -1;
         }
         self->m_pendingEglReleaseSyncobjFd = f->release_syncobj_fd;
-        // Arrival-driven blit: queue the slot; updatePaintNode (render
-        // thread) consumes via m_pendingEgl. Mirrors PendingVkFrame so
-        // the same slot doesn't get re-blitted on paints unrelated to a
-        // new frame_ready.
+        // Arrival-driven blit: queue the slot and dispatch a render-thread
+        // job that does the GPU copy. BeforeSynchronizingStage runs on
+        // the render thread immediately before sync (so before our
+        // updatePaintNode), guaranteeing the shadow is fresh by the time
+        // Qt samples it. NoStage would race with sync. Same slot doesn't
+        // get re-blitted because renderThreadBlitEgl dedupes against
+        // m_eglShadowSlot.
         {
             QMutexLocker lk(&self->m_pendingMutex);
             self->m_pendingEgl.valid = true;
             self->m_pendingEgl.slot = static_cast<int>(f->buffer_index);
+        }
+        if (auto *w = self->window()) {
+            auto *self_p = self;
+            w->scheduleRenderJob(new FnRunnable([self_p]() {
+                self_p->renderThreadBlitEgl();
+            }), QQuickWindow::BeforeSynchronizingStage);
         }
     } else if (f->release_syncobj_fd >= 0) {
         // No active backend yet (textures haven't arrived). Signal +
@@ -1175,6 +1184,30 @@ bool WaywallenDisplay::blitEglShadow(int slot) {
     return true;
 }
 
+// Drains m_pendingEgl and runs blitEglShadow. Scheduled by
+// c_on_frame_ready via scheduleRenderJob(BeforeSynchronizingStage),
+// so the imported buffer gets copied to the shadow exactly once per
+// frame_ready arrival — Qt repaints driven by other dirty sources
+// don't trigger a redundant blit.
+void WaywallenDisplay::renderThreadBlitEgl() {
+    int slot;
+    {
+        QMutexLocker lk(&m_pendingMutex);
+        if (!m_pendingEgl.valid) return;
+        slot = m_pendingEgl.slot;
+        m_pendingEgl.valid = false;
+    }
+    if (slot == m_eglShadowSlot) return;
+    if (m_activeBackend != BackendEGL || !m_eglImagesValid) return;
+    // EGLImage → GL texture binding is render-thread work; safe here.
+    if (!m_glTexturesCreated) ensureGlTextures();
+    if (!m_glTexturesCreated) return;
+    if (slot < 0 || slot >= m_glTextures.size()) return;
+    if (m_texWidth <= 0 || m_texHeight <= 0) return;
+    if (blitEglShadow(slot)) {
+        m_eglShadowSlot = slot;
+    }
+}
 
 void WaywallenDisplay::destroyEglShadow() {
     auto *ctx = QOpenGLContext::currentContext();
@@ -1242,33 +1275,13 @@ QSGNode *WaywallenDisplay::updatePaintNode(QSGNode *oldNode,
     }
 #endif
 
-    // EGL path: lazy GL texture creation + arrival-driven shadow blit.
-    // The blit consumes m_pendingEgl (set by c_on_frame_ready) so the
-    // same slot doesn't get re-blitted on paints not driven by a new
-    // frame. Mirrors the PendingVkFrame consume in the Vulkan section
-    // below. The shadow is what Qt samples — same continuity invariant
-    // the Vulkan path provides via ww_vk_blitter_shadow.
-    if (m_activeBackend == BackendEGL && m_eglImagesValid
-        && !m_glTexturesCreated) {
-        ensureGlTextures();
-    }
-    if (m_activeBackend == BackendEGL && m_glTexturesCreated
-        && m_texWidth > 0 && m_texHeight > 0) {
-        int blitSlot = -1;
-        {
-            QMutexLocker lk(&m_pendingMutex);
-            if (m_pendingEgl.valid) {
-                blitSlot = m_pendingEgl.slot;
-                m_pendingEgl.valid = false;
-            }
-        }
-        if (blitSlot >= 0 && blitSlot < m_glTextures.size()
-            && blitSlot != m_eglShadowSlot) {
-            if (blitEglShadow(blitSlot)) {
-                m_eglShadowSlot = blitSlot;
-            }
-        }
-    }
+    // EGL blit moved to renderThreadBlitEgl, scheduled by
+    // c_on_frame_ready via scheduleRenderJob(BeforeSynchronizingStage).
+    // It runs on the render thread before this sync, so by the time
+    // we get here m_eglShadowHasContent / m_eglShadowSlot reflect the
+    // latest BindBuffers slot. Continuity invariant on rebind matches
+    // the Vulkan ww_vk_blitter_shadow design: shadow stays untouched
+    // until the next pool's first blit lands.
 
 #ifdef WW_HAVE_VULKAN
     // Vulkan path: lazy-init blitter and blit any pending frame into
@@ -1444,6 +1457,22 @@ QSGNode *WaywallenDisplay::updatePaintNode(QSGNode *oldNode,
                              m_destRect.height() * sy));
     } else {
         node->setRect(bounds);
+    }
+
+    // EGL: force a vertex re-upload. We hand setTexture a fresh
+    // QSGOpenGLTexture wrapper each paint; setTexture rewrites the
+    // node's vertex data via qsgsimpletexturenode_update but only
+    // marks DirtyMaterial (DirtyGeometry is gated on atlas-state
+    // toggle, see qtdeclarative qsgsimpletexturenode.cpp:198). With
+    // sourceRect/rect unchanged across paints, setSourceRect /
+    // setRect early-return and don't supply the missing mark either.
+    // Net effect: the batch renderer keeps the previous frame's GPU
+    // vertex buffer, sampling lands on stale UVs and the image looks
+    // shifted with edge-color leaking on the opposite side. The
+    // Vulkan path's wrapper goes through a different RHI route that
+    // isn't affected.
+    if (m_activeBackend == BackendEGL) {
+        node->markDirty(QSGNode::DirtyGeometry);
     }
     return node;
 }
