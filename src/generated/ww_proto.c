@@ -63,6 +63,7 @@ int ww_buf_reserve(ww_buf_t *b, size_t additional) {
 static int w_bytes(ww_buf_t *b, const void *src, size_t n) {
     int rc = ww_buf_reserve(b, n);
     if (rc) return rc;
+    if (b->len + n > b->cap) return WW_ERR_OVERFLOW;
     memcpy(b->data + b->len, src, n);
     b->len += n;
     return WW_OK;
@@ -274,6 +275,7 @@ static int rd_string(ww_rd_t *r, char **out) {
     if (rc) return rc;
     if (len == 0) return WW_ERR_BAD_STRING;  /* includes NUL */
     size_t padded = ((size_t)len + 3u) & ~(size_t)3u;
+    if (padded < (size_t)len) return WW_ERR_OVERFLOW;
     rc = rd_need(r, padded);
     if (rc) return rc;
     if (r->buf[r->pos + len - 1] != 0) return WW_ERR_BAD_STRING;
