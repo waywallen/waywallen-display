@@ -12,8 +12,10 @@
 #include <QRunnable>
 #include <QOpenGLContext>
 #include <QOpenGLExtraFunctions>
+#include <QMatrix4x4>
 #include <QSGRendererInterface>
 #include <QSGSimpleTextureNode>
+#include <QSGTransformNode>
 #include <QWheelEvent>
 #include <QtGui/qopenglcontext_platform.h>
 #include <QtQuick/qsgtexture_platform.h>
@@ -165,10 +167,11 @@ void WaywallenDisplay::c_on_config(void *ud, const waywallen_config_t *c) {
         static_cast<qreal>(c->clear_color[1]),
         static_cast<qreal>(c->clear_color[2]),
         static_cast<qreal>(c->clear_color[3]));
+    self->m_transform = c->transform;
     emit self->clearColorChanged();
-    // Schedule a repaint so a fillmode/align change applied while no
-    // new frame is in flight still becomes visible — updatePaintNode
-    // re-reads m_sourceRect/m_destRect.
+    // Schedule a repaint so a fillmode/align/rotation change applied
+    // while no new frame is in flight still becomes visible —
+    // updatePaintNode re-reads m_sourceRect/m_destRect/m_transform.
     self->update();
 }
 
@@ -1399,11 +1402,26 @@ QSGNode *WaywallenDisplay::updatePaintNode(QSGNode *oldNode,
         return nullptr;
     }
 
-    auto *node = static_cast<QSGSimpleTextureNode *>(oldNode);
-    if (!node) {
+    // The root paint node is a QSGTransformNode wrapping the actual
+    // texture node. The transform applies per-display rotation from
+    // c_on_config (`m_transform`, wl_output-style 0..3). For 0° the
+    // matrix is identity and we behave exactly like the pre-rotation
+    // path; for 90°/270° the daemon has already swapped W/H into
+    // m_destRect so the math is just rotate-around-display-center.
+    QSGTransformNode *xformNode = nullptr;
+    QSGSimpleTextureNode *node = nullptr;
+    if (oldNode && oldNode->type() == QSGNode::TransformNodeType) {
+        xformNode = static_cast<QSGTransformNode *>(oldNode);
+        node = static_cast<QSGSimpleTextureNode *>(xformNode->firstChild());
+    } else {
+        // Different tree (e.g. first paint after a plugin upgrade that
+        // changed the root node type) — drop and rebuild.
+        delete oldNode;
+        xformNode = new QSGTransformNode();
         node = new QSGSimpleTextureNode();
         node->setFiltering(QSGTexture::Linear);
         node->setOwnsTexture(true);
+        xformNode->appendChildNode(node);
     }
 
     QSize texSize(m_eglShadowW > 0 ? m_eglShadowW : m_texWidth,
@@ -1430,7 +1448,7 @@ QSGNode *WaywallenDisplay::updatePaintNode(QSGNode *oldNode,
     if (sgTex) {
         node->setTexture(sgTex);
     } else {
-        delete node;
+        delete xformNode;
         return nullptr;
     }
 
@@ -1459,6 +1477,29 @@ QSGNode *WaywallenDisplay::updatePaintNode(QSGNode *oldNode,
         node->setRect(bounds);
     }
 
+    // Build the rotation matrix: rotate the pre-rotation dest rect
+    // (sized boundsH × boundsW for 90°/270°, boundsW × boundsH for
+    // 0°/180°) around the post-rotation display center so it lands
+    // back inside the item's bounds. Qt's QMatrix4x4 rotation around
+    // +Z is visually CW in screen coords (Y points down), which is
+    // exactly how `Rotation::Cw*` is meant to be displayed.
+    QMatrix4x4 mat;
+    if (m_transform != 0) {
+        const qreal w = bounds.width();
+        const qreal h = bounds.height();
+        const bool swap_dims = (m_transform == 1 || m_transform == 3);
+        const qreal pre_w = swap_dims ? h : w;
+        const qreal pre_h = swap_dims ? w : h;
+        const float angle = static_cast<float>(m_transform * 90u);
+        mat.translate(static_cast<float>(w / 2.0), static_cast<float>(h / 2.0));
+        mat.rotate(angle, 0.0f, 0.0f, 1.0f);
+        mat.translate(static_cast<float>(-pre_w / 2.0), static_cast<float>(-pre_h / 2.0));
+    }
+    if (xformNode->matrix() != mat) {
+        xformNode->setMatrix(mat);
+        xformNode->markDirty(QSGNode::DirtyMatrix);
+    }
+
     // EGL: force a vertex re-upload. We hand setTexture a fresh
     // QSGOpenGLTexture wrapper each paint; setTexture rewrites the
     // node's vertex data via qsgsimpletexturenode_update but only
@@ -1474,5 +1515,5 @@ QSGNode *WaywallenDisplay::updatePaintNode(QSGNode *oldNode,
     if (m_activeBackend == BackendEGL) {
         node->markDirty(QSGNode::DirtyGeometry);
     }
-    return node;
+    return xformNode;
 }

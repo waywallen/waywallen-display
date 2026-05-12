@@ -319,6 +319,13 @@ private:
     // Config from on_config.
     QRectF m_sourceRect;
     QRectF m_destRect;
+    // wl_output-style transform from the daemon: 0=normal, 1=90°CCW,
+    // 2=180°, 3=270°CCW. The daemon's per-display Rotation enum only
+    // emits 0..3 (no flipped variants). Used in updatePaintNode to
+    // build the QSGTransformNode that rotates the texture into the
+    // post-rotation display rect; m_destRect is in *pre-rotation*
+    // display coords so the math is just rotate-around-display-center.
+    uint32_t m_transform { 0 };
 
     // EGL path: per-frame release_syncobj fd handed to us via
     // on_frame_ready. We signal it on the *next* frame_ready (in
