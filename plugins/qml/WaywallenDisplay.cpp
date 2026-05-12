@@ -116,6 +116,13 @@ void WaywallenDisplay::c_on_textures_releasing(void *ud,
     self->m_eglImagesValid = false;
     self->m_glTexturesCreated = false;
     self->m_glTextures.clear();
+    // Drop any unblitted EGL frame queued by c_on_frame_ready before
+    // the render thread got to it — m_glTextures is gone now.
+    {
+        QMutexLocker lk(&self->m_pendingMutex);
+        self->m_pendingEgl = PendingEglFrame{};
+    }
+    self->m_eglShadowSlot = -1;
     self->m_vkImagesValid = false;
     self->m_vkImages.clear();
     self->m_currentSlot = -1;
@@ -206,6 +213,15 @@ void WaywallenDisplay::c_on_frame_ready(void *ud,
             self->m_pendingEglReleaseSyncobjFd = -1;
         }
         self->m_pendingEglReleaseSyncobjFd = f->release_syncobj_fd;
+        // Arrival-driven blit: queue the slot; updatePaintNode (render
+        // thread) consumes via m_pendingEgl. Mirrors PendingVkFrame so
+        // the same slot doesn't get re-blitted on paints unrelated to a
+        // new frame_ready.
+        {
+            QMutexLocker lk(&self->m_pendingMutex);
+            self->m_pendingEgl.valid = true;
+            self->m_pendingEgl.slot = static_cast<int>(f->buffer_index);
+        }
     } else if (f->release_syncobj_fd >= 0) {
         // No active backend yet (textures haven't arrived). Signal +
         // close so the daemon reaper closes the bucket immediately
@@ -1094,6 +1110,14 @@ bool WaywallenDisplay::blitEglShadow(int slot) {
     gl->glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevDraw);
     gl->glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prevRead);
 
+    /* glBlitFramebuffer obeys the draw FBO's scissor test. Qt's QSG
+     * renderer leaves SCISSOR_TEST enabled with a clip rect bound to
+     * whatever item it was last drawing; without disabling it here the
+     * blit only fills that sub-rect of the shadow and the rest stays
+     * at the glTexImage2D(NULL) initial zeros (black). */
+    GLboolean prevScissor = gl->glIsEnabled(GL_SCISSOR_TEST);
+    if (prevScissor) gl->glDisable(GL_SCISSOR_TEST);
+
     /* Lazy-allocate / resize the shadow texture. RGBA8 storage —
      * matches the 8 fourccs in src/drm_fourcc_internal.h. */
     if (m_eglShadowTex == 0) {
@@ -1145,10 +1169,12 @@ bool WaywallenDisplay::blitEglShadow(int slot) {
 
     gl->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, prevDraw);
     gl->glBindFramebuffer(GL_READ_FRAMEBUFFER, prevRead);
+    if (prevScissor) gl->glEnable(GL_SCISSOR_TEST);
 
     m_eglShadowHasContent = true;
     return true;
 }
+
 
 void WaywallenDisplay::destroyEglShadow() {
     auto *ctx = QOpenGLContext::currentContext();
@@ -1216,21 +1242,32 @@ QSGNode *WaywallenDisplay::updatePaintNode(QSGNode *oldNode,
     }
 #endif
 
-    // EGL path: create GL textures lazily on the render thread, then
-    // blit the current frame into a host-owned shadow texture. The
-    // shadow is what Qt samples — same continuity invariant the Vulkan
-    // path provides via ww_vk_blitter_shadow: on `unbind` the lib's
-    // imported textures get queued for destruction, but the shadow
-    // stays untouched, so the prior frame remains on screen until the
-    // next pool's first frame arrives.
+    // EGL path: lazy GL texture creation + arrival-driven shadow blit.
+    // The blit consumes m_pendingEgl (set by c_on_frame_ready) so the
+    // same slot doesn't get re-blitted on paints not driven by a new
+    // frame. Mirrors the PendingVkFrame consume in the Vulkan section
+    // below. The shadow is what Qt samples — same continuity invariant
+    // the Vulkan path provides via ww_vk_blitter_shadow.
     if (m_activeBackend == BackendEGL && m_eglImagesValid
         && !m_glTexturesCreated) {
         ensureGlTextures();
     }
     if (m_activeBackend == BackendEGL && m_glTexturesCreated
-        && m_currentSlot >= 0 && m_currentSlot < m_glTextures.size()
         && m_texWidth > 0 && m_texHeight > 0) {
-        (void)blitEglShadow(m_currentSlot);
+        int blitSlot = -1;
+        {
+            QMutexLocker lk(&m_pendingMutex);
+            if (m_pendingEgl.valid) {
+                blitSlot = m_pendingEgl.slot;
+                m_pendingEgl.valid = false;
+            }
+        }
+        if (blitSlot >= 0 && blitSlot < m_glTextures.size()
+            && blitSlot != m_eglShadowSlot) {
+            if (blitEglShadow(blitSlot)) {
+                m_eglShadowSlot = blitSlot;
+            }
+        }
     }
 
 #ifdef WW_HAVE_VULKAN

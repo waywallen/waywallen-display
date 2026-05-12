@@ -187,8 +187,8 @@ private:
     bool bindVulkanBackend();
     void ensureGlTextures();
     /* Blit imported GL texture at `slot` into m_eglShadowTex; resize
-     * shadow if dims changed. Called once per updatePaintNode on the
-     * EGL path. Returns true if shadow now has valid content. */
+     * shadow if dims changed. Render thread only. Returns true if
+     * shadow now has valid content. */
     bool blitEglShadow(int slot);
     /* Tear down shadow tex/FBOs. Render thread only. */
     void destroyEglShadow();
@@ -260,6 +260,24 @@ private:
     int  m_eglShadowW   { 0 };
     int  m_eglShadowH   { 0 };
     bool m_eglShadowHasContent { false };
+    // Slot currently held in m_eglShadowTex. -1 = shadow stale / empty.
+    // Lets renderThreadBlitEgl skip a redundant blit when a job fires
+    // for a slot we've already copied (e.g. coalesced burst of paints).
+    int  m_eglShadowSlot { -1 };
+
+    // Most-recent unblitted EGL frame, populated on the GUI thread by
+    // c_on_frame_ready and consumed on the render thread by
+    // renderThreadBlitEgl. Mirrors PendingVkFrame but EGL has no
+    // acquire semaphore (GL is queue-ordered, no cross-process sync
+    // needed). Mutex-protected by m_pendingMutex.
+    struct PendingEglFrame {
+        bool valid { false };
+        int slot { -1 };
+    };
+    PendingEglFrame m_pendingEgl;
+
+    // Shared between EGL m_pendingEgl and Vulkan m_pendingVk.
+    QMutex m_pendingMutex;
 
     // Vulkan texture state.
     bool m_vkImagesValid { false };
@@ -291,7 +309,6 @@ private:
         void *acquireSem { nullptr }; // VkSemaphore (lib-imported sync_fd)
         int releaseSyncobjFd { -1 };
     };
-    QMutex m_pendingMutex;
     PendingVkFrame m_pendingVk;
 #endif
 
