@@ -105,17 +105,22 @@ class MonitorRenderer {
             resizable: false,
         });
 
+        const geom = this._monitor.get_geometry();
         // Title hint consumed by windowManager.js: keepMinimized keeps the
         // actor off the stage (so it doesn't cover the panel) while the
-        // wl_surface stays live for Clutter.Clone to mirror.
+        // wl_surface stays live for Clutter.Clone to mirror. position MUST
+        // be this monitor's origin — windowManager pins the window there via
+        // move_frame; without it every monitor's window collapses onto (0,0)
+        // (the primary), get_monitor() is no longer unique, and the
+        // extension's per-monitor matching rejects all of them.
         const titleHint = JSON.stringify({
             keepMinimized: true,
             keepAtBottom: true,
             keepPosition: true,
+            position: [geom.x, geom.y],
         });
         this._window.set_title(`@${APP_ID}!${titleHint}|${this._index}`);
 
-        const geom = this._monitor.get_geometry();
         // Pin the size: a minimized Wayland window gets no configure with a
         // real allocation, so without an explicit request Gtk.Picture
         // measures height as Infinity and gsk commits a degenerate buffer.
@@ -174,22 +179,36 @@ class MonitorRenderer {
         d.connect('textures-ready',
             (_o, count, w, h, fourcc, modifier, backend) =>
                 this._onTexturesReady(count, w, h, fourcc, modifier, backend));
+        // Register physical pixels (logical geometry × monitor scale), so
+        // the daemon's producer renders at the monitor's native resolution.
+        // get_geometry() is logical (1920x1080 for a 4K monitor at 200%);
+        // registering that would make the wallpaper half-resolution.
+        const geom = this._monitor.get_geometry();
+        const scale = this._monitor.get_scale?.() ?? this._monitor.get_scale_factor();
+        this._scale = scale;
+        const pw = Math.round(geom.width * scale);
+        const ph = Math.round(geom.height * scale);
+
         d.connect('textures-releasing', () => this._onTexturesReleasing());
         d.connect('config',
             (_o, sx, sy, sw, sh, dx, dy, dw, dh, transform, cr, cg, cb, ca) =>
-                this._paintable?.set_config(sx, sy, sw, sh, dx, dy, dw, dh,
+                // dest is in physical display px; divide by scale so the
+                // paintable gets widget-logical coords. source stays in
+                // texture px.
+                this._paintable?.set_config(sx, sy, sw, sh,
+                                            dx / scale, dy / scale,
+                                            dw / scale, dh / scale,
                                             transform, cr, cg, cb, ca));
         d.connect('frame-ready',
             (_o, idx, seq, fd) => this._onFrameReady(idx, seq, fd));
         d.connect('disconnected',
             (_o, code, msg) => this._onDisconnected(code, msg));
 
-        const geom = this._monitor.get_geometry();
         const refreshMhz = this._monitor.get_refresh_rate() || 60000;
         if (!d.begin_connect(this._opts.socketPath,
                              this._displayName,
                              this._instanceId,
-                             geom.width, geom.height, refreshMhz))
+                             pw, ph, refreshMhz))
             throw new Error('begin_connect failed');
 
         const fd = d.get_fd();
@@ -271,16 +290,22 @@ class MonitorRenderer {
         return this._monitor.get_geometry();
     }
 
+    // x,y arrive in logical monitor-local pixels; the daemon registered
+    // physical pixels, so scale up by the monitor scale (else the pointer
+    // is confined to the top-left 1/scale of a HiDPI display).
     sendPointerMotion(x, y, ts) {
-        this._display?.send_pointer_motion(x, y, ts, 0);
+        const s = this._scale || 1;
+        this._display?.send_pointer_motion(x * s, y * s, ts, 0);
     }
 
     sendPointerButton(x, y, code, pressed, ts) {
-        this._display?.send_pointer_button(x, y, code, pressed, ts, 0);
+        const s = this._scale || 1;
+        this._display?.send_pointer_button(x * s, y * s, code, pressed, ts, 0);
     }
 
     sendPointerAxis(x, y, dx, dy, ts) {
-        this._display?.send_pointer_axis(x, y, dx, dy, ts, 0);
+        const s = this._scale || 1;
+        this._display?.send_pointer_axis(x * s, y * s, dx, dy, ts, 0);
     }
 
     _onDisconnected(code, msg) {

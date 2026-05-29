@@ -176,10 +176,12 @@ snapshot_vfunc(GdkPaintable *paintable,
         return;
     }
 
-    /* dst is in pre-rotation display space; for 90/270 that space has
-     * swapped W/H. Rotate the canvas about the widget centre so the
-     * pre-rotation drawing lands on the physical display, then draw
-     * src→dst on top of the clear base. */
+    /* src is in texture pixels; dst is in widget (logical) pixels — the
+     * renderer already divided the daemon's physical dest_rect by the
+     * monitor scale before set_config, so dst is directly in the widget
+     * coordinate space. GTK's buffer scale then renders 1:1 at native
+     * resolution. dst is pre-rotation display space; for 90/270 that
+     * space has swapped W/H. */
     int t = (int)self->transform;
     gboolean swap = (t == 1 || t == 3 || t == 5 || t == 7);
     float preW = swap ? (float)height : (float)width;
