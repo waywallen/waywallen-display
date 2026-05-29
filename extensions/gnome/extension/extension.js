@@ -16,6 +16,7 @@ import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import {GnomeShellOverride} from './gnomeShellOverride.js';
 import {LaunchSubprocess} from './launcher.js';
 import {WindowManager} from './windowManager.js';
+import {PointerForwarder} from './pointerForwarder.js';
 
 const DAEMON_BUS_NAME  = 'org.waywallen.waywallen.Daemon';
 const DAEMON_OBJ_PATH  = '/org/waywallen/waywallen/Daemon';
@@ -79,6 +80,8 @@ export default class WaywallenExtension extends Extension {
         this._override.enable();
         this._windowMgr = new WindowManager();
         this._windowMgr.enable();
+        this._pointer = new PointerForwarder();
+        this._pointer.enable();
         this._watchDaemon();
     }
 
@@ -151,6 +154,7 @@ export default class WaywallenExtension extends Extension {
 
         this._currentProc.spawnv(argv);
         this._windowMgr?.setLauncher(this._currentProc);
+        this._pointer?.setLauncher(this._currentProc);
 
         const proc = this._currentProc;
         proc.subprocess?.wait_async(null, (subprocess, res) => {
@@ -215,6 +219,10 @@ export default class WaywallenExtension extends Extension {
         if (this._windowMgr) {
             this._windowMgr.disable();
             this._windowMgr = null;
+        }
+        if (this._pointer) {
+            this._pointer.disable();
+            this._pointer = null;
         }
         this._settings = null;
     }

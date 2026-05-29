@@ -26,6 +26,14 @@ struct _WwShadowPaintable {
     guint    strides[4];
     guint64  offsets[4];
     gboolean have_shadow;
+
+    /* Layout from WwDisplay::config (set_config). have_config false until
+     * the first config arrives — then snapshot stretches full shadow. */
+    gboolean have_config;
+    float    src[4];          /* x, y, w, h in texture px */
+    float    dst[4];          /* x, y, w, h in pre-rotation display px */
+    guint    transform;       /* wl_output.transform 0-7 */
+    float    clear[4];        /* letterbox RGBA */
 };
 
 static void ww_shadow_paintable_iface_init(GdkPaintableInterface *iface);
@@ -100,6 +108,36 @@ build_texture(WwShadowPaintable *self)
     return tex;
 }
 
+/* Draw source rect of self->tex into dest rect: scale the full texture
+ * so src maps onto dst, clip to dst. */
+static void
+draw_src_to_dst(WwShadowPaintable *self, GtkSnapshot *s,
+                const float src[4], const float dst[4])
+{
+    float sw = src[2] > 0 ? src[2] : (float)self->width;
+    float sh = src[3] > 0 ? src[3] : (float)self->height;
+    float kx = dst[2] / sw;
+    float ky = dst[3] / sh;
+
+    graphene_rect_t clip;
+    graphene_rect_init(&clip, dst[0], dst[1], dst[2], dst[3]);
+    gtk_snapshot_push_clip(s, &clip);
+    gtk_snapshot_save(s);
+
+    graphene_point_t off;
+    graphene_point_init(&off, dst[0] - src[0] * kx, dst[1] - src[1] * ky);
+    gtk_snapshot_translate(s, &off);
+    gtk_snapshot_scale(s, kx, ky);
+
+    graphene_rect_t full;
+    graphene_rect_init(&full, 0.0f, 0.0f,
+                       (float)self->width, (float)self->height);
+    gtk_snapshot_append_texture(s, self->tex, &full);
+
+    gtk_snapshot_restore(s);
+    gtk_snapshot_pop(s);  /* clip */
+}
+
 static void
 snapshot_vfunc(GdkPaintable *paintable,
                GdkSnapshot  *snapshot,
@@ -107,6 +145,7 @@ snapshot_vfunc(GdkPaintable *paintable,
                double        height)
 {
     WwShadowPaintable *self = WW_SHADOW_PAINTABLE(paintable);
+    GtkSnapshot *s = GTK_SNAPSHOT(snapshot);
     if (!self->tex)
         return;
     if (!isfinite(width) || width <= 0.0)
@@ -114,9 +153,46 @@ snapshot_vfunc(GdkPaintable *paintable,
     if (!isfinite(height) || height <= 0.0)
         height = (double)self->height;
 
-    graphene_rect_t rect;
-    graphene_rect_init(&rect, 0.0f, 0.0f, (float)width, (float)height);
-    gtk_snapshot_append_texture(GTK_SNAPSHOT(snapshot), self->tex, &rect);
+    if (!self->have_config) {
+        graphene_rect_t rect;
+        graphene_rect_init(&rect, 0.0f, 0.0f, (float)width, (float)height);
+        gtk_snapshot_append_texture(s, self->tex, &rect);
+        return;
+    }
+
+    /* dst is in pre-rotation display space; for 90/270 that space has
+     * swapped W/H. Rotate the canvas about the widget centre so the
+     * pre-rotation drawing lands on the physical display, then draw
+     * src→dst there. */
+    int t = (int)self->transform;
+    gboolean swap = (t == 1 || t == 3 || t == 5 || t == 7);
+    float preW = swap ? (float)height : (float)width;
+    float preH = swap ? (float)width  : (float)height;
+
+    gtk_snapshot_save(s);
+
+    graphene_point_t c;
+    graphene_point_init(&c, (float)width / 2.0f, (float)height / 2.0f);
+    gtk_snapshot_translate(s, &c);
+    if (t >= 4) {  /* flipped variants: mirror X before rotating */
+        gtk_snapshot_scale(s, -1.0f, 1.0f);
+        gtk_snapshot_rotate(s, (float)((t - 4) * 90));
+    } else if (t != 0) {
+        gtk_snapshot_rotate(s, (float)(t * 90));
+    }
+    graphene_point_init(&c, -preW / 2.0f, -preH / 2.0f);
+    gtk_snapshot_translate(s, &c);
+
+    if (self->clear[3] > 0.0f) {
+        GdkRGBA bg = { self->clear[0], self->clear[1],
+                       self->clear[2], self->clear[3] };
+        graphene_rect_t full;
+        graphene_rect_init(&full, 0.0f, 0.0f, preW, preH);
+        gtk_snapshot_append_color(s, &bg, &full);
+    }
+    draw_src_to_dst(self, s, self->src, self->dst);
+
+    gtk_snapshot_restore(s);
 }
 
 static int
@@ -244,6 +320,25 @@ ww_shadow_paintable_refresh(WwShadowPaintable *self)
         return;
     g_clear_object(&self->tex);
     self->tex = tex;
+    gdk_paintable_invalidate_contents(GDK_PAINTABLE(self));
+}
+
+void
+ww_shadow_paintable_set_config(WwShadowPaintable *self,
+                               double sx, double sy, double sw, double sh,
+                               double dx, double dy, double dw, double dh,
+                               guint transform,
+                               double cr, double cg, double cb, double ca)
+{
+    g_return_if_fail(WW_IS_SHADOW_PAINTABLE(self));
+    self->src[0] = (float)sx; self->src[1] = (float)sy;
+    self->src[2] = (float)sw; self->src[3] = (float)sh;
+    self->dst[0] = (float)dx; self->dst[1] = (float)dy;
+    self->dst[2] = (float)dw; self->dst[3] = (float)dh;
+    self->transform = transform;
+    self->clear[0] = (float)cr; self->clear[1] = (float)cg;
+    self->clear[2] = (float)cb; self->clear[3] = (float)ca;
+    self->have_config = TRUE;
     gdk_paintable_invalidate_contents(GDK_PAINTABLE(self));
 }
 

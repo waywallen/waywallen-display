@@ -16,6 +16,7 @@ export class LaunchSubprocess {
     constructor(flags = Gio.SubprocessFlags.NONE) {
         this._isX11 = !isWaylandSession();
         this._flags = flags
+            | Gio.SubprocessFlags.STDIN_PIPE
             | Gio.SubprocessFlags.STDOUT_PIPE
             | Gio.SubprocessFlags.STDERR_MERGE;
         this.cancellable = new Gio.Cancellable();
@@ -48,15 +49,28 @@ export class LaunchSubprocess {
         if (this.subprocess) {
             this._stdoutStream = Gio.DataInputStream.new(
                 this.subprocess.get_stdout_pipe());
+            this._stdinStream = this.subprocess.get_stdin_pipe();
             this._readOutput();
             this.subprocess.wait_async(this.cancellable, () => {
                 this.running = false;
                 this._stdoutStream = null;
+                this._stdinStream = null;
                 this.cancellable = null;
             });
             this.running = true;
         }
         return this.subprocess;
+    }
+
+    // Write one line to the renderer's stdin (pointer events). Best-effort:
+    // drops silently if the pipe is gone or busy.
+    writeStdin(line) {
+        if (!this._stdinStream)
+            return;
+        try {
+            this._stdinStream.write_bytes(
+                new GLib.Bytes(new TextEncoder().encode(line)), null);
+        } catch (_e) { /* pipe full or closed; pointer events are droppable */ }
     }
 
     set_cwd(cwd) {

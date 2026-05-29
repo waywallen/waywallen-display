@@ -400,6 +400,38 @@ ww_display_close_fd(gint fd)
         close(fd);
 }
 
+void
+ww_display_send_pointer_motion(WwDisplay *self, gdouble x, gdouble y,
+                               guint64 timestamp_us, guint modifiers)
+{
+    if (!self->handle) return;
+    (void)waywallen_display_send_pointer_motion(self->handle, (float)x, (float)y,
+                                                timestamp_us, modifiers);
+}
+
+void
+ww_display_send_pointer_button(WwDisplay *self, gdouble x, gdouble y,
+                               guint button, gboolean pressed,
+                               guint64 timestamp_us, guint modifiers)
+{
+    if (!self->handle) return;
+    (void)waywallen_display_send_pointer_button(
+        self->handle, (float)x, (float)y, button,
+        pressed ? WAYWALLEN_BUTTON_PRESSED : WAYWALLEN_BUTTON_RELEASED,
+        timestamp_us, modifiers);
+}
+
+void
+ww_display_send_pointer_axis(WwDisplay *self, gdouble x, gdouble y,
+                             gdouble dx, gdouble dy,
+                             guint64 timestamp_us, guint modifiers)
+{
+    if (!self->handle) return;
+    (void)waywallen_display_send_pointer_axis(
+        self->handle, (float)x, (float)y, (float)dx, (float)dy,
+        WAYWALLEN_AXIS_WHEEL, timestamp_us, modifiers);
+}
+
 /* gdk_dmabuf_texture_builder_build has a broken GIR annotation
  * (DestroyNotify with no associated callback), so GJS refuses to
  * call it. Resolve the symbol via RTLD_DEFAULT — gtk-4 is already

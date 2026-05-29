@@ -58,18 +58,12 @@ class LiveWallpaper extends St.Widget {
                 duration: FADE_IN_MS,
                 mode: Clutter.AnimationMode.EASE_OUT_QUAD,
             });
-            // The Background actor we're parented under is treated as a
-            // static layer by gnome-shell — it only redraws on wallpaper
-            // changes, NOT when our source MetaWindowActor commits new
-            // wl_buffers. Without this timer the wallpaper freezes on
-            // the first frame even though the source is updating at
-            // 30/60 Hz.
-            this._redrawTimerId = GLib.timeout_add(
-                GLib.PRIORITY_DEFAULT, 16, () => {
-                    if (this._cloneActor)
-                        this._cloneActor.queue_redraw();
-                    return GLib.SOURCE_CONTINUE;
-                });
+            // No redraw timer: Clutter.Clone tracks the source actor's
+            // queue-redraw, which fires when the renderer commits a new
+            // wl_buffer. So the clone repaints exactly when there's new
+            // content — a 1 fps wallpaper costs 1 repaint/s, a 60 fps one
+            // costs 60. (An earlier 16 fps poll was a workaround for the
+            // then-broken DMA-BUF sync that froze the source.)
             return;
         }
         this._schedulePoll();
@@ -89,10 +83,6 @@ class LiveWallpaper extends St.Widget {
     _onSourceDestroyed() {
         this._sourceDestroyId = 0;
         this._sourceActor = null;
-        if (this._redrawTimerId) {
-            GLib.source_remove(this._redrawTimerId);
-            this._redrawTimerId = 0;
-        }
         if (this._cloneActor) {
             const clone = this._cloneActor;
             this._cloneActor = null;
@@ -129,10 +119,6 @@ class LiveWallpaper extends St.Widget {
         if (this._pollId) {
             GLib.source_remove(this._pollId);
             this._pollId = 0;
-        }
-        if (this._redrawTimerId) {
-            GLib.source_remove(this._redrawTimerId);
-            this._redrawTimerId = 0;
         }
         if (this._sourceActor && this._sourceDestroyId) {
             try { this._sourceActor.disconnect(this._sourceDestroyId); } catch (_e) {}

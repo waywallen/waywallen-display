@@ -275,6 +275,44 @@ gint ww_display_dup_release_fd(gint fd);
 void ww_display_close_fd(gint fd);
 
 /**
+ * ww_display_send_pointer_motion:
+ * @self: a #WwDisplay
+ * @x: @y: surface-local pixels (same space as the registered width/height)
+ * @timestamp_us: monotonic microseconds, or 0 to let the daemon stamp
+ * @modifiers: Linux modifier mask, or 0
+ *
+ * Best-effort forward of a pointer motion to the daemon, which reverse-
+ * projects it onto the renderer's texture via the active layout.
+ */
+void ww_display_send_pointer_motion(WwDisplay *self, gdouble x, gdouble y,
+                                    guint64 timestamp_us, guint modifiers);
+
+/**
+ * ww_display_send_pointer_button:
+ * @self: a #WwDisplay
+ * @x: @y: surface-local pixels
+ * @button: Linux input code (BTN_LEFT=0x110, BTN_RIGHT=0x111, …)
+ * @pressed: TRUE on press, FALSE on release
+ * @timestamp_us: monotonic microseconds, or 0
+ * @modifiers: Linux modifier mask, or 0
+ */
+void ww_display_send_pointer_button(WwDisplay *self, gdouble x, gdouble y,
+                                    guint button, gboolean pressed,
+                                    guint64 timestamp_us, guint modifiers);
+
+/**
+ * ww_display_send_pointer_axis:
+ * @self: a #WwDisplay
+ * @x: @y: surface-local pixels
+ * @dx: @dy: scroll deltas in logical notches (wheel)
+ * @timestamp_us: monotonic microseconds, or 0
+ * @modifiers: Linux modifier mask, or 0
+ */
+void ww_display_send_pointer_axis(WwDisplay *self, gdouble x, gdouble y,
+                                  gdouble dx, gdouble dy,
+                                  guint64 timestamp_us, guint modifiers);
+
+/**
  * ww_display_dmabuf_texture_build:
  * @builder: (transfer none): a GdkDmabufTextureBuilder, typed as
  *   GObject so this header doesn't pull in gtk-4

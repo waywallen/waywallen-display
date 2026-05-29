@@ -24,6 +24,7 @@ set(_ext_files
     extension/gnomeShellOverride.js
     extension/wallpaper.js
     extension/windowManager.js
+    extension/pointerForwarder.js
     extension/prefs.js
 )
 

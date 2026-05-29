@@ -73,6 +73,25 @@ gboolean ww_shadow_paintable_set_shadow(WwShadowPaintable *self,
 void ww_shadow_paintable_refresh(WwShadowPaintable *self);
 
 /**
+ * ww_shadow_paintable_set_config:
+ * @self: a #WwShadowPaintable
+ * @sx: @sy: @sw: @sh: source rect in texture pixels (sub-region to sample)
+ * @dx: @dy: @dw: @dh: dest rect in pre-rotation display pixels
+ * @transform: wl_output.transform (0=normal, 1/2/3 = 90/180/270 CW,
+ *   4-7 = flipped variants) applied after placing source→dest
+ * @cr: @cg: @cb: @ca: letterbox clear color (straight-alpha sRGB)
+ *
+ * Fill mode / align / rotation, projected daemon-side and delivered via
+ * the WwDisplay::config signal. Until this is called the paintable
+ * stretches the whole shadow over the widget.
+ */
+void ww_shadow_paintable_set_config(WwShadowPaintable *self,
+                                    double sx, double sy, double sw, double sh,
+                                    double dx, double dy, double dw, double dh,
+                                    guint transform,
+                                    double cr, double cg, double cb, double ca);
+
+/**
  * ww_shadow_paintable_clear:
  * @self: a #WwShadowPaintable
  *

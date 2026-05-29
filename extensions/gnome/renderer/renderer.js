@@ -13,9 +13,12 @@ import Waywallen from 'gi://Waywallen?version=1.0';
 import cairo from 'cairo';
 import system from 'system';
 
-// GLib.unix_fd_source_new moved to GLibUnix.fd_source_new in gjs 1.86+.
+// GLib.unix_fd_source_new / Gio.UnixInputStream moved to the GLibUnix /
+// GioUnix namespaces in gjs 1.86+.
 let GLibUnix = null;
 try { GLibUnix = imports.gi.GLibUnix; } catch (_e) {}
+let GioUnix = null;
+try { GioUnix = imports.gi.GioUnix; } catch (_e) {}
 
 const APP_ID = 'io.github.waywallen.WaywallenRenderer';
 
@@ -167,6 +170,10 @@ class MonitorRenderer {
             (_o, count, w, h, fourcc, modifier, backend) =>
                 this._onTexturesReady(count, w, h, fourcc, modifier, backend));
         d.connect('textures-releasing', () => this._onTexturesReleasing());
+        d.connect('config',
+            (_o, sx, sy, sw, sh, dx, dy, dw, dh, transform, cr, cg, cb, ca) =>
+                this._paintable?.set_config(sx, sy, sw, sh, dx, dy, dw, dh,
+                                            transform, cr, cg, cb, ca));
         d.connect('frame-ready',
             (_o, idx, seq, fd) => this._onFrameReady(idx, seq, fd));
         d.connect('disconnected',
@@ -255,6 +262,22 @@ class MonitorRenderer {
         this._paintable?.refresh();
     }
 
+    monitorGeom() {
+        return this._monitor.get_geometry();
+    }
+
+    sendPointerMotion(x, y, ts) {
+        this._display?.send_pointer_motion(x, y, ts, 0);
+    }
+
+    sendPointerButton(x, y, code, pressed, ts) {
+        this._display?.send_pointer_button(x, y, code, pressed, ts, 0);
+    }
+
+    sendPointerAxis(x, y, dx, dy, ts) {
+        this._display?.send_pointer_axis(x, y, dx, dy, ts, 0);
+    }
+
     _onDisconnected(code, msg) {
         logIndexed(this._index, `disconnected: code=${code} msg=${msg}`);
         this._exit();  // extension respawns us
@@ -305,6 +328,60 @@ const app = new Gtk.Application({
 
 let renderers = [];
 
+// Pointer events forwarded by the extension over stdin, in global
+// compositor pixel coords (the extension can't deliver them to our
+// hidden window, so it captures and pipes them here). Dispatch to the
+// MonitorRenderer whose monitor geometry contains the point, converting
+// to monitor-local coords. Line formats:
+//   M gx gy ts                       motion
+//   B gx gy code pressed ts          button (pressed: 1/0)
+//   A gx gy dx dy ts                 axis (wheel notches)
+function dispatchPointer(line) {
+    const f = line.split(' ');
+    const gx = parseFloat(f[1]);
+    const gy = parseFloat(f[2]);
+    if (!Number.isFinite(gx) || !Number.isFinite(gy))
+        return;
+    const r = renderers.find(rr => {
+        const g = rr.monitorGeom();
+        return gx >= g.x && gx < g.x + g.width &&
+               gy >= g.y && gy < g.y + g.height;
+    });
+    if (!r)
+        return;
+    const g = r.monitorGeom();
+    const lx = gx - g.x;
+    const ly = gy - g.y;
+    switch (f[0]) {
+    case 'M': r.sendPointerMotion(lx, ly, parseInt(f[3]) || 0); break;
+    case 'B': r.sendPointerButton(lx, ly, parseInt(f[3]) || 0,
+                                  f[4] === '1', parseInt(f[5]) || 0); break;
+    case 'A': r.sendPointerAxis(lx, ly, parseFloat(f[3]) || 0,
+                                parseFloat(f[4]) || 0, parseInt(f[5]) || 0); break;
+    }
+}
+
+function readPointerStdin() {
+    const UnixInputStream = GioUnix?.InputStream ?? Gio.UnixInputStream;
+    const stdin = Gio.DataInputStream.new(
+        UnixInputStream.new(0, false));
+    const loop = () => {
+        stdin.read_line_async(GLib.PRIORITY_DEFAULT, null, (s, res) => {
+            let line, len;
+            try {
+                [line, len] = s.read_line_finish_utf8(res);
+            } catch (_e) {
+                return;
+            }
+            if (len > 0 && line)
+                dispatchPointer(line);
+            if (line !== null)
+                loop();
+        });
+    };
+    loop();
+}
+
 app.connect('activate', () => {
     const display = Gdk.Display.get_default();
     const monitors = display.get_monitors();
@@ -320,6 +397,7 @@ app.connect('activate', () => {
         r.build(app);
         renderers.push(r);
     }
+    readPointerStdin();
 });
 
 app.connect('shutdown', () => {
