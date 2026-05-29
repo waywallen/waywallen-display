@@ -10,10 +10,10 @@ output as a regular surface, with zero-copy GPU sharing via DMA-BUF.
   daemon and receives DMA-BUF frames plus acquire/release sync fences.
 - **Qt 6 QML plugin** (`Waywallen.Display`) — drop-in `WaywallenSurface` item
   for Qt Quick scenes.
+- **gobject plugin** — Helper for building `GdkTexture` through `waywallen-display`.
 - **KDE Plasma wallpaper extension** — Plasma 6 kpackage built on the QML
   plugin.
-
-GNOME Shell extension is on the roadmap.
+- **GNOME Shell extension** — Shell 48+ extension built on gobject plugin.
 
 ## Install
 
@@ -22,7 +22,7 @@ Prebuilt artifacts are published on the
 
 ### KDE Plasma extension
 
-Download `waywallen-kde-<version>-<arch>.zip` from the latest release, then:
+Download `waywallen-kde-<version>-<arch>-embed.zip` from the latest release, then:
 
 ```sh
 kpackagetool6 --type Plasma/Wallpaper -i waywallen-kde-<version>-<arch>.zip
@@ -52,11 +52,24 @@ kpackagetool6 --type Plasma/Wallpaper -i waywallen-kde-<version>-<arch>.zip
 > systemctl --user restart plasma-plasmashell.service
 > ```
 
+### GNOME Shell extension
+
+GNOME Shell on Wayland (tested on Shell 50). Download `waywallen-gnome-<version>-<arch>.zip` from the
+latest release, then:
+
+```sh
+gnome-extensions install --force waywallen-gnome-<version>-<arch>.zip
+gnome-extensions enable org.waywallen.gnome@waywallen.io
+```
+
+Log back out and in to load it.
+
 ## Extensions
 
 | Extension | Notes |
 |------------|----------|
 | [kde](./extensions/kde) | Plasma 6 wallpaper plugin |
+| [gnome](./extensions/gnome) | GNOME Shell 48–50 extension (Wayland) |
 
 ## Building from source
 

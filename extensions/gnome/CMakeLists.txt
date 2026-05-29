@@ -9,7 +9,12 @@
 set(WW_GNOME_UUID "org.waywallen.gnome@waywallen.io")
 set(WW_GNOME_SCHEMA_ID "org.waywallen.gnome")
 
-# Generate metadata.json with the project version stamped in.
+# GNOME extension `version`: a monotonic integer the Shell / EGO compare on
+# (semver doesn't fit here). Bump by 1 every released extension change,
+# independent of the repo's PROJECT_VERSION (which goes into version-name).
+set(WW_GNOME_VERSION 1)
+
+# Generate metadata.json with the version + project version stamped in.
 configure_file(
     ${CMAKE_CURRENT_SOURCE_DIR}/extension/metadata.json.in
     ${CMAKE_CURRENT_BINARY_DIR}/metadata.json
