@@ -2,12 +2,13 @@
  * libwaywallen-gobject — GObject Introspection wrapper for
  * libwaywallen_display. Exposes namespace `Waywallen` to GJS / Vala.
  *
- * The wrapper deliberately mirrors the C ABI 1:1 with three
+ * The wrapper deliberately mirrors the C ABI 1:1 with two
  * concessions to GIR ergonomics:
  *
- *   - Backends: only EGL is exposed in v0.1. Vulkan binding lives in
- *     the C ABI but isn't usefully callable from GJS without raw
- *     VkInstance/VkDevice handles.
+ *   - Backends: only the DMABUF_RELAY backend is exposed — GJS can't
+ *     hand the C ABI a raw VkInstance/EGLContext, so the lib owns its
+ *     own Vulkan instance and re-exports a LINEAR shadow DMA-BUF that
+ *     GTK imports via GdkDmabufTexture.
  *
  *   - Frame ownership: `frame-ready` emits the release_syncobj fd as
  *     a plain int. The C trampoline holds the original; the JS handler
@@ -48,45 +49,18 @@ typedef enum {
     WW_HANDSHAKE_RESULT_PROGRESS   = 4,
 } WwHandshakeResult;
 
-typedef enum {
-    WW_CONN_STATE_DISCONNECTED = 0,
-    WW_CONN_STATE_CONNECTING   = 1,
-    WW_CONN_STATE_CONNECTED    = 2,
-    WW_CONN_STATE_DEAD         = 3,
-} WwConnState;
-
-typedef enum {
-    WW_STREAM_STATE_INACTIVE = 0,
-    WW_STREAM_STATE_ACTIVE   = 1,
-} WwStreamState;
-
 #define WW_TYPE_DISPLAY (ww_display_get_type())
 G_DECLARE_FINAL_TYPE(WwDisplay, ww_display, WW, DISPLAY, GObject)
 
 /**
  * ww_display_new:
  *
- * Allocate a fresh WwDisplay. Backend must be bound via
- * ww_display_bind_egl() before connecting.
+ * Allocate a fresh WwDisplay. The DMABUF_RELAY backend must be bound via
+ * ww_display_bind_dmabuf_relay() before connecting.
  *
  * Returns: (transfer full): a new #WwDisplay
  */
 WwDisplay *ww_display_new(void);
-
-/**
- * ww_display_bind_egl:
- * @self: a #WwDisplay
- * @egl_display: (nullable): EGLDisplay handle as gpointer; pass NULL for
- *   EGL_DEFAULT_DISPLAY semantics handled by the underlying lib
- * @get_proc_address: (nullable): PFNEGLGETPROCADDRESS, gpointer-typed
- *
- * Must be called before ww_display_begin_connect().
- *
- * Returns: TRUE on success
- */
-gboolean ww_display_bind_egl(WwDisplay *self,
-                             gpointer egl_display,
-                             gpointer get_proc_address);
 
 /**
  * ww_display_bind_dmabuf_relay:
@@ -131,18 +105,6 @@ gboolean ww_display_get_shadow_export(WwDisplay *self,
                                       guint out_strides[4],
                                       guint64 out_offsets[4],
                                       guint64 *out_modifier);
-
-/**
- * ww_display_set_drm_render_node:
- * @self: a #WwDisplay
- * @major: DRM render-node major
- * @minor: DRM render-node minor
- *
- * Returns: TRUE on success
- */
-gboolean ww_display_set_drm_render_node(WwDisplay *self,
-                                        guint major,
-                                        guint minor);
 
 /**
  * ww_display_begin_connect:
@@ -216,61 +178,12 @@ gboolean ww_display_update_size(WwDisplay *self,
                                 guint height);
 
 /**
- * ww_display_create_gl_texture:
- * @self: a #WwDisplay
- * @image_index: which buffer in the current texture set
- * @out_gl_texture: (out): GL texture name
- *
- * Must be called from a thread with a current GL context bound to the
- * same EGLDisplay passed to ww_display_bind_egl().
- *
- * Returns: TRUE on success
- */
-gboolean ww_display_create_gl_texture(WwDisplay *self,
-                                      guint image_index,
-                                      guint *out_gl_texture);
-
-/**
- * ww_display_delete_gl_texture:
- * @self: a #WwDisplay
- * @image_index: which buffer in the current texture set
- */
-void ww_display_delete_gl_texture(WwDisplay *self, guint image_index);
-
-/**
- * ww_display_signal_release_syncobj:
- * @fd: a drm_syncobj fd previously obtained via ww_display_dup_release_fd()
- *
- * Class-level helper. Takes ownership: signals the syncobj and closes
- * @fd on every return path. Use this on a stored (dup'd) fd, NOT on
- * the raw fd value handed to a `frame-ready` handler — the trampoline
- * closes that one for you.
- *
- * Returns: TRUE on success
- */
-gboolean ww_display_signal_release_syncobj(gint fd);
-
-/**
- * ww_display_dup_release_fd:
- * @fd: a drm_syncobj fd as received in a `frame-ready` handler
- *
- * Returns a dup of @fd that the caller can store and signal later
- * (e.g. on the next frame_ready, lazy-release pattern). The original
- * is still owned by the C trampoline and will be closed after the
- * handler returns; the dup is owned by the JS caller and must
- * eventually be passed to ww_display_signal_release_syncobj() or
- * ww_display_close_fd().
- *
- * Returns: a fresh fd, or -1 on failure / when @fd is -1.
- */
-gint ww_display_dup_release_fd(gint fd);
-
-/**
  * ww_display_close_fd:
- * @fd: a fd previously obtained via ww_display_dup_release_fd()
+ * @fd: a fd received in a `frame-ready` handler
  *
- * Plain close(2). Use for fd ownership cleanup when dropping a frame
- * without signaling its release (e.g. during shutdown).
+ * Plain close(2). In DMABUF_RELAY mode the lib already signals the
+ * release fence internally, so the handler's fd is normally -1; this is
+ * defensive cleanup for any non-negative fd handed over.
  */
 void ww_display_close_fd(gint fd);
 
@@ -324,48 +237,10 @@ void ww_display_send_pointer_axis(WwDisplay *self, gdouble x, gdouble y,
 void ww_display_set_window_state(WwDisplay *self, guint flags);
 
 /**
- * ww_display_dmabuf_texture_build:
- * @builder: (transfer none): a GdkDmabufTextureBuilder, typed as
- *   GObject so this header doesn't pull in gtk-4
- *
- * Workaround for the broken GIR annotation on
- * gdk_dmabuf_texture_builder_build() — its `destroy` parameter is a
- * GDestroyNotify with no associated callback annotation, which makes
- * GJS refuse to call the function. This helper resolves the GTK
- * symbol via RTLD_DEFAULT (gtk-4 is already loaded by any caller
- * that imported gi://Gdk) and invokes it with destroy=NULL, data=NULL.
- *
- * Since the return type is declared as #GObject*, GJS will dispatch
- * to the correct wrapper class (#GdkTexture) at runtime via the
- * object's GType. The returned texture is owned by the caller.
- *
- * Returns: (transfer full) (nullable): the built texture, typed as
- *   GObject for the same header-isolation reason — JS code can pass
- *   it directly to e.g. `picture.set_paintable(tex)`.
- */
-GObject *ww_display_dmabuf_texture_build(GObject *builder);
-
-/**
  * ww_display_disconnect:
  * @self: a #WwDisplay
  */
 void ww_display_disconnect(WwDisplay *self);
-
-/**
- * ww_display_conn_state:
- * @self: a #WwDisplay
- *
- * Returns: the current connection state
- */
-WwConnState ww_display_conn_state(WwDisplay *self);
-
-/**
- * ww_display_stream_state:
- * @self: a #WwDisplay
- *
- * Returns: the current stream state
- */
-WwStreamState ww_display_stream_state(WwDisplay *self);
 
 G_END_DECLS
 

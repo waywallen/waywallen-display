@@ -2,7 +2,6 @@
 
 #include <waywallen_display.h>
 
-#include <dlfcn.h>
 #include <unistd.h>
 
 struct _WwDisplay {
@@ -214,21 +213,6 @@ ww_display_new(void)
 }
 
 gboolean
-ww_display_bind_egl(WwDisplay *self,
-                    gpointer egl_display,
-                    gpointer get_proc_address)
-{
-    g_return_val_if_fail(WW_IS_DISPLAY(self), FALSE);
-    g_return_val_if_fail(self->handle != NULL, FALSE);
-
-    waywallen_egl_ctx_t ctx = {
-        .egl_display = egl_display,
-        .get_proc_address = (void *(*)(const char *))get_proc_address,
-    };
-    return waywallen_display_bind_egl(self->handle, &ctx) == WAYWALLEN_OK;
-}
-
-gboolean
 ww_display_bind_dmabuf_relay(WwDisplay *self)
 {
     g_return_val_if_fail(WW_IS_DISPLAY(self), FALSE);
@@ -274,16 +258,6 @@ ww_display_get_shadow_export(WwDisplay *self,
         out_offsets[i] = self->shadow_offsets[i];
     }
     return TRUE;
-}
-
-gboolean
-ww_display_set_drm_render_node(WwDisplay *self, guint major, guint minor)
-{
-    g_return_val_if_fail(WW_IS_DISPLAY(self), FALSE);
-    return waywallen_display_set_drm_render_node(self->handle,
-                                                 (uint32_t)major,
-                                                 (uint32_t)minor)
-           == WAYWALLEN_OK;
 }
 
 gboolean
@@ -351,48 +325,6 @@ ww_display_update_size(WwDisplay *self, guint width, guint height)
            == WAYWALLEN_OK;
 }
 
-gboolean
-ww_display_create_gl_texture(WwDisplay *self,
-                             guint image_index,
-                             guint *out_gl_texture)
-{
-    g_return_val_if_fail(WW_IS_DISPLAY(self), FALSE);
-    g_return_val_if_fail(out_gl_texture != NULL, FALSE);
-
-    uint32_t tex = 0;
-    int rc = waywallen_display_create_gl_texture(self->handle,
-                                                 (uint32_t)image_index,
-                                                 &tex);
-    if (rc != WAYWALLEN_OK)
-        return FALSE;
-    *out_gl_texture = (guint)tex;
-    return TRUE;
-}
-
-void
-ww_display_delete_gl_texture(WwDisplay *self, guint image_index)
-{
-    g_return_if_fail(WW_IS_DISPLAY(self));
-    waywallen_display_delete_gl_texture(self->handle, (uint32_t)image_index);
-}
-
-gboolean
-ww_display_signal_release_syncobj(gint fd)
-{
-    if (fd < 0)
-        return FALSE;
-    /* Pure ownership-transfer: the C ABI helper closes @fd on every path. */
-    return waywallen_display_signal_release_syncobj(fd) == WAYWALLEN_OK;
-}
-
-gint
-ww_display_dup_release_fd(gint fd)
-{
-    if (fd < 0)
-        return -1;
-    return dup(fd);
-}
-
 void
 ww_display_close_fd(gint fd)
 {
@@ -439,62 +371,10 @@ ww_display_set_window_state(WwDisplay *self, guint flags)
     (void)waywallen_display_set_window_state(self->handle, flags);
 }
 
-/* gdk_dmabuf_texture_builder_build has a broken GIR annotation
- * (DestroyNotify with no associated callback), so GJS refuses to
- * call it. Resolve the symbol via RTLD_DEFAULT — gtk-4 is already
- * loaded in the renderer process because JS imported gi://Gdk — and
- * invoke it with NULL destroy/data. The library itself does NOT link
- * against gtk-4 (otherwise libwaywallen-gobject would force a gtk dep
- * on every consumer). */
-typedef GObject *(*gdk_dmabuf_build_fn)(GObject *, GDestroyNotify,
-                                         gpointer, GError **);
-
-GObject *
-ww_display_dmabuf_texture_build(GObject *builder)
-{
-    static gdk_dmabuf_build_fn fn = NULL;
-    if (!fn) {
-        fn = (gdk_dmabuf_build_fn) dlsym(RTLD_DEFAULT,
-            "gdk_dmabuf_texture_builder_build");
-        if (!fn) {
-            g_warning("ww_display_dmabuf_texture_build: "
-                      "gdk_dmabuf_texture_builder_build not in any "
-                      "loaded library — is gtk-4 imported?");
-            return NULL;
-        }
-    }
-    if (!builder) {
-        g_warning("ww_display_dmabuf_texture_build: NULL builder");
-        return NULL;
-    }
-    GError *err = NULL;
-    GObject *tex = fn(builder, NULL, NULL, &err);
-    if (!tex) {
-        g_warning("dmabuf_texture_build failed: %s",
-                  err ? err->message : "(no error)");
-        g_clear_error(&err);
-    }
-    return tex;
-}
-
 void
 ww_display_disconnect(WwDisplay *self)
 {
     g_return_if_fail(WW_IS_DISPLAY(self));
     waywallen_display_close(self->handle);
     self->connected = FALSE;
-}
-
-WwConnState
-ww_display_conn_state(WwDisplay *self)
-{
-    g_return_val_if_fail(WW_IS_DISPLAY(self), WW_CONN_STATE_DISCONNECTED);
-    return (WwConnState)waywallen_display_conn_state(self->handle);
-}
-
-WwStreamState
-ww_display_stream_state(WwDisplay *self)
-{
-    g_return_val_if_fail(WW_IS_DISPLAY(self), WW_STREAM_STATE_INACTIVE);
-    return (WwStreamState)waywallen_display_stream_state(self->handle);
 }
