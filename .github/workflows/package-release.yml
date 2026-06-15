@@ -62,11 +62,47 @@ jobs:
           path: ${{ matrix.pattern }}
           if-no-files-found: error
 
-  release:
-    name: Create release
-    needs: extension
+  layer-shell:
+    name: Build layer-shell
     runs-on: ubuntu-24.04
-    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && startsWith(inputs.tag, 'v'))
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc pkg-config libegl-dev libgles-dev libvulkan-dev
+
+      - name: Build waywallen-layer-shell
+        run: cargo build --bin waywallen-layer-shell --release --locked
+
+      - name: Package waywallen-layer-shell
+        run: |
+          version=$(
+            cargo metadata --no-deps --format-version 1 \
+              | python3 -c 'import json, sys; data = json.load(sys.stdin); print(next(p["version"] for p in data["packages"] if p["name"] == "waywallen-display"))'
+          )
+          arch=$(uname -m)
+          mkdir -p dist
+          tar -C target/release -czf "dist/waywallen-layer-shell-${version}-${arch}.tar.gz" waywallen-layer-shell
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: waywallen-layer-shell
+          path: dist/waywallen-layer-shell-*.tar.gz
+          if-no-files-found: error
+
+  create-release:
+    name: Create release
+    needs:
+      - extension
+      - layer-shell
+    runs-on: ubuntu-24.04
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v4
@@ -77,12 +113,19 @@ jobs:
       - name: Determine release
         id: rel
         run: |
-          echo "tag=${{ inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+          REF="${{ inputs.tag || github.ref_name }}"
+          if [ "${{ github.event_name }}" = "push" ] || [[ "$REF" == v* ]]; then
+            echo "tag=$REF" >> "$GITHUB_OUTPUT"
+            echo "is_release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_release=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Create release
+        if: steps.rel.outputs.is_release == 'true'
         uses: ncipollo/release-action@v1
         with:
           tag: ${{ steps.rel.outputs.tag }}
-          artifacts: dist/*.zip
+          artifacts: dist/*
           immutableCreate: true
           skipIfReleaseExists: true
