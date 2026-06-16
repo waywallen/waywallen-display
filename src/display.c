@@ -1805,17 +1805,17 @@ static int try_vk_import(waywallen_display_t* d, const ww_evt_bind_buffers_t* bb
         }
         int rc = ww_vk_import_dmabuf(&d->vk_backend, &im, &d->vk_images[b]);
         if (rc != 0) goto rollback;
+
+        size_t base  = (size_t)b * bb->planes_per_buffer;
+        fd_buf[base] = -1;
+        for (uint32_t p = 1; p < bb->planes_per_buffer; p++) {
+            size_t idx = base + p;
+            if (fd_buf[idx] >= 0) close(fd_buf[idx]);
+            fd_buf[idx] = -1;
+        }
     }
 
     d->vk_import_count = bb->count;
-    /* vkAllocateMemory took ownership of fds[0] per buffer on success.
-     * Close remaining plane fds for multi-plane (planes > 0). For
-     * single-plane (common case), all fds were consumed. */
-    for (size_t i = 0; i < n_fds; i++) {
-        /* For single-plane: fd was consumed by vkAllocateMemory; the
-         * kernel already closed our copy. For safety, mark invalid. */
-        fd_buf[i] = -1;
-    }
     return 0;
 
 rollback:
