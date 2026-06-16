@@ -53,7 +53,7 @@ fn run_loop(event_socket: Socket, registry: BindingRegistry) {
     loop {
         read_event().map(|event| {
             log::debug!("niri_watcher: niri event: {:?}", event);
-            if matches!(event, Event::WindowLayoutsChanged {..} | Event::WindowOpenedOrChanged { .. } | Event::WindowFocusChanged {..} | Event::WorkspacesChanged {..}) {
+            if matches!(event, Event::WindowLayoutsChanged {..} | Event::WindowOpenedOrChanged { .. } | Event::WindowFocusChanged {..} | Event::WorkspaceActivated {..}) {
                 state.apply(event);
                 log::debug!("niri_watcher: layouts changed, refreshing outputs");
                 registry.lock().map(|registry| {
