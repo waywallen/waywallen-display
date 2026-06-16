@@ -1,5 +1,5 @@
 use std::path::{Path};
-use std::{thread};
+use std::thread;
 use std::collections::HashMap;
 use std::sync::{Arc, MutexGuard, PoisonError};
 use std::sync::atomic::Ordering;
@@ -53,7 +53,9 @@ fn run_loop(event_socket: Socket, registry: BindingRegistry) {
     loop {
         read_event().map(|event| {
             log::debug!("niri_watcher: niri event: {:?}", event);
-            if matches!(event, Event::WindowLayoutsChanged {..}) {
+            if matches!(event, Event::WindowLayoutsChanged {..} | Event::WindowOpenedOrChanged { .. } | Event::WindowFocusChanged {..} | Event::WorkspacesChanged {..}) {
+                state.apply(event);
+                log::debug!("niri_watcher: layouts changed, refreshing outputs");
                 registry.lock().map(|registry| {
                     get_outputs_flags(&*registry, &state.workspaces, &state.windows).for_each(|flags| {
                         flags.map(|(output, flags)| {
@@ -65,8 +67,9 @@ fn run_loop(event_socket: Socket, registry: BindingRegistry) {
                         }).unwrap_or_else(|error| log::error!("niri_watcher: calculate flag: {error}"))
                     })
                 }).unwrap_or_else(|error| log::error!("niri_watcher: lock registry: {error}"))
+            } else {
+                state.apply(event);
             }
-            state.apply(event);
         }).unwrap_or_else(|error| log::error!("niri_watcher: read event: {error}"));
     }
 }
@@ -79,26 +82,30 @@ fn get_outputs_flags<'a>(
     workspaces_state.workspaces.values()
         .filter_map(|workspace| {
             workspace.is_active.then_some(())?;
-            workspace.active_window_id.map(|active_window_id|
-                workspace.output.as_ref().map(|output|
-                    outputs.get(output).map(|output| {
-                        output.is_registered().then_some(())?;
-                        windows_state.windows.get(&active_window_id).map(|window|
+            workspace.output.as_ref().map(|output|
+                outputs.get(output).map(|output| {
+                    output.is_registered().then_some(())?;
+                    workspace.active_window_id.map(|active_window_id|
+                        windows_state.windows.get(&active_window_id).map(|active_window|
                             match output.logical_size.lock() {
                                 Ok(logical_size) => logical_size.map(|(x, y)| {
-                                    let flags = window_to_flags((x as i32, y as i32), window);
-                                    let old_flags = output.window_flags().swap(flags, Ordering::SeqCst);
-                                    (old_flags != flags).then_some(Ok((output, flags)))
+                                    let flags = window_to_flags((x as i32, y as i32), active_window);
+                                    log::debug!("niri_watcher: {} flags: {flags}", output.display_name());
+                                    let old_flags = output.window_flags().swap(0, Ordering::SeqCst);
+                                    (old_flags != 0).then_some(Ok((output, 0)))
                                 }).flatten(),
                                 Err(error) => Some(Err(error))
                             }
                         ).flatten()
-                    }).flatten()
-                ).flatten()
+                    ).unwrap_or_else(|| {
+                        log::debug!("niri_watcher: {} flags: 0", output.display_name());
+                        let old_flags = output.window_flags().swap(0, Ordering::SeqCst);
+                        (old_flags != 0).then_some(Ok((output, 0)))
+                    })
+                }).flatten()
             ).flatten()
         })
 }
-
 // Implementation note: niri can never have an unfocused window - it doesn't support minimization
 // Also, for now, the IPC doesn't report fullscreen / maximize state, so we have to guess for
 // fullscreen and just do without maximization.
