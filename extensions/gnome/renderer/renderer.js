@@ -147,7 +147,14 @@ class MonitorRenderer {
         this._window.set_default_size(geom.width, geom.height);
 
         this._window.connect('realize', () => this._onRealize());
-        this._window.fullscreen_on_monitor(this._monitor);
+        // Do not fullscreen the source window. The visible wallpaper is a
+        // Clutter.Clone of this window injected into the desktop background
+        // actor, so the window itself is only a DMA-BUF source surface. The
+        // correct size is already set via width_request/height_request and
+        // set_default_size(), while the native rendering resolution is
+        // negotiated separately (geom * scale). Fullscreening here causes
+        // GNOME Shell to hide the top panel on an empty desktop.
+        // this._window.fullscreen_on_monitor(this._monitor);
         this._window.present();
     }
 
