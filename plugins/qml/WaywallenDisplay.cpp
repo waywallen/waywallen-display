@@ -88,6 +88,7 @@ void WaywallenDisplay::c_on_textures_ready(void* ud, const waywallen_textures_t*
     self->m_textureCount = t->count;
     self->m_texWidth     = static_cast<int>(t->tex_width);
     self->m_texHeight    = static_cast<int>(t->tex_height);
+    bool hasNewContentSource = false;
 
     if (t->backend == WAYWALLEN_BACKEND_EGL && t->egl_images) {
         qCInfo(lcWD,
@@ -99,6 +100,7 @@ void WaywallenDisplay::c_on_textures_ready(void* ud, const waywallen_textures_t*
         self->m_eglImagesValid    = true;
         self->m_glTexturesCreated = false;
         self->m_glTextures.clear();
+        hasNewContentSource = true;
     } else if (t->backend == WAYWALLEN_BACKEND_VULKAN && t->vk_images) {
         qCInfo(lcWD,
                "textures ready: Vulkan, count=%u, size=%ux%u, fourcc=0x%x",
@@ -111,11 +113,13 @@ void WaywallenDisplay::c_on_textures_ready(void* ud, const waywallen_textures_t*
         for (uint32_t i = 0; i < t->count; i++)
             self->m_vkImages[static_cast<int>(i)] = t->vk_images[i];
         self->m_vkFourcc = t->fourcc;
+        hasNewContentSource = true;
     } else {
         qCWarning(lcWD, "textures ready: backend=%d but no handles", t->backend);
         self->m_eglImagesValid = false;
         self->m_vkImagesValid  = false;
     }
+    self->m_contentRevisionPending = hasNewContentSource;
     self->setStreamState(Active);
 }
 
@@ -142,6 +146,7 @@ void WaywallenDisplay::c_on_textures_releasing(void* ud, const waywallen_texture
     self->m_vkImages.clear();
     self->m_currentSlot  = -1;
     self->m_textureCount = 0;
+    self->m_contentRevisionPending = false;
 
 #ifdef WW_HAVE_VULKAN
     {
@@ -194,6 +199,11 @@ void WaywallenDisplay::c_on_frame_ready(void* ud, const waywallen_frame_t* f) {
     self->flushPendingRelease();
     self->m_framesReceived++;
     self->m_currentSlot = static_cast<int>(f->buffer_index);
+    if (self->m_contentRevisionPending) {
+        self->m_contentRevisionPending = false;
+        self->m_contentRevision++;
+        emit self->contentRevisionChanged();
+    }
 
 #ifdef WW_HAVE_VULKAN
     if (self->m_activeBackend == BackendVulkan) {
@@ -391,6 +401,7 @@ void WaywallenDisplay::cleanup() {
     m_vkImages.clear();
     m_currentSlot   = -1;
     m_textureCount  = 0;
+    m_contentRevisionPending = false;
     m_activeBackend = BackendNone;
 
     if (m_displayId != 0) {
@@ -884,6 +895,7 @@ void WaywallenDisplay::onWindowReady() {
             m_vkImages.clear();
             m_currentSlot   = -1;
             m_textureCount  = 0;
+            m_contentRevisionPending = false;
             m_activeBackend = BackendNone;
         },
         Qt::DirectConnection);

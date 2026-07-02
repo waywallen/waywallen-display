@@ -36,6 +36,7 @@ class WaywallenDisplay : public QQuickItem {
     Q_PROPERTY(
         int displayHeight READ displayHeight WRITE setDisplayHeight NOTIFY displayHeightChanged)
     Q_PROPERTY(int framesReceived READ framesReceived NOTIFY framesReceivedChanged)
+    Q_PROPERTY(qulonglong contentRevision READ contentRevision NOTIFY contentRevisionChanged)
     Q_PROPERTY(qulonglong displayId READ displayId NOTIFY displayIdChanged)
     Q_PROPERTY(ConnState connState READ connState NOTIFY connStateChanged)
     Q_PROPERTY(StreamState streamState READ streamState NOTIFY streamStateChanged)
@@ -108,6 +109,7 @@ public:
     void setDisplayHeight(int h);
 
     int framesReceived() const { return m_framesReceived; }
+    qulonglong contentRevision() const { return m_contentRevision; }
 
     qulonglong displayId() const { return m_displayId; }
 
@@ -151,6 +153,7 @@ signals:
     void displayWidthChanged();
     void displayHeightChanged();
     void framesReceivedChanged();
+    void contentRevisionChanged();
     void displayIdChanged();
     void connStateChanged();
     void streamStateChanged();
@@ -218,6 +221,7 @@ private:
     int              m_displayWidth { 1920 };
     int              m_displayHeight { 1080 };
     int              m_framesReceived { 0 };
+    qulonglong       m_contentRevision { 0 };
     qulonglong       m_displayId { 0 };
     ConnState        m_connState { Disconnected };
     StreamState      m_streamState { Inactive };
@@ -260,6 +264,7 @@ private:
         BackendVulkan
     };
     ActiveBackend m_activeBackend { BackendNone };
+    bool          m_contentRevisionPending { false };
 
     // EGL texture state (GL textures created lazily on render thread).
     bool          m_eglImagesValid { false };

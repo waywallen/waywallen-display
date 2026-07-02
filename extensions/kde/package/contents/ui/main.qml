@@ -31,6 +31,25 @@ WallpaperItem {
 
     property bool _initDone: false
 
+    function scheduleAccentColorRefresh() {
+        accentColorRefreshTimer.restart();
+    }
+
+    function refreshAccentColor() {
+        if (Qt.colorEqual(root.accentColor, "transparent")) {
+            root.accentColorChanged();
+        } else {
+            root.accentColor = "transparent";
+        }
+    }
+
+    Timer {
+        id: accentColorRefreshTimer
+        interval: 2000
+        repeat: false
+        onTriggered: root.refreshAccentColor()
+    }
+
     // Per-display window-state reporter. We aggregate the current
     // screen's covering windows into a bitmask and push it down to
     // the daemon via WaywallenDisplay.windowStateFlags. The daemon
@@ -63,6 +82,7 @@ WallpaperItem {
             item.displayHeightBinding      = Qt.binding(() => Math.round(root.height * Screen.devicePixelRatio));
             item.mouseForwardBinding       = Qt.binding(() => root.configuration.MouseForward);
             item.windowStateFlagsBinding   = Qt.binding(() => windowModel.flags);
+            item.contentSourceChanged.connect(root.scheduleAccentColorRefresh);
         }
     }
 

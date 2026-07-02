@@ -18,6 +18,8 @@ WW.WaywallenDisplay {
     windowStateFlags:    windowStateFlagsBinding
 
     signal firstFrameSeen()
+    signal contentSourceChanged()
 
     onFramesReceivedChanged: if (framesReceived === 1) firstFrameSeen()
+    onContentRevisionChanged: contentSourceChanged()
 }
