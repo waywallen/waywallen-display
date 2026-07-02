@@ -336,7 +336,8 @@ pub fn test_deserialize_response() {
     const EXAMPLE_MESSAGE_BYTES: &[u8] = EXAMPLE_MESSAGE.as_bytes();
     const EXAMPLE_MESSAGE_SIZE: u32 = EXAMPLE_MESSAGE.len() as u32;
     const EXAMPLE_MESSAGE_SIZE_BYTES: &[u8] = &EXAMPLE_MESSAGE_SIZE.to_le_bytes();
-    let mut reader = WFSocket::new(&mut EXAMPLE_MESSAGE_SIZE_BYTES.chain(EXAMPLE_MESSAGE_BYTES));
+    let mut reader = EXAMPLE_MESSAGE_SIZE_BYTES.chain(EXAMPLE_MESSAGE_BYTES);
+    let mut reader = WFSocket::new(&mut reader);
     let message = reader.receive_event().expect("failed to receive message");
     assert_eq!(
         message,
