@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 
 pub mod hyprland;
 pub mod niri;
+pub mod wayfire;
 
 pub type BindingRegistry = Arc<Mutex<HashMap<String, Arc<OutputBinding>>>>;
 
