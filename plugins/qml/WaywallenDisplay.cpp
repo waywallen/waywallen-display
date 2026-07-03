@@ -84,10 +84,10 @@ static void qtLogBridge(waywallen_log_level_t level, const char* msg, void*) {
 // ---------------------------------------------------------------------------
 
 void WaywallenDisplay::c_on_textures_ready(void* ud, const waywallen_textures_t* t) {
-    auto* self           = static_cast<WaywallenDisplay*>(ud);
-    self->m_textureCount = t->count;
-    self->m_texWidth     = static_cast<int>(t->tex_width);
-    self->m_texHeight    = static_cast<int>(t->tex_height);
+    auto* self               = static_cast<WaywallenDisplay*>(ud);
+    self->m_textureCount     = t->count;
+    self->m_texWidth         = static_cast<int>(t->tex_width);
+    self->m_texHeight        = static_cast<int>(t->tex_height);
     bool hasNewContentSource = false;
 
     if (t->backend == WAYWALLEN_BACKEND_EGL && t->egl_images) {
@@ -112,7 +112,7 @@ void WaywallenDisplay::c_on_textures_ready(void* ud, const waywallen_textures_t*
         self->m_vkImages.resize(static_cast<int>(t->count));
         for (uint32_t i = 0; i < t->count; i++)
             self->m_vkImages[static_cast<int>(i)] = t->vk_images[i];
-        self->m_vkFourcc = t->fourcc;
+        self->m_vkFourcc    = t->fourcc;
         hasNewContentSource = true;
     } else {
         qCWarning(lcWD, "textures ready: backend=%d but no handles", t->backend);
@@ -144,8 +144,8 @@ void WaywallenDisplay::c_on_textures_releasing(void* ud, const waywallen_texture
     self->m_eglShadowSlot = -1;
     self->m_vkImagesValid = false;
     self->m_vkImages.clear();
-    self->m_currentSlot  = -1;
-    self->m_textureCount = 0;
+    self->m_currentSlot            = -1;
+    self->m_textureCount           = 0;
     self->m_contentRevisionPending = false;
 
 #ifdef WW_HAVE_VULKAN
@@ -399,10 +399,10 @@ void WaywallenDisplay::cleanup() {
     m_glTextures.clear();
     m_vkImagesValid = false;
     m_vkImages.clear();
-    m_currentSlot   = -1;
-    m_textureCount  = 0;
+    m_currentSlot            = -1;
+    m_textureCount           = 0;
     m_contentRevisionPending = false;
-    m_activeBackend = BackendNone;
+    m_activeBackend          = BackendNone;
 
     if (m_displayId != 0) {
         m_displayId = 0;
@@ -893,10 +893,10 @@ void WaywallenDisplay::onWindowReady() {
             m_glTextures.clear();
             m_vkImagesValid = false;
             m_vkImages.clear();
-            m_currentSlot   = -1;
-            m_textureCount  = 0;
+            m_currentSlot            = -1;
+            m_textureCount           = 0;
             m_contentRevisionPending = false;
-            m_activeBackend = BackendNone;
+            m_activeBackend          = BackendNone;
         },
         Qt::DirectConnection);
 

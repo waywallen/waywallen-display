@@ -108,7 +108,7 @@ public:
     int  displayHeight() const { return m_displayHeight; }
     void setDisplayHeight(int h);
 
-    int framesReceived() const { return m_framesReceived; }
+    int        framesReceived() const { return m_framesReceived; }
     qulonglong contentRevision() const { return m_contentRevision; }
 
     qulonglong displayId() const { return m_displayId; }
