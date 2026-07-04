@@ -1,3 +1,16 @@
+<release version="0.2.8" date="2026-07-04">
+  <description>
+    <p>Added:</p>
+    <ul>
+      <li>KDE option to enable accent color from wallpaper, disabled by default.</li>
+      <li>Add wayfire display focus by @Arzumify in #26</li>
+    </ul>
+    <p>Fixed:</p>
+    <ul>
+      <li>fix(gnome): keep top panel visible by not fullscreening renderer source window by @GemeWolf in #25</li>
+    </ul>
+  </description>
+</release>
 <release version="0.2.7" date="2026-06-21">
   <description>
     <p>Added:</p>
