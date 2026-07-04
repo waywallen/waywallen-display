@@ -11,6 +11,7 @@ ColumnLayout {
     property string cfg_DisplayName
     property bool   cfg_ShowDiagnostics
     property bool   cfg_MouseForward
+    property bool   cfg_AccentColorFromWallpaper
 
     property string _probeError: ""
     property string _libVersion: ""
@@ -73,6 +74,12 @@ ColumnLayout {
             Kirigami.FormData.label: i18nd("plasma_wallpaper_org.waywallen.kde", "Forward mouse events to wallpaper")
             checked: cfg_MouseForward
             onToggled: cfg_MouseForward = checked
+        }
+
+        QQC2.CheckBox {
+            Kirigami.FormData.label: i18nd("plasma_wallpaper_org.waywallen.kde", "Accent color from wallpaper")
+            checked: cfg_AccentColorFromWallpaper
+            onToggled: cfg_AccentColorFromWallpaper = checked
         }
 
         QQC2.Label {

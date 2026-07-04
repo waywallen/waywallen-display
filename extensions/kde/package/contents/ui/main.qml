@@ -30,8 +30,15 @@ WallpaperItem {
     }
 
     property bool _initDone: false
+    readonly property bool accentColorFromWallpaper: root.configuration
+        ? root.configuration.AccentColorFromWallpaper
+        : false
 
     function scheduleAccentColorRefresh() {
+        if (!root.accentColorFromWallpaper) {
+            accentColorRefreshTimer.stop();
+            return;
+        }
         accentColorRefreshTimer.restart();
     }
 
@@ -48,6 +55,14 @@ WallpaperItem {
         interval: 2000
         repeat: false
         onTriggered: root.refreshAccentColor()
+    }
+
+    onAccentColorFromWallpaperChanged: {
+        if (root.accentColorFromWallpaper) {
+            root.scheduleAccentColorRefresh();
+        } else {
+            accentColorRefreshTimer.stop();
+        }
     }
 
     // Per-display window-state reporter. We aggregate the current
