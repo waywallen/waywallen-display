@@ -13,7 +13,7 @@
     </key>
 
     <key name="display-name" type="s">
-      <default>"gnome-shell"</default>
+      <default>""</default>
       <summary>Human-readable display name reported to the daemon</summary>
     </key>
 

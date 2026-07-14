@@ -48,6 +48,16 @@ function monitorKey(monitor, index) {
     return `mon${index}`;
 }
 
+function monitorDisplayName(monitor) {
+    const model = (monitor.get_model?.() ?? '').trim();
+    if (model)
+        return model;
+    const connector = (monitor.get_connector?.() ?? '').trim();
+    if (connector)
+        return connector;
+    return 'gnome-shell';
+}
+
 let _diagCssDone = false;
 function ensureDiagCss() {
     if (_diagCssDone)
@@ -66,7 +76,7 @@ function ensureDiagCss() {
 function parseArgs(argv) {
     const opts = {
         instanceId: '',
-        displayName: 'gnome-shell',
+        displayName: '',
         socketPath: null,
         diagnostics: false,
     };
@@ -96,7 +106,7 @@ class MonitorRenderer {
         // every output onto one display.
         const key = monitorKey(monitor, monitorIndex);
         this._instanceId = opts.instanceId ? `${opts.instanceId}:${key}` : '';
-        this._displayName = `${opts.displayName}:${key}`;
+        this._displayName = opts.displayName.trim() || monitorDisplayName(monitor);
 
         this._window = null;
         this._picture = null;

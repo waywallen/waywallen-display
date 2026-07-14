@@ -18,7 +18,7 @@ export default class WaywallenPrefs extends ExtensionPreferences {
         const group = new Adw.PreferencesGroup({title: 'Display'});
         page.add(group);
 
-        // Display name passed to daemon (free-form, used as fallback key).
+        // Optional display name override passed to the daemon.
         const nameRow = new Adw.EntryRow({title: 'Display name'});
         nameRow.set_text(settings.get_string('display-name'));
         nameRow.connect('apply', () =>
