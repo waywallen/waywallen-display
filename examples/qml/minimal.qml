@@ -28,7 +28,7 @@ Window {
     WaywallenDisplay {
         id: wallpaper
         anchors.fill: parent
-        displayName: "qml-minimal"
+        displayName: "qml-minimal-long-long-long-long-long-long"
         displayWidth: root.width
         displayHeight: root.height
     }
