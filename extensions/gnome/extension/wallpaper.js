@@ -17,9 +17,16 @@ export const LiveWallpaper = GObject.registerClass(
 class LiveWallpaper extends St.Widget {
     _init(backgroundActor) {
         super._init({
-            layout_manager: new Clutter.BinLayout(),
-            width: backgroundActor.width,
-            height: backgroundActor.height,
+            // FixedLayout: we position the clone ourselves in vfunc_allocate
+            // (top-left origin, scaled to fill). BinLayout centered the
+            // monitor-sized clone inside the smaller overview preview box,
+            // which misaligned it and made it collapse when the preview
+            // shrank for the app grid.
+            layout_manager: new Clutter.FixedLayout(),
+            // No explicit width/height: MetaBackgroundActor is content-driven,
+            // and its width/height props are 0 in the overview. We expand to
+            // fill whatever the parent allocates and report no preferred size
+            // (see vfuncs) so we don't distort the overview workspace layout.
             x_expand: true,
             y_expand: true,
             opacity: 0,
@@ -38,12 +45,39 @@ class LiveWallpaper extends St.Widget {
         this._tryAttach();
     }
 
+    // Report no preferred size: the clone's natural (monitor) size would
+    // otherwise feed back into the overview workspace-preview layout and
+    // distort it.
+    vfunc_get_preferred_width(_forHeight) {
+        return [0, 0];
+    }
+    vfunc_get_preferred_height(_forWidth) {
+        return [0, 0];
+    }
+
+    // Scale the clone from the top-left to fill our ACTUAL allocation. The
+    // backing actor's width/height props stay 0 in the content-driven overview
+    // path, so the allocation box is the source of truth. Pinning to (0,0)
+    // with pivot (0,0) fills the preview exactly in both the desktop and the
+    // overview (including when the preview shrinks for the app grid).
+    vfunc_allocate(box) {
+        super.vfunc_allocate(box);
+        const clone = this._cloneActor;
+        if (clone && clone.source && clone.source.width > 0) {
+            const sx = box.get_width() / clone.source.width;
+            const sy = box.get_height() / clone.source.height;
+            clone.set_position(0, 0);
+            if (Math.abs((clone.scale_x ?? 1) - sx) > 0.001 ||
+                Math.abs((clone.scale_y ?? 1) - sy) > 0.001)
+                clone.set_scale(sx, sy);
+        }
+    }
+
     _tryAttach() {
         const renderer = this._findRenderer();
         if (renderer) {
             this._cloneActor = new Clutter.Clone({
                 source: renderer,
-                pivot_point: new Graphene.Point({x: 0.5, y: 0.5}),
             });
             this._cloneDestroyId = this._cloneActor.connect('destroy', () => {
                 this._cloneActor = null;
@@ -111,6 +145,11 @@ class LiveWallpaper extends St.Widget {
     }
 
     on_destroy() {
+        // Mark first so GnomeShellOverride.disable() can skip us when GNOME
+        // has already destroyed our parent backgroundActor — avoids the
+        // "already disposed" warning (and any GC-sweep jitter) from a
+        // redundant second destroy() at extension teardown.
+        this._wwDestroyed = true;
         if (this._pollId) {
             GLib.source_remove(this._pollId);
             this._pollId = 0;
