@@ -92,6 +92,8 @@ class LiveWallpaper extends St.Widget {
                 duration: FADE_IN_MS,
                 mode: Clutter.AnimationMode.EASE_OUT_QUAD,
             });
+            // Black out the gsettings placeholder behind us (see _dimBackdrop).
+            this._dimBackdrop(true);
             // No redraw timer: Clutter.Clone repaints on the source's
             // queue-redraw, i.e. exactly when the renderer commits a buffer.
             return;
@@ -110,6 +112,29 @@ class LiveWallpaper extends St.Widget {
         });
     }
 
+    // The gsettings MetaBackground behind us is a placeholder solid color.
+    // Where the clone has alpha or at clip edges it bleeds through as a
+    // colored veil — most visible in the overview workspace preview, which
+    // renders that content at brightness 0.5. While we are actively covering
+    // the actor, pin the backdrop to black so any bleed reads as shadow.
+    // Restored when the source goes away so lock-screen / fallback still get
+    // the normal dimmed GNOME background.
+    _dimBackdrop(dim) {
+        try {
+            const content = this._backgroundActor?.content;
+            if (!content)
+                return;
+            if (dim) {
+                if (this._origBrightness === undefined)
+                    this._origBrightness = content.brightness;
+                content.brightness = 0;
+            } else if (this._origBrightness !== undefined) {
+                content.brightness = this._origBrightness;
+                this._origBrightness = undefined;
+            }
+        } catch (_e) {}
+    }
+
     _onSourceDestroyed() {
         this._sourceDestroyId = 0;
         this._sourceActor = null;
@@ -123,6 +148,7 @@ class LiveWallpaper extends St.Widget {
             this.opacity = 0;
             try { clone.destroy(); } catch (_e) {}
         }
+        this._dimBackdrop(false);
         this._schedulePoll();
     }
 
