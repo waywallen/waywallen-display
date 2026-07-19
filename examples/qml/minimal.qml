@@ -22,7 +22,7 @@ Window {
     visible: true
     title: "waywallen — minimal"
     // Window backdrop tracks the renderer-reported clear color (pushed
-    // via `report_state` on waywallen_ipc_v1).
+    // via `report_state` on waywallen_ipc_v2).
     color: wallpaper.clearColor
 
     WaywallenDisplay {

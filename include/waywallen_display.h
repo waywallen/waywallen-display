@@ -512,6 +512,12 @@ int waywallen_display_dispatch(waywallen_display_t* d);
  */
 int waywallen_display_signal_release_syncobj(int fd);
 
+/* Replace the binary release syncobj's fence with `sync_file_fd` and
+ * close both descriptors. The release becomes signaled when the GPU
+ * work represented by the sync_file completes; this call does not wait
+ * for that work on the CPU. */
+int waywallen_display_release_after_sync_file(int release_syncobj_fd, int sync_file_fd);
+
 /* -------------------------------------------------------------------------
  * Pointer event forwarding
  *

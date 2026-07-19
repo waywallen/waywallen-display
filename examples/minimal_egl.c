@@ -91,9 +91,8 @@ static void on_frame_ready(void* ud, const waywallen_frame_t* f) {
             (long long)s->frames_seen,
             f->buffer_index,
             (unsigned long long)f->seq);
-    // Signal the per-frame release_syncobj so the daemon's reaper sees
-    // a real release instead of timing out and force-signaling. This
-    // demo doesn't actually GPU-render the texture, so signaling
+    // Signal the per-frame release_syncobj. This demo doesn't actually
+    // GPU-render the texture, so signaling
     // immediately is correct: there is no later "I'm done with this
     // buffer" moment to defer to. The helper closes the fd in all
     // paths.

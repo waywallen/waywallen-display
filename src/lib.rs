@@ -316,6 +316,10 @@ extern "C" {
     ) -> c_int;
 
     pub fn waywallen_display_signal_release_syncobj(fd: c_int) -> c_int;
+    pub fn waywallen_display_release_after_sync_file(
+        release_syncobj_fd: c_int,
+        sync_file_fd: c_int,
+    ) -> c_int;
 
     pub fn waywallen_display_conn_state(d: *mut waywallen_display_t) -> waywallen_conn_state_t;
     pub fn waywallen_display_stream_state(d: *mut waywallen_display_t) -> waywallen_stream_state_t;

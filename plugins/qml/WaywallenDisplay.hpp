@@ -200,6 +200,7 @@ private:
      * shadow if dims changed. Render thread only. Returns true if
      * shadow now has valid content. */
     bool blitEglShadow(int slot);
+    void releaseEglFrame(int releaseSyncobjFd, bool afterGpuWork);
     /* Render-thread job: drains m_pendingEgl, ensures GL textures,
      * runs blitEglShadow. Scheduled from c_on_frame_ready via
      * scheduleRenderJob(BeforeSynchronizingStage). */
@@ -300,8 +301,10 @@ private:
     struct PendingEglFrame {
         bool valid { false };
         int  slot { -1 };
+        int  releaseSyncobjFd { -1 };
     };
     PendingEglFrame m_pendingEgl;
+    void*           m_eglDisplay { nullptr };
 
     // Shared between EGL m_pendingEgl and Vulkan m_pendingVk.
     QMutex m_pendingMutex;
@@ -328,8 +331,8 @@ private:
 
     // Most-recent unblitted frame, populated on the main thread by
     // c_on_frame_ready and consumed on the render thread by
-    // updatePaintNode. Older pending frame is dropped (its
-    // release_syncobj_fd is closed; daemon times out the slot).
+    // updatePaintNode. Older pending frames are released immediately
+    // because they were never submitted to GPU work.
     struct PendingVkFrame {
         bool  valid { false };
         int   slot { -1 };
@@ -349,12 +352,4 @@ private:
     // post-rotation display rect; m_destRect is in *pre-rotation*
     // display coords so the math is just rotate-around-display-center.
     uint32_t m_transform { 0 };
-
-    // EGL path: per-frame release_syncobj fd handed to us via
-    // on_frame_ready. We signal it on the *next* frame_ready (in
-    // flushPendingRelease) so the daemon's reaper sees a real signal
-    // instead of timing out and force-signaling. -1 when no fd is held.
-    // The Vulkan path uses the separate m_pendingVk.releaseSyncobjFd
-    // and signals from the blitter after the GPU copy completes.
-    int m_pendingEglReleaseSyncobjFd { -1 };
 };

@@ -2128,9 +2128,8 @@ static int handle_frame_ready(waywallen_display_t* d, const uint8_t* body, size_
     if (d->cb.on_frame_ready) {
         d->cb.on_frame_ready(d->cb.user_data, &frame);
     } else {
-        /* No callback to consume the release fd: close it so the daemon
-         * eventually times out the frame instead of leaking the fd. */
-        close(release_syncobj_fd);
+        /* No callback means the host never reads this frame. */
+        (void)waywallen_display_signal_release_syncobj(release_syncobj_fd);
     }
     return WAYWALLEN_OK;
 }
@@ -2259,8 +2258,20 @@ struct ww_drm_syncobj_handle {
     int32_t  fd;
     uint32_t pad;
 };
+struct ww_drm_syncobj_create {
+    uint32_t handle;
+    uint32_t flags;
+};
 struct ww_drm_syncobj_destroy {
     uint32_t handle;
+    uint32_t pad;
+};
+struct ww_drm_syncobj_transfer {
+    uint32_t src_handle;
+    uint32_t dst_handle;
+    uint64_t src_point;
+    uint64_t dst_point;
+    uint32_t flags;
     uint32_t pad;
 };
 struct ww_drm_syncobj_array {
@@ -2272,9 +2283,13 @@ struct ww_drm_syncobj_array {
 #ifndef DRM_IOCTL_BASE
 #    define DRM_IOCTL_BASE 'd'
 #endif
+#define WW_DRM_IOCTL_SYNCOBJ_CREATE       _IOWR(DRM_IOCTL_BASE, 0xBF, struct ww_drm_syncobj_create)
 #define WW_DRM_IOCTL_SYNCOBJ_DESTROY      _IOWR(DRM_IOCTL_BASE, 0xC0, struct ww_drm_syncobj_destroy)
 #define WW_DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE _IOWR(DRM_IOCTL_BASE, 0xC2, struct ww_drm_syncobj_handle)
 #define WW_DRM_IOCTL_SYNCOBJ_SIGNAL       _IOWR(DRM_IOCTL_BASE, 0xC5, struct ww_drm_syncobj_array)
+#define WW_DRM_IOCTL_SYNCOBJ_TRANSFER _IOWR(DRM_IOCTL_BASE, 0xCC, struct ww_drm_syncobj_transfer)
+
+#define WW_DRM_SYNCOBJ_FD_TO_HANDLE_FLAGS_IMPORT_SYNC_FILE (1u << 0)
 
 /* Cached render-node fd. Opened lazily on first call; never closed
  * (process-lifetime). The kernel allows many concurrent open()s and
@@ -2330,6 +2345,65 @@ int waywallen_display_signal_release_syncobj(int fd) {
     struct ww_drm_syncobj_destroy dst = { .handle = imp.handle, .pad = 0 };
     (void)ioctl(drm_fd, WW_DRM_IOCTL_SYNCOBJ_DESTROY, &dst);
     close(fd);
+    return rc;
+}
+
+int waywallen_display_release_after_sync_file(int release_syncobj_fd, int sync_file_fd) {
+    if (release_syncobj_fd < 0 || sync_file_fd < 0) {
+        if (release_syncobj_fd >= 0) close(release_syncobj_fd);
+        if (sync_file_fd >= 0) close(sync_file_fd);
+        return WAYWALLEN_ERR_INVAL;
+    }
+    int drm_fd = ww_drm_node_fd();
+    if (drm_fd < 0) {
+        close(release_syncobj_fd);
+        close(sync_file_fd);
+        return WAYWALLEN_ERR_IO;
+    }
+
+    int                          rc      = WAYWALLEN_ERR_IO;
+    struct ww_drm_syncobj_handle release = {
+        .handle = 0,
+        .flags  = 0,
+        .fd     = release_syncobj_fd,
+        .pad    = 0,
+    };
+    if (ioctl(drm_fd, WW_DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE, &release) != 0) goto done;
+
+    struct ww_drm_syncobj_create source = { 0 };
+    if (ioctl(drm_fd, WW_DRM_IOCTL_SYNCOBJ_CREATE, &source) != 0) goto destroy_release;
+
+    struct ww_drm_syncobj_handle import = {
+        .handle = source.handle,
+        .flags  = WW_DRM_SYNCOBJ_FD_TO_HANDLE_FLAGS_IMPORT_SYNC_FILE,
+        .fd     = sync_file_fd,
+        .pad    = 0,
+    };
+    if (ioctl(drm_fd, WW_DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE, &import) == 0) {
+        struct ww_drm_syncobj_transfer transfer = {
+            .src_handle = source.handle,
+            .dst_handle = release.handle,
+            .src_point  = 0,
+            .dst_point  = 0,
+            .flags      = 0,
+            .pad        = 0,
+        };
+        if (ioctl(drm_fd, WW_DRM_IOCTL_SYNCOBJ_TRANSFER, &transfer) == 0) {
+            rc = WAYWALLEN_OK;
+        }
+    }
+
+    {
+        struct ww_drm_syncobj_destroy destroy = { .handle = source.handle, .pad = 0 };
+        (void)ioctl(drm_fd, WW_DRM_IOCTL_SYNCOBJ_DESTROY, &destroy);
+    }
+destroy_release: {
+    struct ww_drm_syncobj_destroy destroy = { .handle = release.handle, .pad = 0 };
+    (void)ioctl(drm_fd, WW_DRM_IOCTL_SYNCOBJ_DESTROY, &destroy);
+}
+done:
+    close(release_syncobj_fd);
+    close(sync_file_fd);
     return rc;
 }
 

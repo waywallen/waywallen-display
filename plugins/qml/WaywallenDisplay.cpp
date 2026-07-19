@@ -21,6 +21,8 @@
 #include <QWheelEvent>
 #include <QtGui/qopenglcontext_platform.h>
 #include <QtQuick/qsgtexture_platform.h>
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
 #include <cstring>
 #include <limits>
 #include <unistd.h>
@@ -152,9 +154,7 @@ void WaywallenDisplay::c_on_textures_releasing(void* ud, const waywallen_texture
     {
         QMutexLocker lk(&self->m_pendingMutex);
         if (self->m_pendingVk.valid && self->m_pendingVk.releaseSyncobjFd >= 0) {
-            // Signal then close: closing alone leaves the daemon reaper
-            // waiting the full BUCKET_TIMEOUT for this release_point.
-            // Same fix the EGL teardown path (~line 277) already applies.
+            // The queued frame was never submitted to GPU work.
             (void)waywallen_display_signal_release_syncobj(self->m_pendingVk.releaseSyncobjFd);
         }
         self->m_pendingVk = PendingVkFrame {};
@@ -191,12 +191,6 @@ void WaywallenDisplay::c_on_config(void* ud, const waywallen_config_t* c) {
 
 void WaywallenDisplay::c_on_frame_ready(void* ud, const waywallen_frame_t* f) {
     auto* self = static_cast<WaywallenDisplay*>(ud);
-    // flushPendingRelease signals the *prior* frame's release_syncobj
-    // (EGL path) so that producer's wait at that release_point doesn't
-    // time out. Vulkan signals from the blitter once the GPU copy is
-    // done; the EGL path approximates "done with prior frame" by
-    // signaling when the next frame_ready arrives.
-    self->flushPendingRelease();
     self->m_framesReceived++;
     self->m_currentSlot = static_cast<int>(f->buffer_index);
     if (self->m_contentRevisionPending) {
@@ -209,9 +203,7 @@ void WaywallenDisplay::c_on_frame_ready(void* ud, const waywallen_frame_t* f) {
     if (self->m_activeBackend == BackendVulkan) {
         // Hand-off to render thread. If a prior frame is still queued
         // (render thread didn't blit it yet), drop it: signal its
-        // release_syncobj so the daemon reaper closes the bucket
-        // immediately instead of waiting BUCKET_TIMEOUT (500ms). The
-        // buffer is "released" — we never read it.
+        // release_syncobj immediately. The buffer was never read.
         QMutexLocker lk(&self->m_pendingMutex);
         if (self->m_pendingVk.valid && self->m_pendingVk.releaseSyncobjFd >= 0) {
             (void)waywallen_display_signal_release_syncobj(self->m_pendingVk.releaseSyncobjFd);
@@ -223,26 +215,20 @@ void WaywallenDisplay::c_on_frame_ready(void* ud, const waywallen_frame_t* f) {
     } else
 #endif
         if (self->m_activeBackend == BackendEGL) {
-        // Capture the fd; flushPendingRelease on the *next* frame_ready
-        // signals it. If a prior fd was somehow still pending (frames
-        // arrived faster than flushPendingRelease ran), signal that one
-        // first instead of leaking it.
-        if (self->m_pendingEglReleaseSyncobjFd >= 0) {
-            (void)waywallen_display_signal_release_syncobj(self->m_pendingEglReleaseSyncobjFd);
-            self->m_pendingEglReleaseSyncobjFd = -1;
-        }
-        self->m_pendingEglReleaseSyncobjFd = f->release_syncobj_fd;
         // Arrival-driven blit: queue the slot and dispatch a render-thread
         // job that does the GPU copy. BeforeSynchronizingStage runs on
         // the render thread immediately before sync (so before our
         // updatePaintNode), guaranteeing the shadow is fresh by the time
         // Qt samples it. NoStage would race with sync. Same slot doesn't
-        // get re-blitted because renderThreadBlitEgl dedupes against
-        // m_eglShadowSlot.
+        // is copied exactly once by the job that consumes it.
         {
             QMutexLocker lk(&self->m_pendingMutex);
-            self->m_pendingEgl.valid = true;
-            self->m_pendingEgl.slot  = static_cast<int>(f->buffer_index);
+            if (self->m_pendingEgl.valid && self->m_pendingEgl.releaseSyncobjFd >= 0) {
+                (void)waywallen_display_signal_release_syncobj(self->m_pendingEgl.releaseSyncobjFd);
+            }
+            self->m_pendingEgl.valid            = true;
+            self->m_pendingEgl.slot             = static_cast<int>(f->buffer_index);
+            self->m_pendingEgl.releaseSyncobjFd = f->release_syncobj_fd;
         }
         if (auto* w = self->window()) {
             auto* self_p = self;
@@ -252,9 +238,7 @@ void WaywallenDisplay::c_on_frame_ready(void* ud, const waywallen_frame_t* f) {
                                  QQuickWindow::BeforeSynchronizingStage);
         }
     } else if (f->release_syncobj_fd >= 0) {
-        // No active backend yet (textures haven't arrived). Signal +
-        // close so the daemon reaper closes the bucket immediately
-        // rather than waiting BUCKET_TIMEOUT (500ms) and force-flushing.
+        // No active backend yet, so no ownership was transferred to GPU work.
         (void)waywallen_display_signal_release_syncobj(f->release_syncobj_fd);
     }
 
@@ -305,6 +289,7 @@ WaywallenDisplay::~WaywallenDisplay() {
 // (lib's drain processes the pending-destroy list it deferred from the
 // I/O thread) and the blitter shutdown.
 void WaywallenDisplay::renderThreadFinalize() {
+    flushPendingRelease();
     auto* d   = m_display;
     m_display = nullptr;
     if (d) waywallen_display_shutdown(d);
@@ -318,6 +303,7 @@ void WaywallenDisplay::renderThreadFinalize() {
      * thread that's calling us, so the GL ops in destroyEglShadow
      * land on the right context. */
     destroyEglShadow();
+    m_eglDisplay = nullptr;
 }
 
 void WaywallenDisplay::cleanup() {
@@ -335,14 +321,7 @@ void WaywallenDisplay::cleanup() {
     delete m_notifierWrite;
     m_notifierWrite = nullptr;
 
-    /* Drop any unsignaled release_syncobj fds before tearing down the
-     * lib handle — signaling (vs. just closing) lets the daemon's
-     * reaper observe the release immediately instead of waiting the
-     * full BUCKET_TIMEOUT for the slot. */
-    if (m_pendingEglReleaseSyncobjFd >= 0) {
-        (void)waywallen_display_signal_release_syncobj(m_pendingEglReleaseSyncobjFd);
-        m_pendingEglReleaseSyncobjFd = -1;
-    }
+    flushPendingRelease();
 #ifdef WW_HAVE_VULKAN
     {
         QMutexLocker lk(&m_pendingMutex);
@@ -667,6 +646,7 @@ bool WaywallenDisplay::bindEglBackend() {
         qCWarning(lcWD, "bind_egl failed: %d", rc);
         return false;
     }
+    m_eglDisplay = egl_ctx.egl_display;
     qCInfo(lcWD, "bound EGL backend, display=%p", static_cast<void*>(egl_ctx.egl_display));
     return true;
 }
@@ -1115,21 +1095,71 @@ void WaywallenDisplay::armWriteNotifier() {
 }
 
 void WaywallenDisplay::flushPendingRelease() {
-    // EGL path: signal the prior frame's release_syncobj. The helper
-    // imports the fd as a syncobj handle on this process's DRM device,
-    // SIGNALs it, and closes the fd in all paths. The kernel-side
-    // syncobj stays alive (the daemon still holds a handle ref); the
-    // signal is what the daemon's reaper is waiting on.
-    if (m_pendingEglReleaseSyncobjFd >= 0) {
-        int rc = waywallen_display_signal_release_syncobj(m_pendingEglReleaseSyncobjFd);
-        if (rc != WAYWALLEN_OK) {
-            qCWarning(lcWD,
-                      "EGL: signal_release_syncobj failed: %d "
-                      "(daemon will time out the slot)",
-                      rc);
-        }
-        m_pendingEglReleaseSyncobjFd = -1;
+    int releaseFd = -1;
+    {
+        QMutexLocker lk(&m_pendingMutex);
+        if (m_pendingEgl.valid) releaseFd = m_pendingEgl.releaseSyncobjFd;
+        m_pendingEgl = PendingEglFrame {};
     }
+    if (releaseFd >= 0) {
+        int rc = waywallen_display_signal_release_syncobj(releaseFd);
+        if (rc != WAYWALLEN_OK) qCWarning(lcWD, "EGL: signal skipped frame release failed: %d", rc);
+    }
+}
+
+void WaywallenDisplay::releaseEglFrame(int releaseSyncobjFd, bool afterGpuWork) {
+    if (releaseSyncobjFd < 0) return;
+
+    auto* ctx = QOpenGLContext::currentContext();
+    if (afterGpuWork && ctx && m_eglDisplay) {
+        auto createSync =
+            reinterpret_cast<PFNEGLCREATESYNCKHRPROC>(ctx->getProcAddress("eglCreateSyncKHR"));
+        auto destroySync =
+            reinterpret_cast<PFNEGLDESTROYSYNCKHRPROC>(ctx->getProcAddress("eglDestroySyncKHR"));
+        auto dupFence = reinterpret_cast<PFNEGLDUPNATIVEFENCEFDANDROIDPROC>(
+            ctx->getProcAddress("eglDupNativeFenceFDANDROID"));
+        if (createSync && destroySync && dupFence) {
+            const EGLint attrs[] = { EGL_NONE };
+            auto         display = reinterpret_cast<EGLDisplay>(m_eglDisplay);
+            EGLSyncKHR   sync    = createSync(display, EGL_SYNC_NATIVE_FENCE_ANDROID, attrs);
+            if (sync != EGL_NO_SYNC_KHR) {
+                ctx->extraFunctions()->glFlush();
+                int syncFileFd = dupFence(display, sync);
+                (void)destroySync(display, sync);
+                if (syncFileFd != EGL_NO_NATIVE_FENCE_FD_ANDROID) {
+                    int fallbackReleaseFd = ::dup(releaseSyncobjFd);
+                    if (fallbackReleaseFd < 0) {
+                        ::close(syncFileFd);
+                        ctx->extraFunctions()->glFinish();
+                        int rc = waywallen_display_signal_release_syncobj(releaseSyncobjFd);
+                        if (rc != WAYWALLEN_OK) {
+                            qCWarning(lcWD, "EGL: fallback release signal failed: %d", rc);
+                        }
+                        return;
+                    }
+                    int rc =
+                        waywallen_display_release_after_sync_file(releaseSyncobjFd, syncFileFd);
+                    if (rc == WAYWALLEN_OK) {
+                        ::close(fallbackReleaseFd);
+                    } else {
+                        qCWarning(lcWD, "EGL: attach release fence failed: %d", rc);
+                        ctx->extraFunctions()->glFinish();
+                        int fallbackRc =
+                            waywallen_display_signal_release_syncobj(fallbackReleaseFd);
+                        if (fallbackRc != WAYWALLEN_OK) {
+                            qCWarning(lcWD, "EGL: fallback release signal failed: %d", fallbackRc);
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+
+        ctx->extraFunctions()->glFinish();
+    }
+
+    int rc = waywallen_display_signal_release_syncobj(releaseSyncobjFd);
+    if (rc != WAYWALLEN_OK) qCWarning(lcWD, "EGL: signal release failed: %d", rc);
 }
 
 void WaywallenDisplay::handleDisconnect(int errCode, const char* msg) {
@@ -1258,22 +1288,29 @@ bool WaywallenDisplay::blitEglShadow(int slot) {
 // frame_ready arrival — Qt repaints driven by other dirty sources
 // don't trigger a redundant blit.
 void WaywallenDisplay::renderThreadBlitEgl() {
-    int slot;
+    PendingEglFrame frame;
     {
         QMutexLocker lk(&m_pendingMutex);
         if (! m_pendingEgl.valid) return;
-        slot               = m_pendingEgl.slot;
-        m_pendingEgl.valid = false;
+        frame        = m_pendingEgl;
+        m_pendingEgl = PendingEglFrame {};
     }
-    if (slot == m_eglShadowSlot) return;
-    if (m_activeBackend != BackendEGL || ! m_eglImagesValid) return;
+    if (m_activeBackend != BackendEGL || ! m_eglImagesValid) {
+        releaseEglFrame(frame.releaseSyncobjFd, false);
+        return;
+    }
     // EGLImage → GL texture binding is render-thread work; safe here.
     if (! m_glTexturesCreated) ensureGlTextures();
-    if (! m_glTexturesCreated) return;
-    if (slot < 0 || slot >= m_glTextures.size()) return;
-    if (m_texWidth <= 0 || m_texHeight <= 0) return;
-    if (blitEglShadow(slot)) {
-        m_eglShadowSlot = slot;
+    if (! m_glTexturesCreated || frame.slot < 0 || frame.slot >= m_glTextures.size() ||
+        m_texWidth <= 0 || m_texHeight <= 0) {
+        releaseEglFrame(frame.releaseSyncobjFd, false);
+        return;
+    }
+    if (blitEglShadow(frame.slot)) {
+        m_eglShadowSlot = frame.slot;
+        releaseEglFrame(frame.releaseSyncobjFd, true);
+    } else {
+        releaseEglFrame(frame.releaseSyncobjFd, false);
     }
 }
 
