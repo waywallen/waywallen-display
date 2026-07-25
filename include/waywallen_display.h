@@ -40,13 +40,11 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "waywallen_display_version.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-#define WAYWALLEN_DISPLAY_VERSION_MAJOR 0
-#define WAYWALLEN_DISPLAY_VERSION_MINOR 2
 
 /*
  * On-the-wire protocol version. Independent of the library API/ABI
@@ -243,6 +241,9 @@ typedef struct waywallen_textures {
     uint32_t shadow_strides[WAYWALLEN_DMABUF_MAX_PLANES];
     uint64_t shadow_offsets[WAYWALLEN_DMABUF_MAX_PLANES];
     uint64_t shadow_modifier;
+
+    /* Buffer generation that owns every handle and dimension above. */
+    uint64_t buffer_generation;
 } waywallen_textures_t;
 
 typedef struct waywallen_config {
@@ -250,6 +251,10 @@ typedef struct waywallen_config {
     waywallen_rect_t dest_rect;      /* in display pixels */
     uint32_t         transform;      /* wl_output.transform bits */
     float            clear_color[4]; /* RGBA straight alpha */
+    /* The library associates the wire config with its current buffer
+     * generation so hosts never need to infer that relationship. */
+    uint64_t buffer_generation;
+    uint64_t config_generation;
 } waywallen_config_t;
 
 typedef struct waywallen_frame {
@@ -267,7 +272,8 @@ typedef struct waywallen_frame {
      * If the host cannot signal it, `close(2)` it anyway — the daemon
      * will time out the corresponding frame. -1 means the library
      * could not extract a release_syncobj fd from this frame_ready. */
-    int release_syncobj_fd;
+    int      release_syncobj_fd;
+    uint64_t buffer_generation;
 } waywallen_frame_t;
 
 /* -------------------------------------------------------------------------

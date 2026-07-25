@@ -93,12 +93,21 @@ typedef enum ww_conn_state
     WW_CONN_DEAD,
 } ww_conn_state_t;
 
-/* Internal stream state (maps to public waywallen_stream_state_t). */
-typedef enum ww_stream_state
+/* Internal stream lifecycle. PendingConfig remains ACTIVE through the
+ * compatibility accessor because the pool has already been published. */
+typedef enum ww_stream_phase
 {
-    WW_STREAM_INACTIVE = 0,
+    WW_STREAM_IDLE = 0,
+    WW_STREAM_PENDING_CONFIG,
     WW_STREAM_ACTIVE,
-} ww_stream_state_t;
+} ww_stream_phase_t;
+
+typedef struct ww_bound_pool_state {
+    bool                 valid;
+    uint64_t             generation;
+    ww_stream_phase_t    phase;
+    waywallen_textures_t textures;
+} ww_bound_pool_state_t;
 
 /* Internal handshake state (maps to public waywallen_handshake_state_t).
  * Numerically aligned with the public enum so the accessor is a cast. */
@@ -151,9 +160,6 @@ struct waywallen_display {
     int             fd;
     ww_conn_state_t conn;
     uint64_t        display_id;
-
-    /* Whether the backend is actively pushing frames. */
-    ww_stream_state_t stream;
 
     /* Handshake state machine. Only meaningful while conn is
      * CONNECTING; reset to IDLE on disconnect/dead. */
@@ -223,12 +229,13 @@ struct waywallen_display {
      * render thread. */
     pthread_mutex_t pending_mutex;
 
-    /* Current bound buffer pool metadata — kept so
-     * `on_textures_releasing` can fire with the same descriptor when
-     * unbind/rebind arrives. */
-    bool                 has_textures;
-    uint64_t             current_buffer_generation;
-    waywallen_textures_t current_textures;
+    /* Current pool plus its protocol phase. Kept intact after a fatal
+     * disconnect until the render-thread cleanup path releases it. */
+    ww_bound_pool_state_t bound;
+    bool                  has_last_buffer_generation;
+    uint64_t              last_buffer_generation;
+    bool                  has_last_config_generation;
+    uint64_t              last_config_generation;
 
     /* Last categorised disconnect reason + a fixed-buffer copy of the
      * accompanying message. Updated by fire_disconnected_r at the
@@ -269,7 +276,7 @@ static void fire_disconnected_r(waywallen_display_t* d, waywallen_disconnect_rea
                                 int err, const char* msg) {
     if (d->conn == WW_CONN_DEAD) return;
     d->conn        = WW_CONN_DEAD;
-    d->stream      = WW_STREAM_INACTIVE;
+    d->bound.phase = WW_STREAM_IDLE;
     d->hs_state    = WW_HS_IDLE;
     d->display_id  = 0;
     d->last_reason = reason;
@@ -731,14 +738,14 @@ waywallen_display_t* waywallen_display_new(const waywallen_display_callbacks_t* 
     if (! cb) return NULL;
     waywallen_display_t* d = (waywallen_display_t*)calloc(1, sizeof(*d));
     if (! d) return NULL;
-    d->cb       = *cb;
-    d->fd       = -1;
-    d->conn     = WW_CONN_DISCONNECTED;
-    d->stream   = WW_STREAM_INACTIVE;
-    d->backend  = WAYWALLEN_BACKEND_NONE;
-    d->hs_state = WW_HS_IDLE;
+    d->cb          = *cb;
+    d->fd          = -1;
+    d->conn        = WW_CONN_DISCONNECTED;
+    d->bound.phase = WW_STREAM_IDLE;
+    d->backend     = WAYWALLEN_BACKEND_NONE;
+    d->hs_state    = WW_HS_IDLE;
     /* 0 is a valid fd; shadow_dmabuf_fd "unset" sentinel must be -1. */
-    d->current_textures.shadow_dmabuf_fd = -1;
+    d->bound.textures.shadow_dmabuf_fd = -1;
     ww_codec_recv_state_init(&d->hs_recv);
     if (pthread_mutex_init(&d->pending_mutex, NULL) != 0) {
         free(d);
@@ -813,12 +820,12 @@ void waywallen_display_free(waywallen_display_t* d) {
 #endif
     if (leak) abort();
 
-    if (d->has_textures) {
+    if (d->bound.valid) {
         /* The void** arrays we built for the on_textures_ready
          * callback payload — not GPU handles, just heap, safe to
          * free here regardless of thread. */
-        free(d->current_textures.vk_images);
-        free(d->current_textures.vk_memories);
+        free(d->bound.textures.vk_images);
+        free(d->bound.textures.vk_memories);
     }
     pthread_mutex_destroy(&d->pending_mutex);
     ww_codec_recv_state_reset(&d->hs_recv);
@@ -1054,6 +1061,8 @@ static int hs_queue_register(waywallen_display_t* d) {
     return hs_queue_request(d, WW_REQ_REGISTER_DISPLAY, enc_register, &reg);
 }
 
+static void fire_textures_releasing_if_any(waywallen_display_t* d);
+
 int waywallen_display_begin_connect(waywallen_display_t* d, const char* socket_path,
                                     const char* display_name, const char* instance_id,
                                     uint32_t width, uint32_t height, uint32_t refresh_mhz) {
@@ -1061,6 +1070,7 @@ int waywallen_display_begin_connect(waywallen_display_t* d, const char* socket_p
     if (d->conn != WW_CONN_DISCONNECTED && d->conn != WW_CONN_DEAD) {
         return WAYWALLEN_ERR_STATE;
     }
+    fire_textures_releasing_if_any(d);
 
     char path_buf[256];
     if (! socket_path) {
@@ -1091,9 +1101,13 @@ int waywallen_display_begin_connect(waywallen_display_t* d, const char* socket_p
     if (fd < 0) {
         return WAYWALLEN_ERR_IO;
     }
-    d->fd     = fd;
-    d->conn   = WW_CONN_CONNECTING;
-    d->stream = WW_STREAM_INACTIVE;
+    d->fd                         = fd;
+    d->conn                       = WW_CONN_CONNECTING;
+    d->bound.phase                = WW_STREAM_IDLE;
+    d->has_last_buffer_generation = false;
+    d->last_buffer_generation     = 0;
+    d->has_last_config_generation = false;
+    d->last_config_generation     = 0;
     ww_codec_recv_state_reset(&d->hs_recv);
     d->out_len            = 0;
     d->out_pos            = 0;
@@ -1668,9 +1682,9 @@ int waywallen_display_drain(waywallen_display_t* d) {
 }
 
 static void fire_textures_releasing_if_any(waywallen_display_t* d) {
-    if (! d->has_textures) return;
+    if (! d->bound.valid) return;
     if (d->cb.on_textures_releasing) {
-        d->cb.on_textures_releasing(d->cb.user_data, &d->current_textures);
+        d->cb.on_textures_releasing(d->cb.user_data, &d->bound.textures);
     }
 #ifdef WW_HAVE_EGL
     egl_release_current_pool(d);
@@ -1679,12 +1693,14 @@ static void fire_textures_releasing_if_any(waywallen_display_t* d) {
     vk_release_current_pool(d);
 #endif
     /* Free the void** handle arrays we built for the callback payload. */
-    free(d->current_textures.vk_images);
-    free(d->current_textures.vk_memories);
-    memset(&d->current_textures, 0, sizeof(d->current_textures));
+    free(d->bound.textures.vk_images);
+    free(d->bound.textures.vk_memories);
+    memset(&d->bound.textures, 0, sizeof(d->bound.textures));
     /* Re-arm the sentinel after the memset zeroes it. */
-    d->current_textures.shadow_dmabuf_fd = -1;
-    d->has_textures                      = false;
+    d->bound.textures.shadow_dmabuf_fd = -1;
+    d->bound.valid                     = false;
+    d->bound.generation                = 0;
+    d->bound.phase                     = WW_STREAM_IDLE;
 }
 
 #ifdef WW_HAVE_EGL
@@ -1835,15 +1851,20 @@ rollback:
 
 static int handle_bind_buffers(waywallen_display_t* d, const uint8_t* body, size_t body_len,
                                int* fd_buf, size_t n_fds) {
-    /* Close any prior texture state first. */
-    fire_textures_releasing_if_any(d);
-
     ww_evt_bind_buffers_t bb;
     if (ww_evt_bind_buffers_decode(body, body_len, &bb) != WW_OK) {
         close_all_fds(fd_buf, n_fds);
         fire_disconnected(d, WAYWALLEN_ERR_PROTO, "decode bind_buffers");
         return WAYWALLEN_ERR_PROTO;
     }
+    if (d->has_last_buffer_generation && bb.buffer_generation <= d->last_buffer_generation) {
+        close_all_fds(fd_buf, n_fds);
+        ww_evt_bind_buffers_free(&bb);
+        fire_disconnected(d, WAYWALLEN_ERR_PROTO, "non-monotonic buffer_generation");
+        return WAYWALLEN_ERR_PROTO;
+    }
+
+    fire_textures_releasing_if_any(d);
     /* NB: the daemon→display bind_buffers protocol does NOT carry the
      * producer's `flags` field (HOST_VISIBLE etc.) — that's only on the
      * producer↔daemon bridge protocol. So the placement-mode story
@@ -1930,13 +1951,13 @@ static int handle_bind_buffers(waywallen_display_t* d, const uint8_t* body, size
                 uint64_t soff[WAYWALLEN_DMABUF_MAX_PLANES] = { 0 };
                 uint64_t smod                              = 0;
                 if (ww_vk_blitter_get_export(&d->vk_blitter, &sfd, &sn, sstr, soff, &smod) == 0) {
-                    d->current_textures.shadow_dmabuf_fd = sfd;
-                    d->current_textures.shadow_n_planes  = sn;
+                    d->bound.textures.shadow_dmabuf_fd = sfd;
+                    d->bound.textures.shadow_n_planes  = sn;
                     for (uint32_t i = 0; i < sn && i < WAYWALLEN_DMABUF_MAX_PLANES; i++) {
-                        d->current_textures.shadow_strides[i] = sstr[i];
-                        d->current_textures.shadow_offsets[i] = soff[i];
+                        d->bound.textures.shadow_strides[i] = sstr[i];
+                        d->bound.textures.shadow_offsets[i] = soff[i];
                     }
-                    d->current_textures.shadow_modifier = smod;
+                    d->bound.textures.shadow_modifier = smod;
                 }
                 ww_log(WAYWALLEN_LOG_INFO,
                        "dmabuf_relay: shadow ready %ux%u fourcc=0x%x fd=%d",
@@ -1959,25 +1980,27 @@ static int handle_bind_buffers(waywallen_display_t* d, const uint8_t* body, size
         close_all_fds(fd_buf, n_fds);
     }
 
-    d->current_buffer_generation          = bb.buffer_generation;
-    d->current_textures.count             = bb.count;
-    d->current_textures.tex_width         = bb.width;
-    d->current_textures.tex_height        = bb.height;
-    d->current_textures.fourcc            = bb.fourcc;
-    d->current_textures.modifier          = bb.modifier;
-    d->current_textures.planes_per_buffer = bb.planes_per_buffer;
-    d->current_textures.backend           = reported_backend;
-    d->current_textures.egl_images        = reported_egl_images;
-    d->current_textures.gl_textures       = reported_gl_textures;
-    d->current_textures.vk_images         = reported_vk_images;
-    d->current_textures.vk_memories       = reported_vk_memories;
-    d->has_textures                       = true;
+    d->bound.generation                 = bb.buffer_generation;
+    d->bound.textures.count             = bb.count;
+    d->bound.textures.tex_width         = bb.width;
+    d->bound.textures.tex_height        = bb.height;
+    d->bound.textures.fourcc            = bb.fourcc;
+    d->bound.textures.modifier          = bb.modifier;
+    d->bound.textures.planes_per_buffer = bb.planes_per_buffer;
+    d->bound.textures.backend           = reported_backend;
+    d->bound.textures.egl_images        = reported_egl_images;
+    d->bound.textures.gl_textures       = reported_gl_textures;
+    d->bound.textures.vk_images         = reported_vk_images;
+    d->bound.textures.vk_memories       = reported_vk_memories;
+    d->bound.textures.buffer_generation = bb.buffer_generation;
+    d->bound.valid                      = true;
+    d->bound.phase                      = WW_STREAM_PENDING_CONFIG;
+    d->last_buffer_generation           = bb.buffer_generation;
+    d->has_last_buffer_generation       = true;
 
     ww_evt_bind_buffers_free(&bb);
-    d->stream = WW_STREAM_ACTIVE;
-
     if (d->cb.on_textures_ready) {
-        d->cb.on_textures_ready(d->cb.user_data, &d->current_textures);
+        d->cb.on_textures_ready(d->cb.user_data, &d->bound.textures);
     }
     return WAYWALLEN_OK;
 }
@@ -1988,29 +2011,38 @@ static int handle_set_config(waywallen_display_t* d, const uint8_t* body, size_t
         fire_disconnected(d, WAYWALLEN_ERR_PROTO, "decode set_config");
         return WAYWALLEN_ERR_PROTO;
     }
-    /* Only valid after bind_buffers. */
-    if (d->stream != WW_STREAM_ACTIVE) {
+    /* Only valid for the current pool. BindBuffers leaves the stream in
+     * PENDING_CONFIG until this event completes. */
+    if (! d->bound.valid || d->bound.phase == WW_STREAM_IDLE) {
         ww_evt_set_config_free(&sc);
         fire_disconnected(d, WAYWALLEN_ERR_PROTO, "set_config in invalid state");
         return WAYWALLEN_ERR_PROTO;
     }
-    waywallen_config_t cfg;
-    cfg.source_rect.x  = sc.source_rect.x;
-    cfg.source_rect.y  = sc.source_rect.y;
-    cfg.source_rect.w  = sc.source_rect.w;
-    cfg.source_rect.h  = sc.source_rect.h;
-    cfg.dest_rect.x    = sc.dest_rect.x;
-    cfg.dest_rect.y    = sc.dest_rect.y;
-    cfg.dest_rect.w    = sc.dest_rect.w;
-    cfg.dest_rect.h    = sc.dest_rect.h;
-    cfg.transform      = sc.transform;
-    cfg.clear_color[0] = sc.clear_r;
-    cfg.clear_color[1] = sc.clear_g;
-    cfg.clear_color[2] = sc.clear_b;
-    cfg.clear_color[3] = sc.clear_a;
+    if (d->has_last_config_generation && sc.config_generation <= d->last_config_generation) {
+        ww_evt_set_config_free(&sc);
+        fire_disconnected(d, WAYWALLEN_ERR_PROTO, "non-monotonic config_generation");
+        return WAYWALLEN_ERR_PROTO;
+    }
+    waywallen_config_t cfg        = { 0 };
+    cfg.source_rect.x             = sc.source_rect.x;
+    cfg.source_rect.y             = sc.source_rect.y;
+    cfg.source_rect.w             = sc.source_rect.w;
+    cfg.source_rect.h             = sc.source_rect.h;
+    cfg.dest_rect.x               = sc.dest_rect.x;
+    cfg.dest_rect.y               = sc.dest_rect.y;
+    cfg.dest_rect.w               = sc.dest_rect.w;
+    cfg.dest_rect.h               = sc.dest_rect.h;
+    cfg.transform                 = sc.transform;
+    cfg.clear_color[0]            = sc.clear_r;
+    cfg.clear_color[1]            = sc.clear_g;
+    cfg.clear_color[2]            = sc.clear_b;
+    cfg.clear_color[3]            = sc.clear_a;
+    cfg.buffer_generation         = d->bound.generation;
+    cfg.config_generation         = sc.config_generation;
+    d->last_config_generation     = sc.config_generation;
+    d->has_last_config_generation = true;
+    d->bound.phase                = WW_STREAM_ACTIVE;
     ww_evt_set_config_free(&sc);
-
-    /* stream stays ACTIVE */
 
     if (d->cb.on_config) {
         d->cb.on_config(d->cb.user_data, &cfg);
@@ -2035,19 +2067,20 @@ static int handle_frame_ready(waywallen_display_t* d, const uint8_t* body, size_
     }
     int acquire_fd         = fd_buf[0];
     int release_syncobj_fd = fd_buf[1];
-    if (d->stream != WW_STREAM_ACTIVE) {
+    /* A frame from the retired pool can still be queued behind a newer
+     * BindBuffers. It is stale regardless of the new pool's config state. */
+    if (! d->bound.valid || fr.buffer_generation != d->bound.generation) {
         close(acquire_fd);
-        close(release_syncobj_fd);
-        ww_evt_frame_ready_free(&fr);
-        fire_disconnected(d, WAYWALLEN_ERR_PROTO, "frame_ready in wrong state");
-        return WAYWALLEN_ERR_PROTO;
-    }
-    /* Drop stale-generation frames silently. */
-    if (fr.buffer_generation != d->current_buffer_generation) {
-        close(acquire_fd);
-        close(release_syncobj_fd);
+        (void)waywallen_display_signal_release_syncobj(release_syncobj_fd);
         ww_evt_frame_ready_free(&fr);
         return WAYWALLEN_OK;
+    }
+    if (d->bound.phase != WW_STREAM_ACTIVE) {
+        close(acquire_fd);
+        (void)waywallen_display_signal_release_syncobj(release_syncobj_fd);
+        ww_evt_frame_ready_free(&fr);
+        fire_disconnected(d, WAYWALLEN_ERR_PROTO, "frame_ready before set_config");
+        return WAYWALLEN_ERR_PROTO;
     }
 
     int   fd_handled        = 0;
@@ -2097,8 +2130,8 @@ static int handle_frame_ready(waywallen_display_t* d, const uint8_t* body, size_
              * own success/failure paths — pass ownership through. */
             (void)ww_vk_blitter_blit(&d->vk_blitter,
                                      d->vk_images[slot].image,
-                                     d->current_textures.tex_width,
-                                     d->current_textures.tex_height,
+                                     d->bound.textures.tex_width,
+                                     d->bound.textures.tex_height,
                                      acq_sem,
                                      release_syncobj_fd);
         } else if (release_syncobj_fd >= 0) {
@@ -2115,7 +2148,7 @@ static int handle_frame_ready(waywallen_display_t* d, const uint8_t* body, size_
         close(acquire_fd);
     }
 
-    waywallen_frame_t frame;
+    waywallen_frame_t frame    = { 0 };
     frame.buffer_index         = fr.buffer_index;
     frame.seq                  = fr.seq;
     frame.vk_acquire_semaphore = acquire_semaphore;
@@ -2123,6 +2156,7 @@ static int handle_frame_ready(waywallen_display_t* d, const uint8_t* body, size_
      * the host MUST signal it from its release GPU work and then close.
      * DMABUF_RELAY mode sets this to -1: the lib already signaled. */
     frame.release_syncobj_fd = release_syncobj_fd;
+    frame.buffer_generation  = fr.buffer_generation;
     ww_evt_frame_ready_free(&fr);
 
     if (d->cb.on_frame_ready) {
@@ -2142,8 +2176,11 @@ static int handle_unbind(waywallen_display_t* d, const uint8_t* body, size_t bod
     }
     uint64_t buffer_generation = ub.buffer_generation;
     ww_evt_unbind_free(&ub);
+    if (! d->bound.valid || buffer_generation != d->bound.generation) {
+        fire_disconnected(d, WAYWALLEN_ERR_PROTO, "unbind generation mismatch");
+        return WAYWALLEN_ERR_PROTO;
+    }
     fire_textures_releasing_if_any(d);
-    d->stream = WW_STREAM_INACTIVE;
     /* Send unbind_done so the daemon knows our host-side teardown has
      * been initiated and it's safe to proceed with the producer's
      * Shutdown. The actual GPU drain is async (host runs it on its
@@ -2432,9 +2469,9 @@ void waywallen_display_close(waywallen_display_t* d) {
         ww_vk_destroy_owned(&d->vk_owned);
     }
 #endif
-    d->conn     = WW_CONN_DISCONNECTED;
-    d->stream   = WW_STREAM_INACTIVE;
-    d->hs_state = WW_HS_IDLE;
+    d->conn        = WW_CONN_DISCONNECTED;
+    d->bound.phase = WW_STREAM_IDLE;
+    d->hs_state    = WW_HS_IDLE;
     ww_codec_recv_state_reset(&d->hs_recv);
     d->out_len = 0;
     d->out_pos = 0;
@@ -2473,7 +2510,7 @@ waywallen_conn_state_t waywallen_display_conn_state(waywallen_display_t* d) {
 
 waywallen_stream_state_t waywallen_display_stream_state(waywallen_display_t* d) {
     if (! d) return WAYWALLEN_STREAM_INACTIVE;
-    return (waywallen_stream_state_t)d->stream;
+    return d->bound.phase == WW_STREAM_IDLE ? WAYWALLEN_STREAM_INACTIVE : WAYWALLEN_STREAM_ACTIVE;
 }
 
 uint64_t waywallen_display_get_display_id(waywallen_display_t* d) {

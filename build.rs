@@ -1,19 +1,44 @@
+use std::fs;
 use std::path::PathBuf;
 
 fn main() {
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    let version_major = std::env::var("CARGO_PKG_VERSION_MAJOR").unwrap();
+    let version_minor = std::env::var("CARGO_PKG_VERSION_MINOR").unwrap();
+    let version_patch = std::env::var("CARGO_PKG_VERSION_PATCH").unwrap();
+
+    fs::write(
+        out_dir.join("waywallen_display_version.h"),
+        format!(
+            "#ifndef WAYWALLEN_DISPLAY_VERSION_H\n\
+             #define WAYWALLEN_DISPLAY_VERSION_H\n\n\
+             #define WAYWALLEN_DISPLAY_VERSION_MAJOR {version_major}\n\
+             #define WAYWALLEN_DISPLAY_VERSION_MINOR {version_minor}\n\n\
+             #endif\n"
+        ),
+    )
+    .unwrap();
+    fs::write(
+        out_dir.join("version.rs"),
+        format!(
+            "pub const WAYWALLEN_DISPLAY_VERSION_MAJOR: u32 = {version_major};\n\
+             pub const WAYWALLEN_DISPLAY_VERSION_MINOR: u32 = {version_minor};\n\
+             pub const WAYWALLEN_DISPLAY_VERSION_PATCH: u32 = {version_patch};\n"
+        ),
+    )
+    .unwrap();
 
     let egl = cfg!(feature = "egl");
     let vulkan = cfg!(feature = "vulkan");
 
     let mut build = cc::Build::new();
     build
+        .include(&out_dir)
         .include(manifest_dir.join("include"))
         .include(manifest_dir.join("src"))
         .include(manifest_dir.join("src/generated"))
-        .define("WAYWALLEN_DISPLAY_VERSION_MAJOR", "0")
-        .define("WAYWALLEN_DISPLAY_VERSION_MINOR", "2")
-        .define("WAYWALLEN_DISPLAY_VERSION_PATCH", "4")
+        .define("WAYWALLEN_DISPLAY_VERSION_PATCH", version_patch.as_str())
         .file(manifest_dir.join("src/display.c"))
         .file(manifest_dir.join("src/codec.c"))
         .file(manifest_dir.join("src/generated/ww_proto.c"))

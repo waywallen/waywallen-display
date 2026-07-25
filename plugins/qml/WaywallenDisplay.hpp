@@ -1,5 +1,7 @@
 #pragma once
 
+#include "PresentationState.hpp"
+
 #include <QColor>
 #include <QMutex>
 #include <QPointer>
@@ -11,6 +13,7 @@
 #include <QVector>
 #include <qqml.h>
 #include <cstdint>
+#include <memory>
 
 #ifdef WW_HAVE_VULKAN
 #    include "backend_vulkan_blit.h"
@@ -24,6 +27,8 @@ struct waywallen_config;
 typedef struct waywallen_config waywallen_config_t;
 struct waywallen_frame;
 typedef struct waywallen_frame waywallen_frame_t;
+
+class RenderSessionResources;
 
 class WaywallenDisplay : public QQuickItem {
     Q_OBJECT
@@ -139,13 +144,6 @@ public:
 
     bool eventFilter(QObject* obj, QEvent* event) override;
 
-    // Tear down GPU-touching state (m_display + m_vkBlitter). Runs on
-    // the render thread when invoked via the cleanup() scheduleRenderJob
-    // hop, or inline on the GUI thread as the best-effort fallback.
-    // Public so the file-local TeardownJob in WaywallenDisplay.cpp can
-    // call it without a friend declaration.
-    void renderThreadFinalize();
-
 signals:
     void socketPathChanged();
     void displayNameChanged();
@@ -166,6 +164,7 @@ signals:
 protected:
     QSGNode* updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData* data) override;
     void     componentComplete() override;
+    void     releaseResources() override;
 
 private slots:
     void onSocketReadable();
@@ -178,16 +177,22 @@ private slots:
     void pushSizeUpdate();
 
 private:
-    void     tryConnect();
-    void     cleanup();
-    void     setupDBusWatcher();
-    void     flushPendingRelease();
-    void     handleDisconnect(int errCode, const char* msg);
-    void     setConnState(ConnState s);
-    void     setStreamState(StreamState s);
-    QString  screenIdentityKey() const;
-    QString  effectiveInstanceId() const;
-    uint32_t screenRefreshMhz() const;
+    using ConfigSnapshot  = PresentationState::Config;
+    using ContentSnapshot = PresentationState::Content;
+
+    void                                    tryConnect();
+    void                                    cleanup();
+    std::shared_ptr<RenderSessionResources> takeRenderSessionResources();
+    std::shared_ptr<RenderSessionResources> renderSessionResources() const;
+    waywallen_display_t*                    displayHandle() const;
+    void                                    setupDBusWatcher();
+    void                                    flushPendingRelease();
+    void                                    handleDisconnect(int errCode, const char* msg);
+    void                                    setConnState(ConnState s);
+    void                                    setStreamState(StreamState s);
+    QString                                 screenIdentityKey() const;
+    QString                                 effectiveInstanceId() const;
+    uint32_t                                screenRefreshMhz() const;
     /* Probe wants_writable and toggle m_notifierWrite::setEnabled.
      * Call after any post-handshake send that may have left bytes
      * queued in the lib's outbox (update_size, pointer events). */
@@ -196,17 +201,25 @@ private:
     bool bindEglBackend();
     bool bindVulkanBackend();
     void ensureGlTextures();
-    /* Blit imported GL texture at `slot` into m_eglShadowTex; resize
-     * shadow if dims changed. Render thread only. Returns true if
-     * shadow now has valid content. */
-    bool blitEglShadow(int slot);
-    void releaseEglFrame(int releaseSyncobjFd, bool afterGpuWork);
+    enum class EglBlitResult
+    {
+        Failed,
+        FailedAfterGpuWork,
+        CurrentUpdated,
+        CandidateReady,
+    };
+    /* Blit an imported GL texture into the current shadow or a separate
+     * replacement. Render thread only. */
+    EglBlitResult blitEglShadow(int slot, int width, int height, bool forceReplace);
+    void          releaseEglFrame(int releaseSyncobjFd, bool afterGpuWork);
     /* Render-thread job: drains m_pendingEgl, ensures GL textures,
      * runs blitEglShadow. Scheduled from c_on_frame_ready via
      * scheduleRenderJob(BeforeSynchronizingStage). */
     void renderThreadBlitEgl();
-    /* Tear down shadow tex/FBOs. Render thread only. */
-    void destroyEglShadow();
+    void commitPresentedContent(uint64_t generation, int width, int height, uint32_t fourcc,
+                                const ConfigSnapshot& config);
+    void publishPresentationCommit(qulonglong serial, const QColor& clearColor);
+    void setPresentedClearColor(const QColor& color);
 
     // C callback trampolines.
     static void c_on_textures_ready(void* ud, const waywallen_textures_t* t);
@@ -239,8 +252,8 @@ private:
     quint32 m_windowStateFlags { 0 };
     bool    m_windowStateFlagsDirty { false };
 
-    // C library handle.
-    waywallen_display_t* m_display { nullptr };
+    mutable QMutex                          m_resourcesMutex;
+    std::shared_ptr<RenderSessionResources> m_renderResources;
     /* QPointer so cross-thread access (sceneGraphInvalidated lambda
      * runs on render thread) is safe — QPointer auto-clears when the
      * underlying QObject is destroyed via deleteLater, and reads of
@@ -265,16 +278,16 @@ private:
         BackendVulkan
     };
     ActiveBackend m_activeBackend { BackendNone };
-    bool          m_contentRevisionPending { false };
+
+    PresentationState m_presentationState;
+    qulonglong        m_presentationSerial { 0 };
+    qulonglong        m_notifiedPresentationSerial { 0 };
 
     // EGL texture state (GL textures created lazily on render thread).
     bool          m_eglImagesValid { false };
     bool          m_glTexturesCreated { false };
     QVector<uint> m_glTextures;
-    int           m_texWidth { 0 };
-    int           m_texHeight { 0 };
     uint32_t      m_textureCount { 0 };
-    int           m_currentSlot { -1 };
 
     // Host-owned shadow GL texture for the EGL path. Mirrors the
     // Vulkan blitter's shadow image: each frame we blit imported
@@ -282,29 +295,19 @@ private:
     // texture from pool transitions so that on `unbind` the prior
     // frame stays on screen until the next pool's first frame
     // arrives — same continuity the Vulkan path gets for free.
-    uint m_eglShadowTex { 0 };
-    uint m_eglShadowFbo { 0 }; // draw target for blit
-    uint m_eglReadFbo { 0 };   // src side for blit
-    int  m_eglShadowW { 0 };
-    int  m_eglShadowH { 0 };
-    bool m_eglShadowHasContent { false };
-    // Slot currently held in m_eglShadowTex. -1 = shadow stale / empty.
-    // Lets renderThreadBlitEgl skip a redundant blit when a job fires
-    // for a slot we've already copied (e.g. coalesced burst of paints).
-    int m_eglShadowSlot { -1 };
-
     // Most-recent unblitted EGL frame, populated on the GUI thread by
     // c_on_frame_ready and consumed on the render thread by
     // renderThreadBlitEgl. Mirrors PendingVkFrame but EGL has no
     // acquire semaphore (GL is queue-ordered, no cross-process sync
     // needed). Mutex-protected by m_pendingMutex.
     struct PendingEglFrame {
-        bool valid { false };
-        int  slot { -1 };
-        int  releaseSyncobjFd { -1 };
+        bool     valid { false };
+        int      slot { -1 };
+        int      releaseSyncobjFd { -1 };
+        uint64_t bufferGeneration { 0 };
     };
     PendingEglFrame m_pendingEgl;
-    void*           m_eglDisplay { nullptr };
+    ContentSnapshot m_preparedEglContent;
 
     // Shared between EGL m_pendingEgl and Vulkan m_pendingVk.
     QMutex m_pendingMutex;
@@ -312,15 +315,8 @@ private:
     // Vulkan texture state.
     bool           m_vkImagesValid { false };
     QVector<void*> m_vkImages;
-    uint32_t       m_vkFourcc { 0 };
 
 #ifdef WW_HAVE_VULKAN
-    // Owned by render thread; created on first updatePaintNode after
-    // a Vulkan textures_ready. Copies imported dmabuf images into a
-    // sampler-friendly OPTIMAL VkImage Qt actually samples.
-    ww_vk_blitter_t m_vkBlitter {};
-    bool            m_vkBlitterInited { false };
-
     // Cached on bindVulkanBackend.
     void*    m_vkInstance { nullptr };
     void*    m_vkPhys { nullptr };
@@ -334,22 +330,12 @@ private:
     // updatePaintNode. Older pending frames are released immediately
     // because they were never submitted to GPU work.
     struct PendingVkFrame {
-        bool  valid { false };
-        int   slot { -1 };
-        void* acquireSem { nullptr }; // VkSemaphore (lib-imported sync_fd)
-        int   releaseSyncobjFd { -1 };
+        bool     valid { false };
+        int      slot { -1 };
+        void*    acquireSem { nullptr }; // VkSemaphore (lib-imported sync_fd)
+        int      releaseSyncobjFd { -1 };
+        uint64_t bufferGeneration { 0 };
     };
     PendingVkFrame m_pendingVk;
 #endif
-
-    // Config from on_config.
-    QRectF m_sourceRect;
-    QRectF m_destRect;
-    // wl_output-style transform from the daemon: 0=normal, 1=90°CCW,
-    // 2=180°, 3=270°CCW. The daemon's per-display Rotation enum only
-    // emits 0..3 (no flipped variants). Used in updatePaintNode to
-    // build the QSGTransformNode that rotates the texture into the
-    // post-rotation display rect; m_destRect is in *pre-rotation*
-    // display coords so the math is just rotate-around-display-center.
-    uint32_t m_transform { 0 };
 };

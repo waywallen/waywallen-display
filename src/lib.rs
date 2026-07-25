@@ -17,9 +17,7 @@
 
 use core::ffi::{c_char, c_int, c_void};
 
-pub const WAYWALLEN_DISPLAY_VERSION_MAJOR: u32 = 0;
-pub const WAYWALLEN_DISPLAY_VERSION_MINOR: u32 = 2;
-pub const WAYWALLEN_DISPLAY_VERSION_PATCH: u32 = 4;
+include!(concat!(env!("OUT_DIR"), "/version.rs"));
 pub const WAYWALLEN_DISPLAY_PROTOCOL_VERSION: u32 = 7;
 
 // -----------------------------------------------------------------------------
@@ -139,6 +137,7 @@ pub struct waywallen_textures_t {
     pub shadow_strides: [u32; 4],
     pub shadow_offsets: [u64; 4],
     pub shadow_modifier: u64,
+    pub buffer_generation: u64,
 }
 
 #[repr(C)]
@@ -147,6 +146,8 @@ pub struct waywallen_config_t {
     pub dest_rect: waywallen_rect_t,
     pub transform: u32,
     pub clear_color: [f32; 4],
+    pub buffer_generation: u64,
+    pub config_generation: u64,
 }
 
 #[repr(C)]
@@ -155,6 +156,7 @@ pub struct waywallen_frame_t {
     pub seq: u64,
     pub vk_acquire_semaphore: *mut c_void,
     pub release_syncobj_fd: c_int,
+    pub buffer_generation: u64,
 }
 
 // -----------------------------------------------------------------------------

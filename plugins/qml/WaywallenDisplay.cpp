@@ -15,19 +15,129 @@
 #include <QQuickWindow>
 #include <QRunnable>
 #include <QScreen>
+#include <QSGImageNode>
+#include <QSGRectangleNode>
 #include <QSGRendererInterface>
-#include <QSGSimpleTextureNode>
 #include <QSGTransformNode>
 #include <QWheelEvent>
 #include <QtGui/qopenglcontext_platform.h>
 #include <QtQuick/qsgtexture_platform.h>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
-#include <cstring>
+#include <cerrno>
 #include <limits>
+#include <utility>
 #include <unistd.h>
 
 Q_LOGGING_CATEGORY(lcWD, "waywallen.display")
+
+class RenderSessionResources {
+public:
+    ~RenderSessionResources() {
+        if (display) {
+            qCCritical(lcWD,
+                       "render-session cleanup job was discarded; GPU resources are retained "
+                       "until process exit");
+        }
+    }
+
+    void shutdown() {
+#ifdef WW_HAVE_VULKAN
+        if (vkBlitterInited) {
+            ww_vk_blitter_shutdown(&vkBlitter);
+            vkBlitterInited = false;
+        }
+#endif
+        if (display) {
+            waywallen_display_shutdown(display);
+            display = nullptr;
+        }
+        destroyEglShadow();
+        eglDisplay = nullptr;
+    }
+
+    void destroyEglShadow() {
+        auto* ctx = QOpenGLContext::currentContext();
+        if (ctx) {
+            auto* gl = ctx->extraFunctions();
+            if (gl) {
+                if (eglShadowFbo) gl->glDeleteFramebuffers(1, &eglShadowFbo);
+                if (eglCandidateFbo) gl->glDeleteFramebuffers(1, &eglCandidateFbo);
+                if (eglReadFbo) gl->glDeleteFramebuffers(1, &eglReadFbo);
+                if (eglShadowTex) gl->glDeleteTextures(1, &eglShadowTex);
+                if (eglCandidateTex) gl->glDeleteTextures(1, &eglCandidateTex);
+            }
+        }
+        eglShadowFbo           = 0;
+        eglReadFbo             = 0;
+        eglShadowTex           = 0;
+        eglCandidateFbo        = 0;
+        eglCandidateTex        = 0;
+        eglCandidateW          = 0;
+        eglCandidateH          = 0;
+        eglShadowW             = 0;
+        eglShadowH             = 0;
+        eglShadowHasContent    = false;
+        eglCandidateHasContent = false;
+    }
+
+    bool discardEglCandidate() {
+        if (! eglCandidateTex && ! eglCandidateFbo) return true;
+        auto* ctx = QOpenGLContext::currentContext();
+        auto* gl  = ctx ? ctx->extraFunctions() : nullptr;
+        if (! gl) return false;
+        if (eglCandidateFbo) gl->glDeleteFramebuffers(1, &eglCandidateFbo);
+        if (eglCandidateTex) gl->glDeleteTextures(1, &eglCandidateTex);
+        eglCandidateFbo        = 0;
+        eglCandidateTex        = 0;
+        eglCandidateW          = 0;
+        eglCandidateH          = 0;
+        eglCandidateHasContent = false;
+        return true;
+    }
+
+    bool commitEglCandidate() {
+        if (! eglCandidateTex || ! eglCandidateFbo || ! eglCandidateHasContent) return false;
+        auto* ctx = QOpenGLContext::currentContext();
+        auto* gl  = ctx ? ctx->extraFunctions() : nullptr;
+        if ((eglShadowTex || eglShadowFbo) && ! gl) return false;
+
+        const uint oldFbo      = eglShadowFbo;
+        const uint oldTex      = eglShadowTex;
+        eglShadowFbo           = eglCandidateFbo;
+        eglShadowTex           = eglCandidateTex;
+        eglShadowW             = eglCandidateW;
+        eglShadowH             = eglCandidateH;
+        eglShadowHasContent    = true;
+        eglCandidateFbo        = 0;
+        eglCandidateTex        = 0;
+        eglCandidateW          = 0;
+        eglCandidateH          = 0;
+        eglCandidateHasContent = false;
+
+        if (oldFbo) gl->glDeleteFramebuffers(1, &oldFbo);
+        if (oldTex) gl->glDeleteTextures(1, &oldTex);
+        return true;
+    }
+
+    waywallen_display_t* display { nullptr };
+    uint                 eglShadowTex { 0 };
+    uint                 eglShadowFbo { 0 };
+    uint                 eglReadFbo { 0 };
+    int                  eglShadowW { 0 };
+    int                  eglShadowH { 0 };
+    bool                 eglShadowHasContent { false };
+    uint                 eglCandidateTex { 0 };
+    uint                 eglCandidateFbo { 0 };
+    int                  eglCandidateW { 0 };
+    int                  eglCandidateH { 0 };
+    bool                 eglCandidateHasContent { false };
+    void*                eglDisplay { nullptr };
+#ifdef WW_HAVE_VULKAN
+    ww_vk_blitter_t vkBlitter {};
+    bool            vkBlitterInited { false };
+#endif
+};
 
 namespace
 {
@@ -44,6 +154,72 @@ public:
 
 private:
     std::function<void()> m_fn;
+};
+
+class RenderSessionCleanupJob : public QRunnable {
+public:
+    explicit RenderSessionCleanupJob(std::shared_ptr<RenderSessionResources> resources)
+        : m_resources(std::move(resources)) {
+        setAutoDelete(true);
+    }
+
+    void run() override {
+        m_resources->shutdown();
+        m_resources.reset();
+    }
+
+private:
+    std::shared_ptr<RenderSessionResources> m_resources;
+};
+
+class PresentationNode final : public QSGNode {
+public:
+    enum class TextureBackend
+    {
+        None,
+        OpenGL,
+        Vulkan,
+    };
+
+    static PresentationNode* create(QQuickWindow* window) {
+        auto* clear = window->createRectangleNode();
+        auto* image = window->createImageNode();
+        if (! clear || ! image) {
+            delete clear;
+            delete image;
+            return nullptr;
+        }
+        return new PresentationNode(clear, image);
+    }
+
+    QSGRectangleNode* clearNode;
+    QSGTransformNode* transformNode;
+    QSGImageNode*     imageNode;
+    TextureBackend    textureBackend { TextureBackend::None };
+    quintptr          nativeTexture { 0 };
+    QSize             textureSize;
+
+    void installTexture(QSGTexture* texture, TextureBackend backend, quintptr handle,
+                        const QSize& size) {
+        imageNode->setTexture(texture);
+        textureBackend = backend;
+        nativeTexture  = handle;
+        textureSize    = size;
+    }
+
+    bool wraps(TextureBackend backend, quintptr handle, const QSize& size) const {
+        return textureBackend == backend && nativeTexture == handle && textureSize == size;
+    }
+
+private:
+    PresentationNode(QSGRectangleNode* clear, QSGImageNode* image)
+        : clearNode(clear), transformNode(new QSGTransformNode()), imageNode(image) {
+        imageNode->setFiltering(QSGTexture::Linear);
+        imageNode->setOwnsTexture(true);
+        appendChildNode(clearNode);
+        appendChildNode(transformNode);
+        transformNode->appendChildNode(imageNode);
+    }
 };
 
 QString screenPart(const QString& value) { return value.trimmed(); }
@@ -86,11 +262,9 @@ static void qtLogBridge(waywallen_log_level_t level, const char* msg, void*) {
 // ---------------------------------------------------------------------------
 
 void WaywallenDisplay::c_on_textures_ready(void* ud, const waywallen_textures_t* t) {
-    auto* self               = static_cast<WaywallenDisplay*>(ud);
-    self->m_textureCount     = t->count;
-    self->m_texWidth         = static_cast<int>(t->tex_width);
-    self->m_texHeight        = static_cast<int>(t->tex_height);
-    bool hasNewContentSource = false;
+    auto* self           = static_cast<WaywallenDisplay*>(ud);
+    self->m_textureCount = t->count;
+    bool imported        = false;
 
     if (t->backend == WAYWALLEN_BACKEND_EGL && t->egl_images) {
         qCInfo(lcWD,
@@ -102,7 +276,7 @@ void WaywallenDisplay::c_on_textures_ready(void* ud, const waywallen_textures_t*
         self->m_eglImagesValid    = true;
         self->m_glTexturesCreated = false;
         self->m_glTextures.clear();
-        hasNewContentSource = true;
+        imported = true;
     } else if (t->backend == WAYWALLEN_BACKEND_VULKAN && t->vk_images) {
         qCInfo(lcWD,
                "textures ready: Vulkan, count=%u, size=%ux%u, fourcc=0x%x",
@@ -114,21 +288,26 @@ void WaywallenDisplay::c_on_textures_ready(void* ud, const waywallen_textures_t*
         self->m_vkImages.resize(static_cast<int>(t->count));
         for (uint32_t i = 0; i < t->count; i++)
             self->m_vkImages[static_cast<int>(i)] = t->vk_images[i];
-        self->m_vkFourcc    = t->fourcc;
-        hasNewContentSource = true;
+        imported = true;
     } else {
         qCWarning(lcWD, "textures ready: backend=%d but no handles", t->backend);
         self->m_eglImagesValid = false;
         self->m_vkImagesValid  = false;
     }
-    self->m_contentRevisionPending = hasNewContentSource;
+    {
+        QMutexLocker lk(&self->m_pendingMutex);
+        self->m_presentationState.beginIncoming(t->buffer_generation,
+                                                static_cast<int>(t->tex_width),
+                                                static_cast<int>(t->tex_height),
+                                                t->fourcc,
+                                                imported);
+    }
     self->setStreamState(Active);
 }
 
 void WaywallenDisplay::c_on_textures_releasing(void* ud, const waywallen_textures_t* t) {
     auto* self = static_cast<WaywallenDisplay*>(ud);
-    Q_UNUSED(t);
-    qCInfo(lcWD, "textures releasing");
+    qCInfo(lcWD, "textures releasing: generation=%llu", qulonglong(t->buffer_generation));
     self->flushPendingRelease();
 
     // GL textures are owned by the C library (created via
@@ -137,18 +316,16 @@ void WaywallenDisplay::c_on_textures_releasing(void* ud, const waywallen_texture
     self->m_eglImagesValid    = false;
     self->m_glTexturesCreated = false;
     self->m_glTextures.clear();
-    // Drop any unblitted EGL frame queued by c_on_frame_ready before
-    // the render thread got to it — m_glTextures is gone now.
     {
         QMutexLocker lk(&self->m_pendingMutex);
-        self->m_pendingEgl = PendingEglFrame {};
+        self->m_presentationState.retireIncoming(t->buffer_generation);
+        if (self->m_preparedEglContent.bufferGeneration == t->buffer_generation) {
+            self->m_preparedEglContent = ContentSnapshot {};
+        }
     }
-    self->m_eglShadowSlot = -1;
     self->m_vkImagesValid = false;
     self->m_vkImages.clear();
-    self->m_currentSlot            = -1;
-    self->m_textureCount           = 0;
-    self->m_contentRevisionPending = false;
+    self->m_textureCount = 0;
 
 #ifdef WW_HAVE_VULKAN
     {
@@ -168,37 +345,64 @@ void WaywallenDisplay::c_on_textures_releasing(void* ud, const waywallen_texture
 }
 
 void WaywallenDisplay::c_on_config(void* ud, const waywallen_config_t* c) {
-    auto* self         = static_cast<WaywallenDisplay*>(ud);
-    self->m_sourceRect = QRectF(static_cast<qreal>(c->source_rect.x),
-                                static_cast<qreal>(c->source_rect.y),
-                                static_cast<qreal>(c->source_rect.w),
-                                static_cast<qreal>(c->source_rect.h));
-    self->m_destRect   = QRectF(static_cast<qreal>(c->dest_rect.x),
-                                static_cast<qreal>(c->dest_rect.y),
-                                static_cast<qreal>(c->dest_rect.w),
-                                static_cast<qreal>(c->dest_rect.h));
-    self->m_clearColor = QColor::fromRgbF(static_cast<qreal>(c->clear_color[0]),
-                                          static_cast<qreal>(c->clear_color[1]),
-                                          static_cast<qreal>(c->clear_color[2]),
-                                          static_cast<qreal>(c->clear_color[3]));
-    self->m_transform  = c->transform;
-    emit self->clearColorChanged();
-    // Schedule a repaint so a fillmode/align/rotation change applied
-    // while no new frame is in flight still becomes visible —
-    // updatePaintNode re-reads m_sourceRect/m_destRect/m_transform.
-    self->update();
+    auto*          self = static_cast<WaywallenDisplay*>(ud);
+    ConfigSnapshot config;
+    config.valid            = true;
+    config.bufferGeneration = c->buffer_generation;
+    config.configGeneration = c->config_generation;
+    config.sourceRect       = QRectF(static_cast<qreal>(c->source_rect.x),
+                                     static_cast<qreal>(c->source_rect.y),
+                                     static_cast<qreal>(c->source_rect.w),
+                                     static_cast<qreal>(c->source_rect.h));
+    config.destRect         = QRectF(static_cast<qreal>(c->dest_rect.x),
+                                     static_cast<qreal>(c->dest_rect.y),
+                                     static_cast<qreal>(c->dest_rect.w),
+                                     static_cast<qreal>(c->dest_rect.h));
+    config.clearColor       = QColor::fromRgbF(static_cast<qreal>(c->clear_color[0]),
+                                               static_cast<qreal>(c->clear_color[1]),
+                                               static_cast<qreal>(c->clear_color[2]),
+                                               static_cast<qreal>(c->clear_color[3]));
+    config.transform        = c->transform;
+
+    bool updatesPresented = false;
+    {
+        QMutexLocker lk(&self->m_pendingMutex);
+        const auto   result = self->m_presentationState.applyConfig(config);
+        if (result == PresentationState::ConfigResult::Rejected) {
+            qCWarning(lcWD,
+                      "config generation=%llu targets unexpected buffer generation=%llu",
+                      qulonglong(c->config_generation),
+                      qulonglong(c->buffer_generation));
+            return;
+        }
+        updatesPresented = result == PresentationState::ConfigResult::PresentedUpdated;
+    }
+    if (updatesPresented) {
+        self->setPresentedClearColor(config.clearColor);
+        self->update();
+    }
 }
 
 void WaywallenDisplay::c_on_frame_ready(void* ud, const waywallen_frame_t* f) {
     auto* self = static_cast<WaywallenDisplay*>(ud);
     self->m_framesReceived++;
-    self->m_currentSlot = static_cast<int>(f->buffer_index);
-    if (self->m_contentRevisionPending) {
-        self->m_contentRevisionPending = false;
-        self->m_contentRevision++;
-        emit self->contentRevisionChanged();
-    }
 
+    bool validIncoming = false;
+    {
+        QMutexLocker    lk(&self->m_pendingMutex);
+        ContentSnapshot incoming;
+        validIncoming = self->m_presentationState.incomingFor(f->buffer_generation, incoming);
+    }
+    if (! validIncoming) {
+        qCWarning(lcWD,
+                  "dropping frame for unconfigured generation=%llu",
+                  qulonglong(f->buffer_generation));
+        if (f->release_syncobj_fd >= 0) {
+            (void)waywallen_display_signal_release_syncobj(f->release_syncobj_fd);
+        }
+        emit self->framesReceivedChanged();
+        return;
+    }
 #ifdef WW_HAVE_VULKAN
     if (self->m_activeBackend == BackendVulkan) {
         // Hand-off to render thread. If a prior frame is still queued
@@ -212,6 +416,7 @@ void WaywallenDisplay::c_on_frame_ready(void* ud, const waywallen_frame_t* f) {
         self->m_pendingVk.slot             = static_cast<int>(f->buffer_index);
         self->m_pendingVk.acquireSem       = f->vk_acquire_semaphore;
         self->m_pendingVk.releaseSyncobjFd = f->release_syncobj_fd;
+        self->m_pendingVk.bufferGeneration = f->buffer_generation;
     } else
 #endif
         if (self->m_activeBackend == BackendEGL) {
@@ -219,7 +424,7 @@ void WaywallenDisplay::c_on_frame_ready(void* ud, const waywallen_frame_t* f) {
         // job that does the GPU copy. BeforeSynchronizingStage runs on
         // the render thread immediately before sync (so before our
         // updatePaintNode), guaranteeing the shadow is fresh by the time
-        // Qt samples it. NoStage would race with sync. Same slot doesn't
+        // Qt samples it. NoStage would race with sync. The queued slot
         // is copied exactly once by the job that consumes it.
         {
             QMutexLocker lk(&self->m_pendingMutex);
@@ -229,11 +434,12 @@ void WaywallenDisplay::c_on_frame_ready(void* ud, const waywallen_frame_t* f) {
             self->m_pendingEgl.valid            = true;
             self->m_pendingEgl.slot             = static_cast<int>(f->buffer_index);
             self->m_pendingEgl.releaseSyncobjFd = f->release_syncobj_fd;
+            self->m_pendingEgl.bufferGeneration = f->buffer_generation;
         }
         if (auto* w = self->window()) {
-            auto* self_p = self;
-            w->scheduleRenderJob(new FnRunnable([self_p]() {
-                                     self_p->renderThreadBlitEgl();
+            QPointer<WaywallenDisplay> guard(self);
+            w->scheduleRenderJob(new FnRunnable([guard]() {
+                                     if (guard) guard->renderThreadBlitEgl();
                                  }),
                                  QQuickWindow::BeforeSynchronizingStage);
         }
@@ -247,14 +453,12 @@ void WaywallenDisplay::c_on_frame_ready(void* ud, const waywallen_frame_t* f) {
 }
 
 void WaywallenDisplay::c_on_disconnected(void* ud, int err, const char* msg) {
-    auto* self = static_cast<WaywallenDisplay*>(ud);
-    // If m_display was nulled (e.g. by sceneGraphInvalidated on the
-    // render thread), skip — we're already tearing down.
-    if (! self->m_display) return;
+    auto* self    = static_cast<WaywallenDisplay*>(ud);
+    auto* display = self->displayHandle();
+    if (! display) return;
     const auto reason =
-        static_cast<DisconnectReason>(waywallen_display_last_disconnect_reason(self->m_display));
-    const QString message =
-        QString::fromUtf8(waywallen_display_last_disconnect_message(self->m_display));
+        static_cast<DisconnectReason>(waywallen_display_last_disconnect_reason(display));
+    const QString message = QString::fromUtf8(waywallen_display_last_disconnect_message(display));
     if (self->m_lastReason != reason || self->m_lastMessage != message) {
         self->m_lastReason  = reason;
         self->m_lastMessage = message;
@@ -276,34 +480,33 @@ WaywallenDisplay::WaywallenDisplay(QQuickItem* parent): QQuickItem(parent) {
     connect(&m_updateSizeTimer, &QTimer::timeout, this, &WaywallenDisplay::pushSizeUpdate);
 }
 
-WaywallenDisplay::~WaywallenDisplay() {
-    // cleanup() may already have been called by sceneGraphInvalidated.
-    // It's safe to call again — it checks m_display for null.
+WaywallenDisplay::~WaywallenDisplay() { cleanup(); }
+
+void WaywallenDisplay::releaseResources() {
     cleanup();
+    setConnState(Disconnected);
+    setStreamState(Inactive);
+    QQuickItem::releaseResources();
 }
 
-// Render-thread teardown. Called either:
-//   - from sceneGraphInvalidated lambda (render thread, SG dying), or
-//   - from the FnRunnable cleanup() schedules onto the render thread.
-// Idempotent. Owns the GPU-touching shutdown: lib's close+drain+free
-// (lib's drain processes the pending-destroy list it deferred from the
-// I/O thread) and the blitter shutdown.
-void WaywallenDisplay::renderThreadFinalize() {
-    flushPendingRelease();
-    auto* d   = m_display;
-    m_display = nullptr;
-    if (d) waywallen_display_shutdown(d);
-#ifdef WW_HAVE_VULKAN
-    if (m_vkBlitterInited) {
-        ww_vk_blitter_shutdown(&m_vkBlitter);
-        m_vkBlitterInited = false;
+waywallen_display_t* WaywallenDisplay::displayHandle() const {
+    auto resources = renderSessionResources();
+    return resources ? resources->display : nullptr;
+}
+
+std::shared_ptr<RenderSessionResources> WaywallenDisplay::renderSessionResources() const {
+    QMutexLocker lock(&m_resourcesMutex);
+    return m_renderResources;
+}
+
+std::shared_ptr<RenderSessionResources> WaywallenDisplay::takeRenderSessionResources() {
+    std::shared_ptr<RenderSessionResources> resources;
+    {
+        QMutexLocker lock(&m_resourcesMutex);
+        resources = std::move(m_renderResources);
     }
-#endif
-    /* EGL shadow: GL objects on the QSG render context. Same render
-     * thread that's calling us, so the GL ops in destroyEglShadow
-     * land on the right context. */
-    destroyEglShadow();
-    m_eglDisplay = nullptr;
+    if (resources && resources->display) waywallen_display_close(resources->display);
+    return resources;
 }
 
 void WaywallenDisplay::cleanup() {
@@ -332,40 +535,21 @@ void WaywallenDisplay::cleanup() {
     }
 #endif
 
-    if (m_display) {
+    if (auto resources = takeRenderSessionResources()) {
         QQuickWindow* w = window();
-        if (w && w->isSceneGraphInitialized() && w->isExposed()) {
-            /* Hop ownership to the render thread; it will run the
-             * full close+drain+free sequence plus blitter shutdown
-             * via renderThreadFinalize. NoStage posts a WMJobEvent
-             * straight to the render-thread event loop — no
-             * polishAndSync cooperation needed, so this works even
-             * if the GUI thread is busy. We do NOT block waiting
-             * for it: the lib's shutdown is bounded and GUI-thread
-             * stalls on display teardown are user-visible jank. */
-            auto* self = this;
-            w->scheduleRenderJob(new FnRunnable([self]() {
-                                     self->renderThreadFinalize();
-                                 }),
-                                 QQuickWindow::NoStage);
+        if (w && w->isSceneGraphInitialized()) {
+            /* updateDirtyNodes() detaches the old owned QSGTexture during
+             * sync; native shadows can only be destroyed after that. */
+            w->scheduleRenderJob(new RenderSessionCleanupJob(std::move(resources)),
+                                 QQuickWindow::AfterSynchronizingStage);
+            w->update();
+        } else if (m_activeBackend == BackendNone) {
+            resources->shutdown();
         } else {
-            /* No render thread to safely drain on — Plasma extension
-             * likely tearing the whole window down. Close the socket
-             * (any thread, idempotent) so the daemon sees us go away;
-             * the GPU resources leak until process exit. We can't
-             * call free() — it would abort on the pending pools that
-             * close() just enqueued. */
             qCCritical(lcWD,
-                       "no render context for shutdown; closing socket and "
-                       "leaking GPU resources (process exit will reclaim)");
-            waywallen_display_close(m_display);
-            m_display = nullptr;
-#ifdef WW_HAVE_VULKAN
-            if (m_vkBlitterInited) {
-                std::memset(&m_vkBlitter, 0, sizeof(m_vkBlitter));
-                m_vkBlitterInited = false;
-            }
-#endif
+                       "no render context for shutdown; GPU resources are retained until "
+                       "process exit");
+            (void)new std::shared_ptr<RenderSessionResources>(std::move(resources));
         }
     }
 
@@ -378,15 +562,69 @@ void WaywallenDisplay::cleanup() {
     m_glTextures.clear();
     m_vkImagesValid = false;
     m_vkImages.clear();
-    m_currentSlot            = -1;
-    m_textureCount           = 0;
-    m_contentRevisionPending = false;
-    m_activeBackend          = BackendNone;
+    {
+        QMutexLocker lk(&m_pendingMutex);
+        m_presentationState.reset();
+        m_preparedEglContent         = ContentSnapshot {};
+        m_notifiedPresentationSerial = m_presentationSerial;
+    }
+    m_textureCount  = 0;
+    m_activeBackend = BackendNone;
 
     if (m_displayId != 0) {
         m_displayId = 0;
         emit displayIdChanged();
     }
+}
+
+void WaywallenDisplay::setPresentedClearColor(const QColor& color) {
+    if (m_clearColor == color) return;
+    m_clearColor = color;
+    emit clearColorChanged();
+}
+
+void WaywallenDisplay::publishPresentationCommit(qulonglong serial, const QColor& clearColor) {
+    {
+        QMutexLocker lk(&m_pendingMutex);
+        if (serial <= m_notifiedPresentationSerial) return;
+        m_notifiedPresentationSerial = serial;
+    }
+    setPresentedClearColor(clearColor);
+    m_contentRevision++;
+    emit contentRevisionChanged();
+}
+
+void WaywallenDisplay::commitPresentedContent(uint64_t generation, int width, int height,
+                                              uint32_t fourcc, const ConfigSnapshot& config) {
+    PresentationState::CommitResult result = PresentationState::CommitResult::Rejected;
+    qulonglong                      serial = 0;
+    {
+        QMutexLocker    lk(&m_pendingMutex);
+        ContentSnapshot content;
+        content.valid            = true;
+        content.bufferGeneration = generation;
+        content.width            = width;
+        content.height           = height;
+        content.fourcc           = fourcc;
+        content.config           = config;
+        result                   = m_presentationState.commit(content);
+        if (result == PresentationState::CommitResult::SourceChanged) {
+            serial = ++m_presentationSerial;
+        }
+    }
+    if (result == PresentationState::CommitResult::Rejected) {
+        qCWarning(lcWD, "presentation commit rejected for generation=%llu", qulonglong(generation));
+        return;
+    }
+    if (result == PresentationState::CommitResult::SameSourceUpdated) return;
+
+    QPointer<WaywallenDisplay> guard(this);
+    QMetaObject::invokeMethod(
+        this,
+        [guard, serial, clearColor = config.clearColor]() {
+            if (guard) guard->publishPresentationCommit(serial, clearColor);
+        },
+        Qt::QueuedConnection);
 }
 
 // ---------------------------------------------------------------------------
@@ -447,19 +685,20 @@ void WaywallenDisplay::setDisplayWidth(int w) {
     if (m_displayWidth == w) return;
     m_displayWidth = w;
     emit displayWidthChanged();
-    if (m_display) m_updateSizeTimer.start();
+    if (displayHandle()) m_updateSizeTimer.start();
 }
 
 void WaywallenDisplay::setDisplayHeight(int h) {
     if (m_displayHeight == h) return;
     m_displayHeight = h;
     emit displayHeightChanged();
-    if (m_display) m_updateSizeTimer.start();
+    if (displayHandle()) m_updateSizeTimer.start();
 }
 
 void WaywallenDisplay::pushSizeUpdate() {
-    if (! m_display) return;
-    if (waywallen_display_conn_state(m_display) != WAYWALLEN_CONN_CONNECTED) {
+    auto* display = displayHandle();
+    if (! display) return;
+    if (waywallen_display_conn_state(display) != WAYWALLEN_CONN_CONNECTED) {
         // Drop silently — once the handshake completes, register_display
         // already carried the latest dims via begin_connect.
         return;
@@ -469,7 +708,7 @@ void WaywallenDisplay::pushSizeUpdate() {
         return;
     }
     int rc = waywallen_display_update_size(
-        m_display, static_cast<uint32_t>(m_displayWidth), static_cast<uint32_t>(m_displayHeight));
+        display, static_cast<uint32_t>(m_displayWidth), static_cast<uint32_t>(m_displayHeight));
     if (rc != 0) {
         qCWarning(lcWD, "update_size(%d, %d) failed: %d", m_displayWidth, m_displayHeight, rc);
         return;
@@ -501,10 +740,11 @@ void WaywallenDisplay::setMouseForwardEnabled(bool enabled) {
 }
 
 bool WaywallenDisplay::eventFilter(QObject* obj, QEvent* ev) {
-    if (! m_mouseForwardEnabled || obj != window() || ! m_display) {
+    auto* display = displayHandle();
+    if (! m_mouseForwardEnabled || obj != window() || ! display) {
         return false;
     }
-    if (waywallen_display_conn_state(m_display) != WAYWALLEN_CONN_CONNECTED) {
+    if (waywallen_display_conn_state(display) != WAYWALLEN_CONN_CONNECTED) {
         return false;
     }
 
@@ -527,7 +767,7 @@ bool WaywallenDisplay::eventFilter(QObject* obj, QEvent* ev) {
         float px, py;
         if (! toSurface(me->scenePosition(), px, py)) return false;
         const uint64_t ts = uint64_t(me->timestamp()) * 1000ull;
-        (void)waywallen_display_send_pointer_motion(m_display, px, py, ts, 0);
+        (void)waywallen_display_send_pointer_motion(display, px, py, ts, 0);
         break;
     }
     case QEvent::MouseButtonPress:
@@ -540,7 +780,7 @@ bool WaywallenDisplay::eventFilter(QObject* obj, QEvent* ev) {
         const uint64_t ts    = uint64_t(me->timestamp()) * 1000ull;
         const auto     state = (ev->type() == QEvent::MouseButtonPress) ? WAYWALLEN_BUTTON_PRESSED
                                                                         : WAYWALLEN_BUTTON_RELEASED;
-        (void)waywallen_display_send_pointer_button(m_display, px, py, code, state, ts, 0);
+        (void)waywallen_display_send_pointer_button(display, px, py, code, state, ts, 0);
         break;
     }
     case QEvent::Wheel: {
@@ -553,7 +793,7 @@ bool WaywallenDisplay::eventFilter(QObject* obj, QEvent* ev) {
         if (dx == 0.0f && dy == 0.0f) return false;
         const uint64_t ts = uint64_t(we->timestamp()) * 1000ull;
         (void)waywallen_display_send_pointer_axis(
-            m_display, px, py, dx, dy, WAYWALLEN_AXIS_WHEEL, ts, 0);
+            display, px, py, dx, dy, WAYWALLEN_AXIS_WHEEL, ts, 0);
         break;
     }
     default: break;
@@ -570,8 +810,9 @@ void WaywallenDisplay::setConnState(ConnState s) {
     // Connected daemon: window_state (autopause reporter) carries the
     // most recent QML-visible bitmask, which the lib does not
     // remember across reconnects.
-    if (s == Connected && m_display && m_windowStateFlagsDirty) {
-        if (waywallen_display_set_window_state(m_display, m_windowStateFlags) == WAYWALLEN_OK) {
+    if (s == Connected && displayHandle() && m_windowStateFlagsDirty) {
+        if (waywallen_display_set_window_state(displayHandle(), m_windowStateFlags) ==
+            WAYWALLEN_OK) {
             m_windowStateFlagsDirty = false;
             armWriteNotifier();
         }
@@ -584,8 +825,8 @@ void WaywallenDisplay::setWindowStateFlags(quint32 flags) {
     // Connected.
     const bool changed = m_windowStateFlags != flags;
     m_windowStateFlags = flags;
-    if (m_connState == Connected && m_display) {
-        if (waywallen_display_set_window_state(m_display, flags) == WAYWALLEN_OK) {
+    if (m_connState == Connected && displayHandle()) {
+        if (waywallen_display_set_window_state(displayHandle(), flags) == WAYWALLEN_OK) {
             m_windowStateFlagsDirty = false;
             armWriteNotifier();
         } else {
@@ -622,6 +863,8 @@ static void*           qtEglGetProcAddress(const char* name) {
 }
 
 bool WaywallenDisplay::bindEglBackend() {
+    auto resources = renderSessionResources();
+    if (! resources) return false;
     auto* rif   = window()->rendererInterface();
     auto* glCtx = static_cast<QOpenGLContext*>(
         rif ? rif->getResource(window(), QSGRendererInterface::OpenGLContextResource) : nullptr);
@@ -641,12 +884,12 @@ bool WaywallenDisplay::bindEglBackend() {
     waywallen_egl_ctx_t egl_ctx {};
     egl_ctx.egl_display      = eglIface->display();
     egl_ctx.get_proc_address = &qtEglGetProcAddress;
-    int rc                   = waywallen_display_bind_egl(m_display, &egl_ctx);
+    int rc                   = waywallen_display_bind_egl(displayHandle(), &egl_ctx);
     if (rc != WAYWALLEN_OK) {
         qCWarning(lcWD, "bind_egl failed: %d", rc);
         return false;
     }
-    m_eglDisplay = egl_ctx.egl_display;
+    resources->eglDisplay = egl_ctx.egl_display;
     qCInfo(lcWD, "bound EGL backend, display=%p", static_cast<void*>(egl_ctx.egl_display));
     return true;
 }
@@ -706,7 +949,18 @@ bool WaywallenDisplay::bindVulkanBackend() {
     vk_ctx.queue_family_index        = qfi;
     vk_ctx.vk_get_instance_proc_addr = reinterpret_cast<void* (*)(void*, const char*)>(rawGIPA);
 
-    int rc = waywallen_display_bind_vulkan(m_display, &vk_ctx);
+#ifdef WW_HAVE_VULKAN
+    // Shadow updates and retirement must use Qt's exact graphics queue.
+    // A queue-family/index guess is not a synchronization contract.
+    auto* pQueue = static_cast<VkQueue*>(
+        rif->getResource(window(), QSGRendererInterface::CommandQueueResource));
+    if (! pQueue || *pQueue == VK_NULL_HANDLE) {
+        qCWarning(lcWD, "Qt did not expose its Vulkan command queue");
+        return false;
+    }
+#endif
+
+    int rc = waywallen_display_bind_vulkan(displayHandle(), &vk_ctx);
     if (rc != WAYWALLEN_OK) {
         qCWarning(lcWD, "bind_vulkan failed: %d", rc);
         return false;
@@ -718,33 +972,7 @@ bool WaywallenDisplay::bindVulkanBackend() {
     m_vkDevice   = reinterpret_cast<void*>(device);
     m_vkQfi      = qfi;
     m_vkGipa     = reinterpret_cast<void* (*)(void*, const char*)>(rawGIPA);
-
-    // VkQueue for our blit submits. Use the same queue Qt uses so
-    // submission order on a single queue gives us implicit ordering
-    // against Qt's later sample. CommandQueueResource returns a
-    // pointer-to-VkQueue, same convention as Device/PhysicalDevice
-    // resources.
-    auto* pQueue = static_cast<VkQueue*>(
-        rif->getResource(window(), QSGRendererInterface::CommandQueueResource));
-    if (pQueue && *pQueue != VK_NULL_HANDLE) {
-        m_vkQueue = reinterpret_cast<void*>(*pQueue);
-    } else {
-        // Fallback: ask the device for the family's queue 0. Most Qt
-        // setups use index 0; if Qt uses a different index, this races
-        // with Qt's own submits and we'd need a semaphore handshake.
-        auto vkGetDeviceQueue = reinterpret_cast<PFN_vkGetDeviceQueue>(
-            qvkInst->getInstanceProcAddr("vkGetDeviceQueue"));
-        if (vkGetDeviceQueue) {
-            VkQueue q = VK_NULL_HANDLE;
-            vkGetDeviceQueue(device, qfi, 0, &q);
-            m_vkQueue = reinterpret_cast<void*>(q);
-        }
-        qCInfo(lcWD,
-               "Qt did not expose CommandQueueResource; using "
-               "vkGetDeviceQueue(qfi=%u, idx=0)=%p",
-               qfi,
-               m_vkQueue);
-    }
+    m_vkQueue    = reinterpret_cast<void*>(*pQueue);
 #endif
 
     qCInfo(lcWD, "bound Vulkan backend, device=%p", reinterpret_cast<void*>(device));
@@ -837,7 +1065,7 @@ void WaywallenDisplay::onWindowReady() {
         m_filterInstalled = true;
     }
 
-    if (m_display) return;
+    if (displayHandle()) return;
 
     // sceneGraphInvalidated: SG is being torn down (window closing,
     // renderer reset, etc). Fires on render thread with DirectConnection.
@@ -849,6 +1077,7 @@ void WaywallenDisplay::onWindowReady() {
         this,
         [this]() {
             qCInfo(lcWD, "sceneGraphInvalidated: releasing GPU resources");
+            flushPendingRelease();
 #ifdef WW_HAVE_VULKAN
             {
                 QMutexLocker lk(&m_pendingMutex);
@@ -858,7 +1087,7 @@ void WaywallenDisplay::onWindowReady() {
                 m_pendingVk = PendingVkFrame {};
             }
 #endif
-            renderThreadFinalize();
+            if (auto resources = takeRenderSessionResources()) resources->shutdown();
             // Notifiers live on GUI thread; this lambda is on render
             // thread. deleteLater is documented thread-safe; it
             // posts a destruction event back to the notifier's GUI
@@ -873,10 +1102,14 @@ void WaywallenDisplay::onWindowReady() {
             m_glTextures.clear();
             m_vkImagesValid = false;
             m_vkImages.clear();
-            m_currentSlot            = -1;
-            m_textureCount           = 0;
-            m_contentRevisionPending = false;
-            m_activeBackend          = BackendNone;
+            {
+                QMutexLocker lk(&m_pendingMutex);
+                m_presentationState.reset();
+                m_preparedEglContent         = ContentSnapshot {};
+                m_notifiedPresentationSerial = m_presentationSerial;
+            }
+            m_textureCount  = 0;
+            m_activeBackend = BackendNone;
         },
         Qt::DirectConnection);
 
@@ -907,7 +1140,7 @@ void WaywallenDisplay::onWindowReady() {
 }
 
 void WaywallenDisplay::tryConnect() {
-    if (m_display) return;
+    if (displayHandle()) return;
     setConnState(Connecting);
 
     waywallen_display_callbacks_t cb {};
@@ -918,14 +1151,20 @@ void WaywallenDisplay::tryConnect() {
     cb.on_disconnected       = c_on_disconnected;
     cb.user_data             = this;
 
-    m_display = waywallen_display_new(&cb);
-    if (! m_display) {
+    auto resources     = std::make_shared<RenderSessionResources>();
+    resources->display = waywallen_display_new(&cb);
+    if (! resources->display) {
         qCWarning(lcWD, "waywallen_display_new() failed");
         setConnState(Error);
         // No internal retry — DBus NameOwnerChanged / Ready will drive
         // the next attempt when the daemon (re-)appears.
         return;
     }
+    {
+        QMutexLocker lock(&m_resourcesMutex);
+        m_renderResources = resources;
+    }
+    auto* display = resources->display;
 
     // cleanup() removed the event filter on the prior session's
     // teardown; reinstall it now so mouse events resume forwarding
@@ -963,7 +1202,7 @@ void WaywallenDisplay::tryConnect() {
     const QByteArray instanceId = effectiveInstanceId().toUtf8();
     const uint32_t   refreshMhz = screenRefreshMhz();
     int              rc =
-        waywallen_display_begin_connect(m_display,
+        waywallen_display_begin_connect(display,
                                         sockPath.isEmpty() ? nullptr : sockPath.constData(),
                                         name.constData(),
                                         instanceId.isEmpty() ? nullptr : instanceId.constData(),
@@ -973,8 +1212,10 @@ void WaywallenDisplay::tryConnect() {
 
     if (rc != WAYWALLEN_OK) {
         qCWarning(lcWD, "begin_connect failed: %d (waiting for daemon DBus signal)", rc);
-        waywallen_display_free(m_display);
-        m_display = nullptr;
+        waywallen_display_free(display);
+        resources->display = nullptr;
+        QMutexLocker lock(&m_resourcesMutex);
+        if (m_renderResources == resources) m_renderResources.reset();
         setConnState(Disconnected);
         return;
     }
@@ -985,11 +1226,13 @@ void WaywallenDisplay::tryConnect() {
     m_lastPushedWidth  = m_displayWidth;
     m_lastPushedHeight = m_displayHeight;
 
-    int fd = waywallen_display_get_fd(m_display);
+    int fd = waywallen_display_get_fd(display);
     if (fd < 0) {
         qCWarning(lcWD, "begin_connect returned no fd");
-        waywallen_display_free(m_display);
-        m_display = nullptr;
+        waywallen_display_free(display);
+        resources->display = nullptr;
+        QMutexLocker lock(&m_resourcesMutex);
+        if (m_renderResources == resources) m_renderResources.reset();
         setConnState(Disconnected);
         return;
     }
@@ -1013,8 +1256,9 @@ void WaywallenDisplay::tryConnect() {
 }
 
 void WaywallenDisplay::onHandshakeIO() {
-    if (! m_display) return;
-    int rc = waywallen_display_advance_handshake(m_display);
+    auto* display = displayHandle();
+    if (! display) return;
+    int rc = waywallen_display_advance_handshake(display);
     if (rc == WAYWALLEN_HS_DONE) {
         qCInfo(lcWD, "handshake complete");
         // Repurpose both notifiers post-handshake:
@@ -1040,11 +1284,11 @@ void WaywallenDisplay::onHandshakeIO() {
                     &QSocketNotifier::activated,
                     this,
                     &WaywallenDisplay::onSocketWritable);
-            m_notifierWrite->setEnabled(waywallen_display_wants_writable(m_display));
+            m_notifierWrite->setEnabled(waywallen_display_wants_writable(display));
         }
         setStreamState(Inactive);
         setConnState(Connected);
-        const auto newId = qulonglong(waywallen_display_get_display_id(m_display));
+        const auto newId = qulonglong(waywallen_display_get_display_id(display));
         if (m_displayId != newId) {
             m_displayId = newId;
             emit displayIdChanged();
@@ -1072,25 +1316,27 @@ void WaywallenDisplay::onHandshakeIO() {
 }
 
 void WaywallenDisplay::onSocketReadable() {
-    if (! m_display) return;
+    auto* display = displayHandle();
+    if (! display) return;
     // EGLImage creation (EGL path) and VkImage import (Vulkan path)
     // do not require a GL context. GL textures are created lazily
     // in updatePaintNode on the render thread.
-    waywallen_display_dispatch(m_display);
+    waywallen_display_dispatch(display);
     // dispatch may have queued an outgoing message (e.g. unbind_done
     // from handle_unbind). Re-arm POLLOUT if anything stayed queued.
     armWriteNotifier();
 }
 
 void WaywallenDisplay::onSocketWritable() {
-    if (! m_display) return;
-    waywallen_display_handle_writable(m_display);
+    auto* display = displayHandle();
+    if (! display) return;
+    waywallen_display_handle_writable(display);
     armWriteNotifier();
 }
 
 void WaywallenDisplay::armWriteNotifier() {
-    if (m_notifierWrite && m_display) {
-        m_notifierWrite->setEnabled(waywallen_display_wants_writable(m_display));
+    if (m_notifierWrite && displayHandle()) {
+        m_notifierWrite->setEnabled(waywallen_display_wants_writable(displayHandle()));
     }
 }
 
@@ -1110,8 +1356,9 @@ void WaywallenDisplay::flushPendingRelease() {
 void WaywallenDisplay::releaseEglFrame(int releaseSyncobjFd, bool afterGpuWork) {
     if (releaseSyncobjFd < 0) return;
 
-    auto* ctx = QOpenGLContext::currentContext();
-    if (afterGpuWork && ctx && m_eglDisplay) {
+    auto* ctx       = QOpenGLContext::currentContext();
+    auto  resources = renderSessionResources();
+    if (afterGpuWork && ctx && resources && resources->eglDisplay) {
         auto createSync =
             reinterpret_cast<PFNEGLCREATESYNCKHRPROC>(ctx->getProcAddress("eglCreateSyncKHR"));
         auto destroySync =
@@ -1120,7 +1367,7 @@ void WaywallenDisplay::releaseEglFrame(int releaseSyncobjFd, bool afterGpuWork) 
             ctx->getProcAddress("eglDupNativeFenceFDANDROID"));
         if (createSync && destroySync && dupFence) {
             const EGLint attrs[] = { EGL_NONE };
-            auto         display = reinterpret_cast<EGLDisplay>(m_eglDisplay);
+            auto         display = reinterpret_cast<EGLDisplay>(resources->eglDisplay);
             EGLSyncKHR   sync    = createSync(display, EGL_SYNC_NATIVE_FENCE_ANDROID, attrs);
             if (sync != EGL_NO_SYNC_KHR) {
                 ctx->extraFunctions()->glFlush();
@@ -1180,13 +1427,14 @@ void WaywallenDisplay::handleDisconnect(int errCode, const char* msg) {
 // ---------------------------------------------------------------------------
 
 void WaywallenDisplay::ensureGlTextures() {
-    if (m_glTexturesCreated || ! m_eglImagesValid || ! m_display) return;
+    auto* display = displayHandle();
+    if (m_glTexturesCreated || ! m_eglImagesValid || ! display) return;
 
     m_glTextures.resize(static_cast<int>(m_textureCount));
     bool ok = true;
     for (uint32_t i = 0; i < m_textureCount; i++) {
         uint32_t tex = 0;
-        int      rc  = waywallen_display_create_gl_texture(m_display, i, &tex);
+        int      rc  = waywallen_display_create_gl_texture(display, i, &tex);
         if (rc != WAYWALLEN_OK) {
             qCWarning(lcWD, "create_gl_texture[%u] failed: %d", i, rc);
             ok = false;
@@ -1203,83 +1451,115 @@ void WaywallenDisplay::ensureGlTextures() {
     }
 }
 
-bool WaywallenDisplay::blitEglShadow(int slot) {
-    if (slot < 0 || slot >= m_glTextures.size()) return false;
-    auto* ctx = QOpenGLContext::currentContext();
-    if (! ctx) return false;
+WaywallenDisplay::EglBlitResult WaywallenDisplay::blitEglShadow(int slot, int width, int height,
+                                                                bool forceReplace) {
+    auto resourcesOwner = renderSessionResources();
+    if (! resourcesOwner || slot < 0 || slot >= m_glTextures.size()) {
+        return EglBlitResult::Failed;
+    }
+    auto& resources = *resourcesOwner;
+    auto* ctx       = QOpenGLContext::currentContext();
+    if (! ctx) return EglBlitResult::Failed;
     auto* gl = ctx->extraFunctions();
-    if (! gl) return false;
+    if (! gl) return EglBlitResult::Failed;
 
-    const int w = m_texWidth;
-    const int h = m_texHeight;
-    if (w <= 0 || h <= 0) return false;
+    const int w = width;
+    const int h = height;
+    if (w <= 0 || h <= 0) return EglBlitResult::Failed;
 
-    /* Save Qt's current FBO binding so we don't disturb its renderer
-     * state. We restore both READ and DRAW targets at the end. */
-    GLint prevDraw = 0, prevRead = 0;
+    const bool replace = forceReplace || resources.eglShadowTex == 0 ||
+                         resources.eglShadowFbo == 0 || resources.eglShadowW != w ||
+                         resources.eglShadowH != h;
+    if (replace && ! resources.discardEglCandidate()) {
+        qCWarning(lcWD, "EGL: cannot discard previous shadow candidate without a GL context");
+        return EglBlitResult::Failed;
+    }
+
+    GLint prevDraw = 0, prevRead = 0, prevTexture = 0;
     gl->glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevDraw);
     gl->glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prevRead);
+    gl->glGetIntegerv(GL_TEXTURE_BINDING_2D, &prevTexture);
 
-    /* glBlitFramebuffer obeys the draw FBO's scissor test. Qt's QSG
-     * renderer leaves SCISSOR_TEST enabled with a clip rect bound to
-     * whatever item it was last drawing; without disabling it here the
-     * blit only fills that sub-rect of the shadow and the rest stays
-     * at the glTexImage2D(NULL) initial zeros (black). */
     GLboolean prevScissor = gl->glIsEnabled(GL_SCISSOR_TEST);
     if (prevScissor) gl->glDisable(GL_SCISSOR_TEST);
 
-    /* Lazy-allocate / resize the shadow texture. RGBA8 storage —
-     * matches the 8 fourccs in src/drm_fourcc_internal.h. */
-    if (m_eglShadowTex == 0) {
-        gl->glGenTextures(1, &m_eglShadowTex);
-        gl->glBindTexture(GL_TEXTURE_2D, m_eglShadowTex);
+    uint targetTex = replace ? 0 : resources.eglShadowTex;
+    uint targetFbo = replace ? 0 : resources.eglShadowFbo;
+    if (replace) {
+        gl->glGenTextures(1, &targetTex);
+        gl->glGenFramebuffers(1, &targetFbo);
+        if (targetTex == 0 || targetFbo == 0) {
+            if (targetFbo) gl->glDeleteFramebuffers(1, &targetFbo);
+            if (targetTex) gl->glDeleteTextures(1, &targetTex);
+            gl->glBindTexture(GL_TEXTURE_2D, static_cast<uint>(prevTexture));
+            gl->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, prevDraw);
+            gl->glBindFramebuffer(GL_READ_FRAMEBUFFER, prevRead);
+            if (prevScissor) gl->glEnable(GL_SCISSOR_TEST);
+            return EglBlitResult::Failed;
+        }
+        gl->glBindTexture(GL_TEXTURE_2D, targetTex);
         gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    }
-    if (m_eglShadowW != w || m_eglShadowH != h) {
-        gl->glBindTexture(GL_TEXTURE_2D, m_eglShadowTex);
         gl->glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-        m_eglShadowW          = w;
-        m_eglShadowH          = h;
-        m_eglShadowHasContent = false;
     }
 
-    if (m_eglShadowFbo == 0) {
-        gl->glGenFramebuffers(1, &m_eglShadowFbo);
-        gl->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_eglShadowFbo);
-        gl->glFramebufferTexture2D(
-            GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_eglShadowTex, 0);
-    } else {
-        /* Re-attach in case the shadow tex's storage was orphaned by a
-         * resize above; safe even when no resize happened. */
-        gl->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_eglShadowFbo);
-        gl->glFramebufferTexture2D(
-            GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_eglShadowTex, 0);
+    gl->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, targetFbo);
+    gl->glFramebufferTexture2D(
+        GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, targetTex, 0);
+    if (resources.eglReadFbo == 0) {
+        gl->glGenFramebuffers(1, &resources.eglReadFbo);
     }
-    if (m_eglReadFbo == 0) {
-        gl->glGenFramebuffers(1, &m_eglReadFbo);
-    }
-    gl->glBindFramebuffer(GL_READ_FRAMEBUFFER, m_eglReadFbo);
+    gl->glBindFramebuffer(GL_READ_FRAMEBUFFER, resources.eglReadFbo);
     gl->glFramebufferTexture2D(
         GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_glTextures[slot], 0);
 
-    /* Both FBOs are RGBA8 of identical size — NEAREST is fine and the
-     * fastest path on every driver. */
-    gl->glBlitFramebuffer(0, 0, w, h, 0, 0, w, h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    const bool complete =
+        gl->glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE &&
+        gl->glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+    if (complete) {
+        gl->glBlitFramebuffer(0, 0, w, h, 0, 0, w, h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    }
+    const GLenum error = gl->glGetError();
 
-    /* Detach the imported texture so Qt RHI's later reaping of it
-     * (when the lib's pending pool drains) doesn't trip an FBO-
-     * incompleteness check on the read FBO. */
     gl->glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
 
+    gl->glBindTexture(GL_TEXTURE_2D, static_cast<uint>(prevTexture));
     gl->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, prevDraw);
     gl->glBindFramebuffer(GL_READ_FRAMEBUFFER, prevRead);
     if (prevScissor) gl->glEnable(GL_SCISSOR_TEST);
 
-    m_eglShadowHasContent = true;
-    return true;
+    if (! complete || error != GL_NO_ERROR) {
+        qCWarning(
+            lcWD, "EGL: shadow blit failed (complete=%d glError=0x%x)", complete ? 1 : 0, error);
+        if (replace) {
+            gl->glDeleteFramebuffers(1, &targetFbo);
+            gl->glDeleteTextures(1, &targetTex);
+        }
+        return complete ? EglBlitResult::FailedAfterGpuWork : EglBlitResult::Failed;
+    }
+
+    if (replace) {
+        resources.eglCandidateFbo        = targetFbo;
+        resources.eglCandidateTex        = targetTex;
+        resources.eglCandidateW          = w;
+        resources.eglCandidateH          = h;
+        resources.eglCandidateHasContent = true;
+        const qulonglong candidateBytes  = qulonglong(w) * qulonglong(h) * 4ull;
+        const qulonglong currentBytes =
+            qulonglong(resources.eglShadowW) * qulonglong(resources.eglShadowH) * 4ull;
+        qCInfo(lcWD,
+               "EGL shadow candidate: display=%llu %dx%d bytes=%llu resident=%llu",
+               m_displayId,
+               w,
+               h,
+               candidateBytes,
+               currentBytes + candidateBytes);
+        return EglBlitResult::CandidateReady;
+    }
+    resources.eglShadowHasContent = true;
+    return EglBlitResult::CurrentUpdated;
 }
 
 // Drains m_pendingEgl and runs blitEglShadow. Scheduled by
@@ -1289,50 +1569,47 @@ bool WaywallenDisplay::blitEglShadow(int slot) {
 // don't trigger a redundant blit.
 void WaywallenDisplay::renderThreadBlitEgl() {
     PendingEglFrame frame;
+    ContentSnapshot incoming;
+    bool            replacesPresentation = false;
     {
         QMutexLocker lk(&m_pendingMutex);
         if (! m_pendingEgl.valid) return;
         frame        = m_pendingEgl;
         m_pendingEgl = PendingEglFrame {};
+        (void)m_presentationState.incomingFor(frame.bufferGeneration, incoming);
+        replacesPresentation = m_presentationState.sourceChangesWith(frame.bufferGeneration);
     }
-    if (m_activeBackend != BackendEGL || ! m_eglImagesValid) {
+    if (! incoming.valid || m_activeBackend != BackendEGL || ! m_eglImagesValid) {
         releaseEglFrame(frame.releaseSyncobjFd, false);
         return;
     }
     // EGLImage → GL texture binding is render-thread work; safe here.
     if (! m_glTexturesCreated) ensureGlTextures();
     if (! m_glTexturesCreated || frame.slot < 0 || frame.slot >= m_glTextures.size() ||
-        m_texWidth <= 0 || m_texHeight <= 0) {
+        incoming.width <= 0 || incoming.height <= 0) {
         releaseEglFrame(frame.releaseSyncobjFd, false);
         return;
     }
-    if (blitEglShadow(frame.slot)) {
-        m_eglShadowSlot = frame.slot;
+    const EglBlitResult result =
+        blitEglShadow(frame.slot, incoming.width, incoming.height, replacesPresentation);
+    if (result == EglBlitResult::CurrentUpdated) {
+        commitPresentedContent(frame.bufferGeneration,
+                               incoming.width,
+                               incoming.height,
+                               incoming.fourcc,
+                               incoming.config);
+        releaseEglFrame(frame.releaseSyncobjFd, true);
+    } else if (result == EglBlitResult::CandidateReady) {
+        {
+            QMutexLocker lk(&m_pendingMutex);
+            m_preparedEglContent = incoming;
+        }
+        releaseEglFrame(frame.releaseSyncobjFd, true);
+    } else if (result == EglBlitResult::FailedAfterGpuWork) {
         releaseEglFrame(frame.releaseSyncobjFd, true);
     } else {
         releaseEglFrame(frame.releaseSyncobjFd, false);
     }
-}
-
-void WaywallenDisplay::destroyEglShadow() {
-    auto* ctx = QOpenGLContext::currentContext();
-    if (ctx) {
-        auto* gl = ctx->extraFunctions();
-        if (gl) {
-            if (m_eglShadowFbo) gl->glDeleteFramebuffers(1, &m_eglShadowFbo);
-            if (m_eglReadFbo) gl->glDeleteFramebuffers(1, &m_eglReadFbo);
-            if (m_eglShadowTex) gl->glDeleteTextures(1, &m_eglShadowTex);
-        }
-    }
-    /* Even if no current context (sceneGraph already torn down), zero
-     * the names — better to leak GL objects than to call into a dead
-     * context. Qt destroys its driver state shortly after this anyway. */
-    m_eglShadowFbo        = 0;
-    m_eglReadFbo          = 0;
-    m_eglShadowTex        = 0;
-    m_eglShadowW          = 0;
-    m_eglShadowH          = 0;
-    m_eglShadowHasContent = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -1340,6 +1617,8 @@ void WaywallenDisplay::destroyEglShadow() {
 // ---------------------------------------------------------------------------
 
 QSGNode* WaywallenDisplay::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData*) {
+    auto  resourcesOwner = renderSessionResources();
+    auto* resources      = resourcesOwner.get();
     // Run library-deferred pool destructions on the render thread,
     // where (a) Qt's GL context is current for glDeleteTextures (EGL
     // path) and (b) we can guarantee no in-flight vkQueueSubmit on
@@ -1348,7 +1627,7 @@ QSGNode* WaywallenDisplay::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData
     // I/O thread anymore — that's what was racing with Qt's RHI on
     // radv and surfacing as VK_ERROR_DEVICE_LOST during rapid
     // wallpaper switches.
-    if (m_display) {
+    if (resources && resources->display) {
 #ifdef WW_HAVE_VULKAN
         // Vulkan: skip drain when the blitter's fence is in-flight —
         // its cmd buffer may still be reading the most recently
@@ -1356,44 +1635,83 @@ QSGNode* WaywallenDisplay::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData
         // timeout; in steady state fence is cleared between blits).
         // Next iteration's pre-submit wait will clear it and we
         // drain then.
-        const bool blitterBusy = m_vkBlitterInited && m_vkBlitter.fence_armed;
+        const bool blitterBusy = resources->vkBlitterInited && resources->vkBlitter.fence_armed;
         if (! blitterBusy) {
-            (void)waywallen_display_drain(m_display);
+            (void)waywallen_display_drain(resources->display);
         }
 #else
-        (void)waywallen_display_drain(m_display);
+        (void)waywallen_display_drain(resources->display);
 #endif
     }
 
-#ifdef WW_HAVE_VULKAN
-    // Sweep the blitter's deferred-destroy queue. Old shadows
-    // queued by ensure_shadow on size change get vkDestroyImage'd
-    // here once their per-entry frame countdown elapses — by then
-    // Qt RHI has cycled at least one frame boundary and reaped its
-    // dependent VkImageView. (Inline destroy in ensure_shadow
-    // would race with Qt's release queue and trip
-    // VUID-vkDestroyImage-image-01000.)
-    if (m_vkBlitterInited) {
-        ww_vk_blitter_tick_pending_destroys(&m_vkBlitter);
+    auto* rootNode = dynamic_cast<PresentationNode*>(oldNode);
+    if (! rootNode && oldNode) {
+        delete oldNode;
+        oldNode = nullptr;
     }
-#endif
+    auto ensureRootNode = [&]() -> PresentationNode* {
+        if (rootNode) return rootNode;
+        if (! window()) return nullptr;
+        rootNode = PresentationNode::create(window());
+        oldNode  = rootNode;
+        return rootNode;
+    };
+    auto scheduleSessionFailure = [this](const QString& reason) {
+        QPointer<WaywallenDisplay> guard(this);
+        QMetaObject::invokeMethod(
+            this,
+            [guard, reason]() {
+                if (guard) guard->handleDisconnect(-EIO, reason.toUtf8().constData());
+            },
+            Qt::QueuedConnection);
+    };
 
-    // EGL blit moved to renderThreadBlitEgl, scheduled by
-    // c_on_frame_ready via scheduleRenderJob(BeforeSynchronizingStage).
-    // It runs on the render thread before this sync, so by the time
-    // we get here m_eglShadowHasContent / m_eglShadowSlot reflect the
-    // latest BindBuffers slot. Continuity invariant on rebind matches
-    // the Vulkan ww_vk_blitter_shadow design: shadow stays untouched
-    // until the next pool's first blit lands.
+    ContentSnapshot eglCandidateContent;
+    {
+        QMutexLocker lk(&m_pendingMutex);
+        if (m_preparedEglContent.valid) {
+            ContentSnapshot latest;
+            if (m_presentationState.incomingFor(m_preparedEglContent.bufferGeneration, latest)) {
+                eglCandidateContent = latest;
+            }
+            m_preparedEglContent = ContentSnapshot {};
+        }
+    }
 
 #ifdef WW_HAVE_VULKAN
-    // Vulkan path: lazy-init blitter and blit any pending frame into
-    // the shadow image. The shadow is what Qt actually samples.
-    if (m_activeBackend == BackendVulkan && m_vkImagesValid && m_textureCount > 0 &&
-        m_texWidth > 0 && m_texHeight > 0) {
-        if (! m_vkBlitterInited) {
+    PendingVkFrame  frame;
+    ContentSnapshot incoming;
+    ContentSnapshot vkCandidateContent;
+    bool            replacesPresentation = false;
+    {
+        QMutexLocker lk(&m_pendingMutex);
+        frame       = m_pendingVk;
+        m_pendingVk = PendingVkFrame {};
+        if (frame.valid) {
+            (void)m_presentationState.incomingFor(frame.bufferGeneration, incoming);
+            replacesPresentation = m_presentationState.sourceChangesWith(frame.bufferGeneration);
+        }
+    }
+
+    const bool canBlitVk = frame.valid && incoming.valid && m_activeBackend == BackendVulkan &&
+                           m_vkImagesValid && frame.slot >= 0 && frame.slot < m_vkImages.size() &&
+                           incoming.width > 0 && incoming.height > 0;
+    if (frame.valid && ! canBlitVk) {
+        if (frame.releaseSyncobjFd >= 0) {
+            (void)waywallen_display_signal_release_syncobj(frame.releaseSyncobjFd);
+        }
+    } else if (canBlitVk) {
+        if (! resources || ! resources->vkBlitterInited) {
+            if (! resources) {
+                if (frame.releaseSyncobjFd >= 0) {
+                    (void)waywallen_display_signal_release_syncobj(frame.releaseSyncobjFd);
+                }
+                frame.valid = false;
+            }
+        }
+        if (frame.valid && ! resources->vkBlitterInited) {
             int rc =
-                ww_vk_blitter_init(&m_vkBlitter,
+                ww_vk_blitter_init(&resources->vkBlitter,
                                    reinterpret_cast<VkInstance>(m_vkInstance),
                                    reinterpret_cast<VkPhysicalDevice>(m_vkPhys),
                                    reinterpret_cast<VkDevice>(m_vkDevice),
@@ -1403,75 +1721,154 @@ QSGNode* WaywallenDisplay::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData
             if (rc != 0) {
                 qCWarning(
                     lcWD, "vk blitter init failed (%d); Vulkan path disabled this session", rc);
-                delete oldNode;
-                return nullptr;
+                if (frame.releaseSyncobjFd >= 0) {
+                    (void)waywallen_display_signal_release_syncobj(frame.releaseSyncobjFd);
+                }
+                frame.valid = false;
+            } else {
+                resources->vkBlitterInited = true;
             }
-            m_vkBlitterInited = true;
         }
 
-        // VkFormat must match the imported image's format. Mirror the
-        // 8-entry RGBA whitelist in src/drm_fourcc_internal.h /
-        // backend_vulkan.c — daemon negotiator picks across this exact
-        // set, so any fourcc the producer can emit must map cleanly here.
-        VkFormat shadowFmt = VK_FORMAT_UNDEFINED;
-        switch (m_vkFourcc) {
-        // R8G8B8A8 channel order (memory layout R,G,B,A).
-        case 0x34324241: /* AB24 — DRM_FORMAT_ABGR8888 */
-        case 0x34324258: /* XB24 — DRM_FORMAT_XBGR8888 */
-        case 0x41424752: /* RGBA — DRM_FORMAT_RGBA8888 */
-        case 0x58424752: /* RGBX — DRM_FORMAT_RGBX8888 */
-            shadowFmt = VK_FORMAT_R8G8B8A8_UNORM;
-            break;
-        // B8G8R8A8 channel order (memory layout B,G,R,A).
-        case 0x34325241: /* AR24 — DRM_FORMAT_ARGB8888 */
-        case 0x34325258: /* XR24 — DRM_FORMAT_XRGB8888 */
-        case 0x41524742: /* BGRA — DRM_FORMAT_BGRA8888 */
-        case 0x58524742: /* BGRX — DRM_FORMAT_BGRX8888 */
-            shadowFmt = VK_FORMAT_B8G8R8A8_UNORM;
-            break;
-        default:
-            qCWarning(lcWD, "vk blitter: unsupported fourcc 0x%08x; skipping frame", m_vkFourcc);
-            delete oldNode;
-            return nullptr;
-        }
-        // If the shadow size/format is about to change, the prior
-        // QSGTexture (set on oldNode) holds a VkImageView referencing
-        // the old shadow VkImage. ww_vk_blitter_ensure_shadow's
-        // vkDestroyImage would then trip
-        // VUID-vkDestroyImage-image-01000. Drop the entire node so Qt
-        // tears the QSGVulkanTexture (and its view) down cleanly via
-        // ownsTexture=true; the rest of updatePaintNode will build a
-        // fresh node. (Calling setTexture(nullptr) on oldNode in place
-        // crashes in QSGSimpleTextureNode::setTexture on some Qt
-        // configurations — the safe path is whole-node replacement.)
-        const uint32_t newW = static_cast<uint32_t>(m_texWidth);
-        const uint32_t newH = static_cast<uint32_t>(m_texHeight);
-        if (oldNode &&
-            (m_vkBlitter.shadow_image == VK_NULL_HANDLE || m_vkBlitter.shadow_w != newW ||
-             m_vkBlitter.shadow_h != newH || m_vkBlitter.shadow_fmt != shadowFmt)) {
-            delete oldNode;
-            oldNode = nullptr;
-        }
-        if (ww_vk_blitter_ensure_shadow(&m_vkBlitter, newW, newH, shadowFmt) != 0) {
-            delete oldNode;
-            return nullptr;
-        }
-
-        PendingVkFrame frame;
-        {
-            QMutexLocker lk(&m_pendingMutex);
-            frame       = m_pendingVk;
-            m_pendingVk = PendingVkFrame {};
-        }
-        if (frame.valid && frame.slot >= 0 && frame.slot < m_vkImages.size()) {
-            auto imported   = reinterpret_cast<VkImage>(m_vkImages[frame.slot]);
-            auto acquireSem = reinterpret_cast<VkSemaphore>(frame.acquireSem);
-            // blit consumes ownership of releaseSyncobjFd unconditionally.
-            ww_vk_blitter_blit(
-                &m_vkBlitter, imported, newW, newH, acquireSem, frame.releaseSyncobjFd);
+        if (frame.valid) {
+            auto      imported       = reinterpret_cast<VkImage>(m_vkImages[frame.slot]);
+            auto      acquireSem     = reinterpret_cast<VkSemaphore>(frame.acquireSem);
+            bool      candidateReady = false;
+            const int rc             = ww_vk_blitter_prepare(&resources->vkBlitter,
+                                                             imported,
+                                                             static_cast<uint32_t>(incoming.width),
+                                                             static_cast<uint32_t>(incoming.height),
+                                                             incoming.fourcc,
+                                                             replacesPresentation,
+                                                             acquireSem,
+                                                             frame.releaseSyncobjFd,
+                                                             &candidateReady);
+            if (rc == 0) {
+                if (candidateReady) {
+                    vkCandidateContent = incoming;
+                    qCInfo(
+                        lcWD,
+                        "Vulkan shadow candidate: display=%llu %dx%d bytes=%llu resident=%llu",
+                        m_displayId,
+                        incoming.width,
+                        incoming.height,
+                        qulonglong(ww_vk_blitter_candidate_allocation_size(&resources->vkBlitter)),
+                        qulonglong(ww_vk_blitter_shadow_allocation_size(&resources->vkBlitter) +
+                                   ww_vk_blitter_candidate_allocation_size(&resources->vkBlitter)));
+                } else {
+                    commitPresentedContent(frame.bufferGeneration,
+                                           incoming.width,
+                                           incoming.height,
+                                           incoming.fourcc,
+                                           incoming.config);
+                }
+            } else if (ww_vk_blitter_candidate(&resources->vkBlitter) != VK_NULL_HANDLE &&
+                       ww_vk_blitter_discard_candidate(&resources->vkBlitter) != 0) {
+                qCCritical(lcWD, "Vulkan shadow candidate remains in flight; ending session");
+                scheduleSessionFailure(QStringLiteral("Vulkan shadow candidate did not drain"));
+            }
         }
     }
 #endif
+
+    if (resources && resources->eglCandidateTex != 0) {
+        const bool validCandidate = m_activeBackend == BackendEGL && eglCandidateContent.valid &&
+                                    resources->eglCandidateHasContent;
+        if (! validCandidate || ! window()) {
+            if (! resources->discardEglCandidate()) {
+                qCCritical(lcWD, "EGL shadow candidate could not be discarded");
+                scheduleSessionFailure(QStringLiteral("EGL shadow candidate cleanup failed"));
+            }
+        } else if (auto* candidateNode = ensureRootNode()) {
+            const QSize size(eglCandidateContent.width, eglCandidateContent.height);
+            QSGTexture* wrapper = QNativeInterface::QSGOpenGLTexture::fromNative(
+                resources->eglCandidateTex, window(), size, QQuickWindow::TextureHasAlphaChannel);
+            if (! wrapper) {
+                qCWarning(lcWD, "EGL candidate native texture wrapper creation failed");
+                (void)resources->discardEglCandidate();
+            } else {
+                candidateNode->installTexture(wrapper,
+                                              PresentationNode::TextureBackend::OpenGL,
+                                              static_cast<quintptr>(resources->eglCandidateTex),
+                                              size);
+                if (! resources->commitEglCandidate()) {
+                    qCCritical(lcWD, "EGL candidate commit failed after wrapper replacement");
+                    delete rootNode;
+                    rootNode = nullptr;
+                    oldNode  = nullptr;
+                    scheduleSessionFailure(QStringLiteral("EGL shadow commit failed"));
+                } else {
+                    qCInfo(lcWD,
+                           "EGL shadow committed: display=%llu resident=%llu",
+                           m_displayId,
+                           qulonglong(resources->eglShadowW) * qulonglong(resources->eglShadowH) *
+                               4ull);
+                    commitPresentedContent(eglCandidateContent.bufferGeneration,
+                                           eglCandidateContent.width,
+                                           eglCandidateContent.height,
+                                           eglCandidateContent.fourcc,
+                                           eglCandidateContent.config);
+                }
+            }
+        } else {
+            (void)resources->discardEglCandidate();
+        }
+    }
+
+#ifdef WW_HAVE_VULKAN
+    if (resources && vkCandidateContent.valid && resources->vkBlitterInited &&
+        ww_vk_blitter_candidate_has_content(&resources->vkBlitter)) {
+        if (! window()) {
+            (void)ww_vk_blitter_discard_candidate(&resources->vkBlitter);
+        } else if (auto* candidateNode = ensureRootNode()) {
+            const QSize size(vkCandidateContent.width, vkCandidateContent.height);
+            const auto  image   = ww_vk_blitter_candidate(&resources->vkBlitter);
+            QSGTexture* wrapper = QNativeInterface::QSGVulkanTexture::fromNative(
+                image,
+                ww_vk_blitter_shadow_layout(&resources->vkBlitter),
+                window(),
+                size,
+                QQuickWindow::TextureHasAlphaChannel);
+            if (! wrapper) {
+                qCWarning(lcWD, "Vulkan candidate native texture wrapper creation failed");
+                (void)ww_vk_blitter_discard_candidate(&resources->vkBlitter);
+            } else {
+                candidateNode->installTexture(wrapper,
+                                              PresentationNode::TextureBackend::Vulkan,
+                                              reinterpret_cast<quintptr>(image),
+                                              size);
+                const VkResult result = ww_vk_blitter_commit_candidate(&resources->vkBlitter);
+                if (result != VK_SUCCESS) {
+                    qCCritical(lcWD,
+                               "Vulkan candidate commit failed after wrapper replacement: %d",
+                               int(result));
+                    delete rootNode;
+                    rootNode = nullptr;
+                    oldNode  = nullptr;
+                    scheduleSessionFailure(QStringLiteral("Vulkan shadow commit failed"));
+                } else {
+                    qCInfo(lcWD,
+                           "Vulkan shadow committed: display=%llu resident=%llu",
+                           m_displayId,
+                           qulonglong(ww_vk_blitter_shadow_allocation_size(&resources->vkBlitter)));
+                    commitPresentedContent(vkCandidateContent.bufferGeneration,
+                                           vkCandidateContent.width,
+                                           vkCandidateContent.height,
+                                           vkCandidateContent.fourcc,
+                                           vkCandidateContent.config);
+                }
+            }
+        } else {
+            (void)ww_vk_blitter_discard_candidate(&resources->vkBlitter);
+        }
+    }
+#endif
+
+    ContentSnapshot presented;
+    {
+        QMutexLocker lk(&m_pendingMutex);
+        presented = m_presentationState.presented();
+    }
 
     const bool hasTexture =
         // EGL gate: only expose the shadow once at least one frame has
@@ -1480,97 +1877,81 @@ QSGNode* WaywallenDisplay::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData
         // across pool transitions, which is what gives the EGL path
         // the same "keep last frame on switch" continuity the Vulkan
         // path has.
-        (m_activeBackend == BackendEGL && m_eglShadowTex != 0 && m_eglShadowHasContent)
+        (resources && presented.valid && m_activeBackend == BackendEGL &&
+         resources->eglShadowTex != 0 && resources->eglShadowHasContent)
 #ifdef WW_HAVE_VULKAN
-        // Gate Vulkan-side sampling on actually having a blitted shadow.
-        // A bare ensure_shadow leaves the image in VK_IMAGE_LAYOUT_UNDEFINED
-        // until the first blit transitions it; sampling an UNDEFINED image
-        // trips VUID-vkCmdDraw-None-09600 and on NVIDIA cascades into
-        // VK_ERROR_DEVICE_LOST. This happens whenever textures_ready
-        // arrives before frame_ready and Qt schedules a paint between
-        // the two — common during rapid wallpaper switches.
-        || (m_activeBackend == BackendVulkan && m_vkBlitterInited &&
-            ww_vk_blitter_shadow(&m_vkBlitter) != VK_NULL_HANDLE &&
-            ww_vk_blitter_shadow_has_content(&m_vkBlitter))
+        // Gate Vulkan sampling on a shadow populated by a completed copy.
+        || (resources && presented.valid && m_activeBackend == BackendVulkan &&
+            resources->vkBlitterInited &&
+            ww_vk_blitter_shadow(&resources->vkBlitter) != VK_NULL_HANDLE &&
+            ww_vk_blitter_shadow_has_content(&resources->vkBlitter))
 #endif
         ;
 
     if (! hasTexture || ! window()) {
-        delete oldNode;
+        delete rootNode;
         return nullptr;
     }
 
-    // The root paint node is a QSGTransformNode wrapping the actual
-    // texture node. The transform applies per-display rotation from
-    // c_on_config (`m_transform`, wl_output-style 0..3). For 0° the
-    // matrix is identity and we behave exactly like the pre-rotation
-    // path; for 90°/270° the daemon has already swapped W/H into
-    // m_destRect so the math is just rotate-around-display-center.
-    QSGTransformNode*     xformNode = nullptr;
-    QSGSimpleTextureNode* node      = nullptr;
-    if (oldNode && oldNode->type() == QSGNode::TransformNodeType) {
-        xformNode = static_cast<QSGTransformNode*>(oldNode);
-        node      = static_cast<QSGSimpleTextureNode*>(xformNode->firstChild());
-    } else {
-        // Different tree (e.g. first paint after a plugin upgrade that
-        // changed the root node type) — drop and rebuild.
-        delete oldNode;
-        xformNode = new QSGTransformNode();
-        node      = new QSGSimpleTextureNode();
-        node->setFiltering(QSGTexture::Linear);
-        node->setOwnsTexture(true);
-        xformNode->appendChildNode(node);
-    }
+    rootNode = ensureRootNode();
+    if (! rootNode) return nullptr;
+    auto* clearNode = rootNode->clearNode;
+    auto* xformNode = rootNode->transformNode;
+    auto* node      = rootNode->imageNode;
 
-    QSize texSize(m_eglShadowW > 0 ? m_eglShadowW : m_texWidth,
-                  m_eglShadowH > 0 ? m_eglShadowH : m_texHeight);
-    if (m_activeBackend == BackendVulkan) {
-        texSize = QSize(m_texWidth, m_texHeight);
-    }
-    QSGTexture* sgTex = nullptr;
+    const QRectF bounds = boundingRect();
+    clearNode->setRect(bounds);
+    clearNode->setColor(presented.config.clearColor);
+
+    const QSize texSize(presented.width, presented.height);
 
     if (m_activeBackend == BackendEGL) {
-        sgTex = QNativeInterface::QSGOpenGLTexture::fromNative(
-            m_eglShadowTex, window(), texSize, QQuickWindow::TextureHasAlphaChannel);
+        const auto handle = static_cast<quintptr>(resources->eglShadowTex);
+        if (! rootNode->wraps(PresentationNode::TextureBackend::OpenGL, handle, texSize)) {
+            QSGTexture* wrapper = QNativeInterface::QSGOpenGLTexture::fromNative(
+                resources->eglShadowTex, window(), texSize, QQuickWindow::TextureHasAlphaChannel);
+            if (! wrapper) {
+                delete rootNode;
+                return nullptr;
+            }
+            rootNode->installTexture(
+                wrapper, PresentationNode::TextureBackend::OpenGL, handle, texSize);
+        }
     } else if (m_activeBackend == BackendVulkan) {
 #ifdef WW_HAVE_VULKAN
-        sgTex = QNativeInterface::QSGVulkanTexture::fromNative(
-            ww_vk_blitter_shadow(&m_vkBlitter),
-            ww_vk_blitter_shadow_layout(&m_vkBlitter),
-            window(),
-            texSize,
-            QQuickWindow::TextureHasAlphaChannel);
+        const auto image  = ww_vk_blitter_shadow(&resources->vkBlitter);
+        const auto handle = reinterpret_cast<quintptr>(image);
+        if (! rootNode->wraps(PresentationNode::TextureBackend::Vulkan, handle, texSize)) {
+            QSGTexture* wrapper = QNativeInterface::QSGVulkanTexture::fromNative(
+                image,
+                ww_vk_blitter_shadow_layout(&resources->vkBlitter),
+                window(),
+                texSize,
+                QQuickWindow::TextureHasAlphaChannel);
+            if (! wrapper) {
+                delete rootNode;
+                return nullptr;
+            }
+            rootNode->installTexture(
+                wrapper, PresentationNode::TextureBackend::Vulkan, handle, texSize);
+        }
 #endif
     }
 
-    if (sgTex) {
-        node->setTexture(sgTex);
+    if (presented.config.sourceRect.width() > 0 && presented.config.sourceRect.height() > 0) {
+        node->setSourceRect(presented.config.sourceRect);
     } else {
-        delete xformNode;
-        return nullptr;
+        node->setSourceRect(QRectF(0, 0, presented.width, presented.height));
     }
 
-    // m_sourceRect / m_destRect arrive in c_on_config and live in
-    // texture-pixel and display-pixel space respectively. The item's
-    // boundingRect is in QML logical pixels, so convert dest by the
-    // ratio (boundingRect / m_displayWidth) which is 1/DPR for the
-    // common case. Default-constructed (zero-size) rects mean we
-    // haven't seen a SetConfig yet — fall back to identity.
-    if (m_sourceRect.width() > 0 && m_sourceRect.height() > 0) {
-        node->setSourceRect(m_sourceRect);
-    } else {
-        node->setSourceRect(QRectF(0, 0, m_texWidth, m_texHeight));
-    }
-
-    const QRectF bounds = boundingRect();
-    if (m_destRect.width() > 0 && m_destRect.height() > 0 && m_displayWidth > 0 &&
-        m_displayHeight > 0) {
+    if (presented.config.destRect.width() > 0 && presented.config.destRect.height() > 0 &&
+        m_displayWidth > 0 && m_displayHeight > 0) {
         const qreal sx = bounds.width() / qreal(m_displayWidth);
         const qreal sy = bounds.height() / qreal(m_displayHeight);
-        node->setRect(QRectF(m_destRect.x() * sx,
-                             m_destRect.y() * sy,
-                             m_destRect.width() * sx,
-                             m_destRect.height() * sy));
+        node->setRect(QRectF(presented.config.destRect.x() * sx,
+                             presented.config.destRect.y() * sy,
+                             presented.config.destRect.width() * sx,
+                             presented.config.destRect.height() * sy));
     } else {
         node->setRect(bounds);
     }
@@ -1582,13 +1963,13 @@ QSGNode* WaywallenDisplay::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData
     // +Z is visually CW in screen coords (Y points down), which is
     // exactly how `Rotation::Cw*` is meant to be displayed.
     QMatrix4x4 mat;
-    if (m_transform != 0) {
-        const qreal w         = bounds.width();
-        const qreal h         = bounds.height();
-        const bool  swap_dims = (m_transform == 1 || m_transform == 3);
-        const qreal pre_w     = swap_dims ? h : w;
-        const qreal pre_h     = swap_dims ? w : h;
-        const float angle     = static_cast<float>(m_transform * 90u);
+    if (presented.config.transform != 0) {
+        const qreal w        = bounds.width();
+        const qreal h        = bounds.height();
+        const bool swap_dims = (presented.config.transform == 1 || presented.config.transform == 3);
+        const qreal pre_w    = swap_dims ? h : w;
+        const qreal pre_h    = swap_dims ? w : h;
+        const float angle    = static_cast<float>(presented.config.transform * 90u);
         mat.translate(static_cast<float>(w / 2.0), static_cast<float>(h / 2.0));
         mat.rotate(angle, 0.0f, 0.0f, 1.0f);
         mat.translate(static_cast<float>(-pre_w / 2.0), static_cast<float>(-pre_h / 2.0));
@@ -1598,20 +1979,5 @@ QSGNode* WaywallenDisplay::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData
         xformNode->markDirty(QSGNode::DirtyMatrix);
     }
 
-    // EGL: force a vertex re-upload. We hand setTexture a fresh
-    // QSGOpenGLTexture wrapper each paint; setTexture rewrites the
-    // node's vertex data via qsgsimpletexturenode_update but only
-    // marks DirtyMaterial (DirtyGeometry is gated on atlas-state
-    // toggle, see qtdeclarative qsgsimpletexturenode.cpp:198). With
-    // sourceRect/rect unchanged across paints, setSourceRect /
-    // setRect early-return and don't supply the missing mark either.
-    // Net effect: the batch renderer keeps the previous frame's GPU
-    // vertex buffer, sampling lands on stale UVs and the image looks
-    // shifted with edge-color leaking on the opposite side. The
-    // Vulkan path's wrapper goes through a different RHI route that
-    // isn't affected.
-    if (m_activeBackend == BackendEGL) {
-        node->markDirty(QSGNode::DirtyGeometry);
-    }
-    return xformNode;
+    return rootNode;
 }

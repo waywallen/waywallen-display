@@ -1,8 +1,15 @@
 cmake_minimum_required(VERSION 3.16)
 
-set(WAYWALLEN_DISPLAY_VERSION_MAJOR 0)
-set(WAYWALLEN_DISPLAY_VERSION_MINOR 2)
-set(WAYWALLEN_DISPLAY_VERSION_PATCH 8)
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/Cargo.toml" _cargo_version_line
+    REGEX "^version = \"[0-9]+\\.[0-9]+\\.[0-9]+\"$")
+if(NOT _cargo_version_line)
+    message(FATAL_ERROR "Unable to read package version from Cargo.toml")
+endif()
+string(REGEX REPLACE "^version = \"([0-9]+)\\.([0-9]+)\\.([0-9]+)\"$"
+    "\\1;\\2;\\3" _cargo_version_parts "${_cargo_version_line}")
+list(GET _cargo_version_parts 0 WAYWALLEN_DISPLAY_VERSION_MAJOR)
+list(GET _cargo_version_parts 1 WAYWALLEN_DISPLAY_VERSION_MINOR)
+list(GET _cargo_version_parts 2 WAYWALLEN_DISPLAY_VERSION_PATCH)
 
 project(waywallen_display
     VERSION ${WAYWALLEN_DISPLAY_VERSION_MAJOR}.${WAYWALLEN_DISPLAY_VERSION_MINOR}.${WAYWALLEN_DISPLAY_VERSION_PATCH}
@@ -19,6 +26,14 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 include(GNUInstallDirs)
+
+set(WAYWALLEN_DISPLAY_GENERATED_INCLUDE_DIR
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/include")
+file(MAKE_DIRECTORY "${WAYWALLEN_DISPLAY_GENERATED_INCLUDE_DIR}")
+configure_file(
+    include/waywallen_display_version.h.in
+    "${WAYWALLEN_DISPLAY_GENERATED_INCLUDE_DIR}/waywallen_display_version.h"
+    @ONLY)
 
 
 # ---------------------------------------------------------------------------
@@ -183,6 +198,7 @@ set_target_properties(waywallen_display PROPERTIES
 target_include_directories(waywallen_display
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<BUILD_INTERFACE:${WAYWALLEN_DISPLAY_GENERATED_INCLUDE_DIR}>
         $<INSTALL_INTERFACE:include>
     PRIVATE
         ${GENERATED_DIR}
@@ -199,8 +215,6 @@ target_compile_options(waywallen_display PRIVATE
 
 target_compile_definitions(waywallen_display PRIVATE
     ${_backend_defines}
-    WAYWALLEN_DISPLAY_VERSION_MAJOR=${WAYWALLEN_DISPLAY_VERSION_MAJOR}
-    WAYWALLEN_DISPLAY_VERSION_MINOR=${WAYWALLEN_DISPLAY_VERSION_MINOR}
     WAYWALLEN_DISPLAY_VERSION_PATCH=${WAYWALLEN_DISPLAY_VERSION_PATCH})
 if(_backend_private_libs)
     target_link_libraries(waywallen_display PRIVATE ${_backend_private_libs})
@@ -218,6 +232,7 @@ set_target_properties(waywallen_display_static PROPERTIES
 target_include_directories(waywallen_display_static
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<BUILD_INTERFACE:${WAYWALLEN_DISPLAY_GENERATED_INCLUDE_DIR}>
         $<INSTALL_INTERFACE:include>
     PRIVATE
         ${GENERATED_DIR}
@@ -235,8 +250,6 @@ target_compile_options(waywallen_display_static PRIVATE
     )
 target_compile_definitions(waywallen_display_static PRIVATE
     ${_backend_defines}
-    WAYWALLEN_DISPLAY_VERSION_MAJOR=${WAYWALLEN_DISPLAY_VERSION_MAJOR}
-    WAYWALLEN_DISPLAY_VERSION_MINOR=${WAYWALLEN_DISPLAY_VERSION_MINOR}
     WAYWALLEN_DISPLAY_VERSION_PATCH=${WAYWALLEN_DISPLAY_VERSION_PATCH})
 if(_backend_private_libs)
     target_link_libraries(waywallen_display_static PUBLIC ${_backend_private_libs})
@@ -246,7 +259,10 @@ endif()
 # Tests
 # ---------------------------------------------------------------------------
 
+option(WAYWALLEN_DISPLAY_PLUGIN_QML "Build the QML display plugin" OFF)
 option(WAYWALLEN_DISPLAY_BUILD_TESTS "Build libwaywallen_display tests" OFF)
+option(WAYWALLEN_DISPLAY_BUILD_QML_TESTS "Build QML plugin state tests"
+    ${WAYWALLEN_DISPLAY_PLUGIN_QML})
 
 if(WAYWALLEN_DISPLAY_BUILD_TESTS)
     enable_testing()
@@ -271,6 +287,19 @@ if(WAYWALLEN_DISPLAY_BUILD_TESTS)
     target_compile_options(test_display PRIVATE
         -Wall -Wextra -Wpedantic)
     add_test(NAME test_display COMMAND test_display)
+
+    if(WAYWALLEN_DISPLAY_BUILD_QML_TESTS)
+        enable_language(CXX)
+        find_package(Qt6 6.2 REQUIRED COMPONENTS Gui)
+        add_executable(test_presentation_state tests/test_presentation_state.cpp)
+        target_link_libraries(test_presentation_state PRIVATE Qt6::Gui)
+        target_include_directories(test_presentation_state PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/plugins/qml)
+        target_compile_features(test_presentation_state PRIVATE cxx_std_17)
+        target_compile_options(test_presentation_state PRIVATE
+            -Wall -Wextra -Wpedantic)
+        add_test(NAME test_presentation_state COMMAND test_presentation_state)
+    endif()
 
     if(WAYWALLEN_DISPLAY_WITH_EGL)
         add_executable(test_backend_egl tests/test_backend_egl.c)
@@ -315,7 +344,6 @@ if(WAYWALLEN_DISPLAY_BUILD_EXAMPLES)
     endif()
 endif()
 
-option(WAYWALLEN_DISPLAY_PLUGIN_QML "Build the QML display plugin" OFF)
 if(WAYWALLEN_DISPLAY_PLUGIN_QML)
     add_subdirectory(plugins/qml)
     message(STATUS "libwaywallen_display: QML plugin ENABLED")
@@ -371,7 +399,9 @@ endif()
 install(TARGETS waywallen_display waywallen_display_static
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
-install(FILES include/waywallen_display.h
+install(FILES
+    include/waywallen_display.h
+    "${WAYWALLEN_DISPLAY_GENERATED_INCLUDE_DIR}/waywallen_display_version.h"
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
 # ---------------------------------------------------------------------------

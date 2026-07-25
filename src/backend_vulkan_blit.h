@@ -49,6 +49,7 @@ typedef struct ww_vk_blitter {
     PFN_vkResetFences            vkResetFences;
     PFN_vkWaitForFences          vkWaitForFences;
     PFN_vkQueueSubmit            vkQueueSubmit;
+    PFN_vkQueueWaitIdle          vkQueueWaitIdle;
 
     /* Resolved lazily on first ensure_shadow_exportable; NULL when the
      * relay path was never used. Required only for DMABUF_RELAY. */
@@ -74,6 +75,7 @@ typedef struct ww_vk_blitter {
     uint32_t       shadow_w;
     uint32_t       shadow_h;
     VkFormat       shadow_fmt;
+    VkDeviceSize   shadow_allocation_size;
     /* false until the first ww_vk_blitter_blit succeeds for this
      * shadow; reset to false on every shadow recreate. The host
      * checks this before exposing the shadow to Qt RHI as a sampled
@@ -83,26 +85,13 @@ typedef struct ww_vk_blitter {
      * VUID-vkCmdDraw-None-09600 and on NVIDIA ends in DEVICE_LOST. */
     bool shadow_has_content;
 
-    /* Old shadows queued for delayed destruction. When the host's
-     * size changes, the prior QSGVulkanTexture's VkImageView is
-     * scheduled for destruction by Qt RHI's release queue but
-     * doesn't actually go away until the *next* frame's
-     * sync/render. Calling vkDestroyImage on the old shadow
-     * inline trips VUID-vkDestroyImage-image-01000. We park the
-     * old shadow handles here and the host calls
-     * `ww_vk_blitter_tick_pending_destroys` once per frame; when
-     * the per-entry countdown reaches zero (default 2 frames,
-     * comfortably above Qt RHI's typical 1-frame deferred
-     * release), we run vkDestroyImage / vkFreeMemory then. The
-     * queue is small (4) — rapid simultaneous size changes beyond
-     * that fall back to immediate destroy with a best-effort
-     * vkDeviceWaitIdle, which is racy but unlikely. */
-    struct {
-        VkImage        image;
-        VkDeviceMemory memory;
-        int            frames_remaining;
-    } pending_shadow_destroy[4];
-    int pending_shadow_destroy_count;
+    VkImage        candidate_image;
+    VkDeviceMemory candidate_mem;
+    uint32_t       candidate_w;
+    uint32_t       candidate_h;
+    VkFormat       candidate_fmt;
+    VkDeviceSize   candidate_allocation_size;
+    bool           candidate_has_content;
 
     /* DMABUF_RELAY only: exported DMA-BUF fd + per-plane layout for the
      * current shadow image. `shadow_export_fd = -1` when the shadow was
@@ -128,13 +117,6 @@ int ww_vk_blitter_init(ww_vk_blitter_t* b, VkInstance instance, VkPhysicalDevice
 
 /* Idempotent, safe to call on a zero-initialized struct. */
 void ww_vk_blitter_shutdown(ww_vk_blitter_t* b);
-
-/*
- * (Re-)create the shadow image when (w, h, fmt) differ from the
- * current one. No-op when they match. Returns 0 on success, negative
- * errno on failure.
- */
-int ww_vk_blitter_ensure_shadow(ww_vk_blitter_t* b, uint32_t w, uint32_t h, VkFormat fmt);
 
 /*
  * Allocate (or reallocate) a LINEAR-tiled, externally-exportable shadow
@@ -181,8 +163,44 @@ int ww_vk_blitter_get_export(const ww_vk_blitter_t* b, int* out_fd, uint32_t* ou
 int ww_vk_blitter_blit(ww_vk_blitter_t* b, VkImage imported, uint32_t w, uint32_t h,
                        VkSemaphore acquire_sem, int release_syncobj_fd);
 
+/*
+ * Copy into the current shadow or prepare a one-off replacement. When
+ * the current shadow matches and `force_replace` is false, this updates
+ * it in place and writes false to `out_candidate_ready`. Otherwise a
+ * separate candidate is allocated and populated while the current
+ * presentation remains untouched.
+ */
+int ww_vk_blitter_prepare(ww_vk_blitter_t* b, VkImage imported, uint32_t w, uint32_t h,
+                          uint32_t fourcc, bool force_replace, VkSemaphore acquire_sem,
+                          int release_syncobj_fd, bool* out_candidate_ready);
+
+/* Promote a prepared candidate after the host has rebound its native
+ * texture wrapper. Waits for the exact host graphics queue to become
+ * idle before destroying the previous image and allocation. */
+VkResult ww_vk_blitter_commit_candidate(ww_vk_blitter_t* b);
+
+/* Destroy a prepared candidate without changing the current shadow.
+ * Returns -EBUSY when a timed-out copy still references it. */
+int ww_vk_blitter_discard_candidate(ww_vk_blitter_t* b);
+
 static inline VkImage ww_vk_blitter_shadow(const ww_vk_blitter_t* b) {
     return b ? b->shadow_image : VK_NULL_HANDLE;
+}
+
+static inline VkImage ww_vk_blitter_candidate(const ww_vk_blitter_t* b) {
+    return b ? b->candidate_image : VK_NULL_HANDLE;
+}
+
+static inline bool ww_vk_blitter_candidate_has_content(const ww_vk_blitter_t* b) {
+    return b && b->candidate_has_content;
+}
+
+static inline uint64_t ww_vk_blitter_shadow_allocation_size(const ww_vk_blitter_t* b) {
+    return b ? (uint64_t)b->shadow_allocation_size : 0;
+}
+
+static inline uint64_t ww_vk_blitter_candidate_allocation_size(const ww_vk_blitter_t* b) {
+    return b ? (uint64_t)b->candidate_allocation_size : 0;
 }
 
 static inline VkImageLayout ww_vk_blitter_shadow_layout(const ww_vk_blitter_t* b) {
@@ -200,15 +218,6 @@ static inline bool ww_vk_blitter_initialized(const ww_vk_blitter_t* b) {
 static inline bool ww_vk_blitter_shadow_has_content(const ww_vk_blitter_t* b) {
     return b && b->shadow_has_content;
 }
-
-/* Process the deferred-destroy queue: decrement each entry's frame
- * countdown; for entries whose countdown reaches 0, run
- * vkDestroyImage + vkFreeMemory. Call this once per frame from the
- * host's render thread (typically at the top of updatePaintNode),
- * AFTER any Qt RHI frame boundary that would have processed its
- * own release queue — i.e. one frame after `ensure_shadow` queued
- * the old shadow. */
-void ww_vk_blitter_tick_pending_destroys(ww_vk_blitter_t* b);
 
 #    ifdef __cplusplus
 } /* extern "C" */

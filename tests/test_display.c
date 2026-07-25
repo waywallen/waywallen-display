@@ -56,11 +56,17 @@ struct test_state {
 
     int on_disconnected_count;
     int on_textures_ready_count;
+    int on_textures_releasing_count;
     int on_config_count;
     int on_frame_ready_count;
 
     int  last_disconnect_code;
     char last_disconnect_msg[256];
+
+    uint64_t last_textures_buffer_generation;
+    uint64_t last_config_buffer_generation;
+    uint64_t last_config_generation;
+    uint64_t last_frame_buffer_generation;
 
     /* Populated by handler_full_handshake_capture_caps after decoding
      * the client's consumer_caps request. */
@@ -71,20 +77,26 @@ struct test_state {
 };
 
 static void cb_textures_ready(void* ud, const waywallen_textures_t* t) {
-    (void)t;
-    ((struct test_state*)ud)->on_textures_ready_count++;
+    struct test_state* ts = (struct test_state*)ud;
+    ts->on_textures_ready_count++;
+    ts->last_textures_buffer_generation = t->buffer_generation;
 }
 static void cb_textures_releasing(void* ud, const waywallen_textures_t* t) {
-    (void)ud;
+    struct test_state* ts = (struct test_state*)ud;
+    ts->on_textures_releasing_count++;
     (void)t;
 }
 static void cb_config(void* ud, const waywallen_config_t* c) {
-    (void)c;
-    ((struct test_state*)ud)->on_config_count++;
+    struct test_state* ts = (struct test_state*)ud;
+    ts->on_config_count++;
+    ts->last_config_buffer_generation = c->buffer_generation;
+    ts->last_config_generation        = c->config_generation;
 }
 static void cb_frame_ready(void* ud, const waywallen_frame_t* f) {
-    (void)f;
-    ((struct test_state*)ud)->on_frame_ready_count++;
+    struct test_state* ts = (struct test_state*)ud;
+    ts->on_frame_ready_count++;
+    ts->last_frame_buffer_generation = f->buffer_generation;
+    if (f->release_syncobj_fd >= 0) close(f->release_syncobj_fd);
 }
 static void cb_disconnected(void* ud, int code, const char* msg) {
     struct test_state* ts = (struct test_state*)ud;
@@ -269,7 +281,7 @@ static int handler_full_handshake(int client_fd, struct test_state* ts) {
  * consumer_caps request the client emits after display_accepted, and
  * records mem_hints / sync_caps / color_caps onto the test_state for
  * the main thread to assert. */
-static int handler_full_handshake_capture_caps(int client_fd, struct test_state* ts) {
+static int complete_handshake_capture_caps(int client_fd, struct test_state* ts) {
     static uint8_t body_buf[WW_CODEC_MAX_BODY_BYTES];
     uint16_t       op;
     size_t         body_len;
@@ -332,6 +344,168 @@ static int handler_full_handshake_capture_caps(int client_fd, struct test_state*
     ts->consumer_caps_color_caps = caps.color_caps;
     ts->saw_consumer_caps        = 1;
     ww_req_consumer_caps_free(&caps);
+    return 0;
+}
+
+static int handler_full_handshake_capture_caps(int client_fd, struct test_state* ts) {
+    return complete_handshake_capture_caps(client_fd, ts);
+}
+
+static int send_bind_buffers(int client_fd, uint64_t buffer_generation) {
+    int dmabuf[2];
+    if (pipe(dmabuf) != 0) return -1;
+
+    uint32_t              stride       = 256;
+    uint32_t              plane_offset = 0;
+    uint64_t              size         = 16384;
+    ww_evt_bind_buffers_t bind         = {
+        .buffer_generation = buffer_generation,
+        .count             = 1,
+        .width             = 64,
+        .height            = 64,
+        .fourcc            = 0x34324241,
+        .modifier          = 0,
+        .planes_per_buffer = 1,
+        .stride            = { .count = 1, .data = &stride },
+        .plane_offset      = { .count = 1, .data = &plane_offset },
+        .size              = { .count = 1, .data = &size },
+    };
+    ww_buf_t out;
+    ww_buf_init(&out);
+    int rc = ww_evt_bind_buffers_encode(&bind, &out);
+    if (rc == WW_OK) {
+        rc = ww_codec_send_event(client_fd, WW_EVT_BIND_BUFFERS, out.data, out.len, dmabuf, 1);
+    }
+    ww_buf_free(&out);
+    close(dmabuf[0]);
+    close(dmabuf[1]);
+    return rc;
+}
+
+static int send_set_config(int client_fd, uint64_t config_generation) {
+    ww_evt_set_config_t config = {
+        .config_generation = config_generation,
+        .source_rect       = { .x = 0, .y = 0, .w = 64, .h = 64 },
+        .dest_rect         = { .x = 0, .y = 0, .w = 64, .h = 64 },
+        .transform         = 0,
+        .clear_r           = 0.1f,
+        .clear_g           = 0.2f,
+        .clear_b           = 0.3f,
+        .clear_a           = 1.0f,
+    };
+    ww_buf_t out;
+    ww_buf_init(&out);
+    int rc = ww_evt_set_config_encode(&config, &out);
+    if (rc == WW_OK) {
+        rc = ww_codec_send_event(client_fd, WW_EVT_SET_CONFIG, out.data, out.len, NULL, 0);
+    }
+    ww_buf_free(&out);
+    return rc;
+}
+
+static int send_frame_ready(int client_fd, uint64_t buffer_generation, uint64_t seq) {
+    int acquire[2];
+    int release[2];
+    if (pipe(acquire) != 0) return -1;
+    if (pipe(release) != 0) {
+        close(acquire[0]);
+        close(acquire[1]);
+        return -1;
+    }
+    ww_evt_frame_ready_t frame = {
+        .buffer_generation = buffer_generation,
+        .buffer_index      = 0,
+        .seq               = seq,
+    };
+    ww_buf_t out;
+    ww_buf_init(&out);
+    int rc = ww_evt_frame_ready_encode(&frame, &out);
+    if (rc == WW_OK) {
+        int fds[2] = { acquire[0], release[0] };
+        rc         = ww_codec_send_event(client_fd, WW_EVT_FRAME_READY, out.data, out.len, fds, 2);
+    }
+    ww_buf_free(&out);
+    close(acquire[0]);
+    close(acquire[1]);
+    close(release[0]);
+    close(release[1]);
+    return rc;
+}
+
+static int send_unbind(int client_fd, uint64_t buffer_generation) {
+    ww_evt_unbind_t unbind = { .buffer_generation = buffer_generation };
+    ww_buf_t        out;
+    ww_buf_init(&out);
+    int rc = ww_evt_unbind_encode(&unbind, &out);
+    if (rc == WW_OK) {
+        rc = ww_codec_send_event(client_fd, WW_EVT_UNBIND, out.data, out.len, NULL, 0);
+    }
+    ww_buf_free(&out);
+    return rc;
+}
+
+static int handler_generation_sequence(int client_fd, struct test_state* ts) {
+    if (complete_handshake_capture_caps(client_fd, ts) != 0) return -1;
+    if (send_bind_buffers(client_fd, 7) != 0) return -1;
+    if (send_frame_ready(client_fd, 6, 1) != 0) return -1;
+    if (send_set_config(client_fd, 11) != 0) return -1;
+    if (send_frame_ready(client_fd, 7, 2) != 0) return -1;
+    sleep_ms(50);
+    return 0;
+}
+
+static int handler_frame_before_config(int client_fd, struct test_state* ts) {
+    if (complete_handshake_capture_caps(client_fd, ts) != 0) return -1;
+    if (send_bind_buffers(client_fd, 9) != 0) return -1;
+    if (send_frame_ready(client_fd, 9, 1) != 0) return -1;
+    sleep_ms(50);
+    return 0;
+}
+
+static int handler_non_monotonic_bind(int client_fd, struct test_state* ts) {
+    if (complete_handshake_capture_caps(client_fd, ts) != 0) return -1;
+    if (send_bind_buffers(client_fd, 7) != 0) return -1;
+    if (send_bind_buffers(client_fd, 7) != 0) return -1;
+    sleep_ms(50);
+    return 0;
+}
+
+static int handler_mismatched_unbind(int client_fd, struct test_state* ts) {
+    if (complete_handshake_capture_caps(client_fd, ts) != 0) return -1;
+    if (send_bind_buffers(client_fd, 7) != 0) return -1;
+    if (send_unbind(client_fd, 8) != 0) return -1;
+    sleep_ms(50);
+    return 0;
+}
+
+static int handler_set_config_while_idle(int client_fd, struct test_state* ts) {
+    if (complete_handshake_capture_caps(client_fd, ts) != 0) return -1;
+    if (send_set_config(client_fd, 1) != 0) return -1;
+    sleep_ms(50);
+    return 0;
+}
+
+static int handler_unbind_pending_pool(int client_fd, struct test_state* ts) {
+    if (complete_handshake_capture_caps(client_fd, ts) != 0) return -1;
+    if (send_bind_buffers(client_fd, 7) != 0) return -1;
+    if (send_unbind(client_fd, 7) != 0) return -1;
+    sleep_ms(50);
+    return 0;
+}
+
+static int handler_unbind_active_pool(int client_fd, struct test_state* ts) {
+    if (complete_handshake_capture_caps(client_fd, ts) != 0) return -1;
+    if (send_bind_buffers(client_fd, 7) != 0) return -1;
+    if (send_set_config(client_fd, 1) != 0) return -1;
+    if (send_unbind(client_fd, 7) != 0) return -1;
+    sleep_ms(50);
+    return 0;
+}
+
+static int handler_bind_generation_one(int client_fd, struct test_state* ts) {
+    if (complete_handshake_capture_caps(client_fd, ts) != 0) return -1;
+    if (send_bind_buffers(client_fd, 1) != 0) return -1;
+    sleep_ms(50);
     return 0;
 }
 
@@ -646,6 +820,208 @@ static void test_server_sends_error_event(void) {
     printf("  ok test_server_sends_error_event\n");
 }
 
+static int dispatch_next_event(waywallen_display_t* d) {
+    struct pollfd pfd = {
+        .fd      = waywallen_display_get_fd(d),
+        .events  = POLLIN,
+        .revents = 0,
+    };
+    int rc = poll(&pfd, 1, 2000);
+    assert(rc == 1);
+    return waywallen_display_dispatch(d);
+}
+
+static void test_generation_payload_and_pending_config(void) {
+    struct test_state ts;
+    ts_init(&ts);
+    pthread_t srv = spawn_server(&ts, handler_generation_sequence);
+
+    waywallen_display_t* d = make_client(&ts);
+    int                  rc =
+        waywallen_display_begin_connect(d, ts.sock_path, "test-display", NULL, 1920, 1080, 60000);
+    assert(rc == WAYWALLEN_OK);
+    assert(drive_handshake(d, 2000) == WAYWALLEN_OK);
+
+    assert(dispatch_next_event(d) == WAYWALLEN_OK); /* bind gen=7 */
+    assert(ts.on_textures_ready_count == 1);
+    assert(ts.last_textures_buffer_generation == 7);
+
+    assert(dispatch_next_event(d) == WAYWALLEN_OK); /* stale frame gen=6 */
+    assert(ts.on_frame_ready_count == 0);
+    assert(ts.on_disconnected_count == 0);
+
+    assert(dispatch_next_event(d) == WAYWALLEN_OK); /* config gen=11 */
+    assert(ts.on_config_count == 1);
+    assert(ts.last_config_buffer_generation == 7);
+    assert(ts.last_config_generation == 11);
+
+    assert(dispatch_next_event(d) == WAYWALLEN_OK); /* frame gen=7 */
+    assert(ts.on_frame_ready_count == 1);
+    assert(ts.last_frame_buffer_generation == 7);
+    assert(ts.on_disconnected_count == 0);
+
+    waywallen_display_close(d);
+    waywallen_display_free(d);
+    pthread_join(srv, NULL);
+    ts_teardown(&ts);
+    printf("  ok test_generation_payload_and_pending_config\n");
+}
+
+static void test_current_frame_before_config_is_protocol_error(void) {
+    struct test_state ts;
+    ts_init(&ts);
+    pthread_t srv = spawn_server(&ts, handler_frame_before_config);
+
+    waywallen_display_t* d = make_client(&ts);
+    int                  rc =
+        waywallen_display_begin_connect(d, ts.sock_path, "test-display", NULL, 1920, 1080, 60000);
+    assert(rc == WAYWALLEN_OK);
+    assert(drive_handshake(d, 2000) == WAYWALLEN_OK);
+
+    assert(dispatch_next_event(d) == WAYWALLEN_OK);
+    assert(ts.on_textures_ready_count == 1);
+    assert(dispatch_next_event(d) == WAYWALLEN_ERR_PROTO);
+    assert(ts.on_frame_ready_count == 0);
+    assert(ts.on_disconnected_count == 1);
+    assert(strcmp(ts.last_disconnect_msg, "frame_ready before set_config") == 0);
+
+    waywallen_display_free(d);
+    pthread_join(srv, NULL);
+    ts_teardown(&ts);
+    printf("  ok test_current_frame_before_config_is_protocol_error\n");
+}
+
+static void test_non_monotonic_buffer_generation_is_protocol_error(void) {
+    struct test_state ts;
+    ts_init(&ts);
+    pthread_t srv = spawn_server(&ts, handler_non_monotonic_bind);
+
+    waywallen_display_t* d = make_client(&ts);
+    int                  rc =
+        waywallen_display_begin_connect(d, ts.sock_path, "test-display", NULL, 1920, 1080, 60000);
+    assert(rc == WAYWALLEN_OK);
+    assert(drive_handshake(d, 2000) == WAYWALLEN_OK);
+
+    assert(dispatch_next_event(d) == WAYWALLEN_OK);
+    assert(ts.on_textures_ready_count == 1);
+    assert(dispatch_next_event(d) == WAYWALLEN_ERR_PROTO);
+    assert(ts.on_textures_ready_count == 1);
+    assert(ts.on_disconnected_count == 1);
+    assert(strcmp(ts.last_disconnect_msg, "non-monotonic buffer_generation") == 0);
+
+    waywallen_display_free(d);
+    pthread_join(srv, NULL);
+    ts_teardown(&ts);
+    printf("  ok test_non_monotonic_buffer_generation_is_protocol_error\n");
+}
+
+static void test_mismatched_unbind_generation_is_protocol_error(void) {
+    struct test_state ts;
+    ts_init(&ts);
+    pthread_t srv = spawn_server(&ts, handler_mismatched_unbind);
+
+    waywallen_display_t* d = make_client(&ts);
+    int                  rc =
+        waywallen_display_begin_connect(d, ts.sock_path, "test-display", NULL, 1920, 1080, 60000);
+    assert(rc == WAYWALLEN_OK);
+    assert(drive_handshake(d, 2000) == WAYWALLEN_OK);
+
+    assert(dispatch_next_event(d) == WAYWALLEN_OK);
+    assert(ts.on_textures_ready_count == 1);
+    assert(dispatch_next_event(d) == WAYWALLEN_ERR_PROTO);
+    assert(ts.on_textures_releasing_count == 0);
+    assert(ts.on_disconnected_count == 1);
+    assert(strcmp(ts.last_disconnect_msg, "unbind generation mismatch") == 0);
+
+    waywallen_display_free(d);
+    pthread_join(srv, NULL);
+    ts_teardown(&ts);
+    printf("  ok test_mismatched_unbind_generation_is_protocol_error\n");
+}
+
+static void test_set_config_while_idle_is_protocol_error(void) {
+    struct test_state ts;
+    ts_init(&ts);
+    pthread_t srv = spawn_server(&ts, handler_set_config_while_idle);
+
+    waywallen_display_t* d = make_client(&ts);
+    int                  rc =
+        waywallen_display_begin_connect(d, ts.sock_path, "test-display", NULL, 1920, 1080, 60000);
+    assert(rc == WAYWALLEN_OK);
+    assert(drive_handshake(d, 2000) == WAYWALLEN_OK);
+
+    assert(dispatch_next_event(d) == WAYWALLEN_ERR_PROTO);
+    assert(ts.on_config_count == 0);
+    assert(ts.on_disconnected_count == 1);
+    assert(strcmp(ts.last_disconnect_msg, "set_config in invalid state") == 0);
+
+    waywallen_display_free(d);
+    pthread_join(srv, NULL);
+    ts_teardown(&ts);
+    printf("  ok test_set_config_while_idle_is_protocol_error\n");
+}
+
+static void test_unbind_is_valid_before_and_after_config(void) {
+    int (*server_handlers[])(int, struct test_state*) = { handler_unbind_pending_pool,
+                                                          handler_unbind_active_pool };
+    for (size_t i = 0; i < sizeof(server_handlers) / sizeof(server_handlers[0]); ++i) {
+        struct test_state ts;
+        ts_init(&ts);
+        pthread_t srv = spawn_server(&ts, server_handlers[i]);
+
+        waywallen_display_t* d  = make_client(&ts);
+        int                  rc = waywallen_display_begin_connect(
+            d, ts.sock_path, "test-display", NULL, 1920, 1080, 60000);
+        assert(rc == WAYWALLEN_OK);
+        assert(drive_handshake(d, 2000) == WAYWALLEN_OK);
+
+        assert(dispatch_next_event(d) == WAYWALLEN_OK);
+        if (i == 1) assert(dispatch_next_event(d) == WAYWALLEN_OK);
+        assert(dispatch_next_event(d) == WAYWALLEN_OK);
+        assert(ts.on_textures_releasing_count == 1);
+        assert(ts.on_disconnected_count == 0);
+        assert(waywallen_display_stream_state(d) == WAYWALLEN_STREAM_INACTIVE);
+
+        waywallen_display_close(d);
+        waywallen_display_free(d);
+        pthread_join(srv, NULL);
+        ts_teardown(&ts);
+    }
+    printf("  ok test_unbind_is_valid_before_and_after_config\n");
+}
+
+static void test_buffer_generation_restarts_on_new_connection(void) {
+    struct test_state ts;
+    ts_init(&ts);
+    pthread_t srv = spawn_server(&ts, handler_unbind_pending_pool);
+
+    waywallen_display_t* d = make_client(&ts);
+    int                  rc =
+        waywallen_display_begin_connect(d, ts.sock_path, "test-display", NULL, 1920, 1080, 60000);
+    assert(rc == WAYWALLEN_OK);
+    assert(drive_handshake(d, 2000) == WAYWALLEN_OK);
+    assert(dispatch_next_event(d) == WAYWALLEN_OK);
+    assert(dispatch_next_event(d) == WAYWALLEN_OK);
+    waywallen_display_close(d);
+    pthread_join(srv, NULL);
+    ts_teardown(&ts);
+
+    ts_init(&ts);
+    srv = spawn_server(&ts, handler_bind_generation_one);
+    rc  = waywallen_display_begin_connect(d, ts.sock_path, "test-display", NULL, 1920, 1080, 60000);
+    assert(rc == WAYWALLEN_OK);
+    assert(drive_handshake(d, 2000) == WAYWALLEN_OK);
+    assert(dispatch_next_event(d) == WAYWALLEN_OK);
+    assert(ts.last_textures_buffer_generation == 1);
+    assert(ts.on_disconnected_count == 0);
+
+    waywallen_display_close(d);
+    waywallen_display_free(d);
+    pthread_join(srv, NULL);
+    ts_teardown(&ts);
+    printf("  ok test_buffer_generation_restarts_on_new_connection\n");
+}
+
 /* ------------------------------------------------------------------ */
 /*  Driver                                                             */
 /* ------------------------------------------------------------------ */
@@ -659,6 +1035,13 @@ int main(void) {
     test_partial_welcome();
     test_server_closes_during_welcome_wait();
     test_server_sends_error_event();
+    test_generation_payload_and_pending_config();
+    test_current_frame_before_config_is_protocol_error();
+    test_non_monotonic_buffer_generation_is_protocol_error();
+    test_mismatched_unbind_generation_is_protocol_error();
+    test_set_config_while_idle_is_protocol_error();
+    test_unbind_is_valid_before_and_after_config();
+    test_buffer_generation_restarts_on_new_connection();
     printf("test_display: OK\n");
     return 0;
 }

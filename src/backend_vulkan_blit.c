@@ -74,6 +74,7 @@ static int resolve_cmd_fns(ww_vk_blitter_t* b) {
     RESOLVE(vkResetFences, PFN_vkResetFences, "vkResetFences");
     RESOLVE(vkWaitForFences, PFN_vkWaitForFences, "vkWaitForFences");
     RESOLVE(vkQueueSubmit, PFN_vkQueueSubmit, "vkQueueSubmit");
+    RESOLVE(vkQueueWaitIdle, PFN_vkQueueWaitIdle, "vkQueueWaitIdle");
 
 #    undef RESOLVE
     return 0;
@@ -210,117 +211,25 @@ static void destroy_shadow(ww_vk_blitter_t* b) {
     b->shadow_w               = 0;
     b->shadow_h               = 0;
     b->shadow_fmt             = VK_FORMAT_UNDEFINED;
+    b->shadow_allocation_size = 0;
+    b->shadow_has_content     = false;
 }
 
-/* Push the current shadow onto the deferred-destroy queue without
- * touching it. Used by ensure_shadow on size/format change so that
- * Qt RHI's still-live VkImageView (deleted via Qt's release queue at
- * the next frame boundary) doesn't trip
- * VUID-vkDestroyImage-image-01000. When the queue is full, force the
- * oldest entry's countdown to zero and tick once to free a slot —
- * this only sacrifices the extra frame of jitter slack, never falls
- * back to vkDeviceWaitIdle (which is precisely the race we deferred
- * destruction to avoid). */
-static void enqueue_shadow_destroy(ww_vk_blitter_t* b) {
-    if (b->shadow_image == VK_NULL_HANDLE && b->shadow_mem == VK_NULL_HANDLE) {
-        return;
+static void destroy_shadow_handles(ww_vk_blitter_t* b, VkImage image, VkDeviceMemory memory) {
+    if (image != VK_NULL_HANDLE) {
+        b->backend.vkDestroyImage(b->backend.device, image, NULL);
     }
-    const int cap = (int)(sizeof(b->pending_shadow_destroy) / sizeof(b->pending_shadow_destroy[0]));
-    if (b->pending_shadow_destroy_count >= cap) {
-        int oldest = 0;
-        for (int i = 1; i < b->pending_shadow_destroy_count; i++) {
-            if (b->pending_shadow_destroy[i].frames_remaining <
-                b->pending_shadow_destroy[oldest].frames_remaining) {
-                oldest = i;
-            }
-        }
-        ww_log(WAYWALLEN_LOG_WARN,
-               "vk blitter: pending_shadow_destroy queue full; forcing "
-               "oldest entry (frames_remaining=%d) to fire now",
-               b->pending_shadow_destroy[oldest].frames_remaining);
-        b->pending_shadow_destroy[oldest].frames_remaining = 1;
-        ww_vk_blitter_tick_pending_destroys(b);
+    if (memory != VK_NULL_HANDLE) {
+        b->backend.vkFreeMemory(b->backend.device, memory, NULL);
     }
-    int idx                               = b->pending_shadow_destroy_count++;
-    b->pending_shadow_destroy[idx].image  = b->shadow_image;
-    b->pending_shadow_destroy[idx].memory = b->shadow_mem;
-    /* 2 frames: Qt RHI typically releases on next frame boundary,
-     * one extra frame of slack absorbs jitter. */
-    b->pending_shadow_destroy[idx].frames_remaining = 2;
-    b->shadow_image                                 = VK_NULL_HANDLE;
-    b->shadow_mem                                   = VK_NULL_HANDLE;
-    /* Exporting consumers hold their own dup; releasing our fd here
-     * just drops the lib's reference and doesn't unmap the dmabuf. */
-    if (b->shadow_export_fd >= 0) {
-        close(b->shadow_export_fd);
-        b->shadow_export_fd = -1;
-    }
-    b->shadow_export_n_planes = 0;
-    b->shadow_w               = 0;
-    b->shadow_h               = 0;
-    b->shadow_fmt             = VK_FORMAT_UNDEFINED;
 }
 
-void ww_vk_blitter_tick_pending_destroys(ww_vk_blitter_t* b) {
-    if (! b || b->pending_shadow_destroy_count == 0) return;
-    int j = 0;
-    for (int i = 0; i < b->pending_shadow_destroy_count; i++) {
-        if (--b->pending_shadow_destroy[i].frames_remaining > 0) {
-            /* Still parked; keep it. */
-            if (j != i) b->pending_shadow_destroy[j] = b->pending_shadow_destroy[i];
-            j++;
-            continue;
-        }
-        /* Countdown elapsed: Qt RHI has had at least one frame
-         * boundary to process its release queue, so the dependent
-         * VkImageView is gone. Safe to destroy now. */
-        if (b->pending_shadow_destroy[i].image != VK_NULL_HANDLE) {
-            b->backend.vkDestroyImage(b->backend.device, b->pending_shadow_destroy[i].image, NULL);
-        }
-        if (b->pending_shadow_destroy[i].memory != VK_NULL_HANDLE) {
-            b->backend.vkFreeMemory(b->backend.device, b->pending_shadow_destroy[i].memory, NULL);
-        }
-    }
-    b->pending_shadow_destroy_count = j;
-}
-
-int ww_vk_blitter_ensure_shadow(ww_vk_blitter_t* b, uint32_t w, uint32_t h, VkFormat fmt) {
-    if (! b || ! b->initialized) return -EINVAL;
-    if (w == 0 || h == 0 || fmt == VK_FORMAT_UNDEFINED) return -EINVAL;
-    if (b->shadow_image != VK_NULL_HANDLE && b->shadow_w == w && b->shadow_h == h &&
-        b->shadow_fmt == fmt) {
-        return 0;
-    }
-
-    /* Drain any in-flight blit referencing the old shadow before
-     * tearing it down. Bounded wait: if the fence is wedged the GPU
-     * is effectively hung — Qt RHI's own next submit will hit the
-     * same hang and trip DEVICE_LOST, which triggers
-     * sceneGraphInvalidated → cleanup → blitter shutdown. Stalling
-     * for 2s per frame here is bounded recovery time, not infinite. */
-    static const uint64_t WW_SHADOW_DRAIN_NS = 2ull * 1000ull * 1000ull * 1000ull;
-    if (b->fence_armed) {
-        VkResult vrw =
-            b->vkWaitForFences(b->backend.device, 1, &b->fence, VK_TRUE, WW_SHADOW_DRAIN_NS);
-        if (vrw == VK_TIMEOUT) {
-            ww_log(WAYWALLEN_LOG_WARN,
-                   "vk blitter: shadow-drain fence wait timed out (>2s); "
-                   "GPU likely hung, leaving fence armed and bailing — "
-                   "sceneGraphInvalidated will recover us");
-            /* Cannot vkResetFences on an in-flight fence (UB), nor
-             * vkDestroyFence / vkFreeCommandBuffers on resources still
-             * referenced by an in-flight submission. Bail out, keep
-             * fence_armed=true, leak old shadow until shutdown. */
-            return -EIO;
-        }
-        b->vkResetFences(b->backend.device, 1, &b->fence);
-        b->fence_armed = false;
-    }
-    /* Defer the actual vkDestroyImage to a later frame so Qt RHI's
-     * released VkImageView (which Qt processes async on its release
-     * queue at frame boundaries) doesn't trip
-     * VUID-vkDestroyImage-image-01000. */
-    enqueue_shadow_destroy(b);
+static int create_regular_shadow(ww_vk_blitter_t* b, uint32_t w, uint32_t h, VkFormat fmt,
+                                 VkImage* out_image, VkDeviceMemory* out_memory,
+                                 VkDeviceSize* out_allocation_size) {
+    *out_image           = VK_NULL_HANDLE;
+    *out_memory          = VK_NULL_HANDLE;
+    *out_allocation_size = 0;
 
     VkImageCreateInfo ici = {
         .sType                 = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
@@ -337,7 +246,7 @@ int ww_vk_blitter_ensure_shadow(ww_vk_blitter_t* b, uint32_t w, uint32_t h, VkFo
         .pQueueFamilyIndices   = &b->backend.queue_family_index,
         .initialLayout         = VK_IMAGE_LAYOUT_UNDEFINED,
     };
-    VkResult vr = b->backend.vkCreateImage(b->backend.device, &ici, NULL, &b->shadow_image);
+    VkResult vr = b->backend.vkCreateImage(b->backend.device, &ici, NULL, out_image);
     if (vr != VK_SUCCESS) {
         ww_log(WAYWALLEN_LOG_ERROR,
                "vk blitter: vkCreateImage(shadow %ux%u fmt=%d) failed: %s",
@@ -349,10 +258,8 @@ int ww_vk_blitter_ensure_shadow(ww_vk_blitter_t* b, uint32_t w, uint32_t h, VkFo
     }
 
     VkMemoryRequirements req;
-    b->backend.vkGetImageMemoryRequirements(b->backend.device, b->shadow_image, &req);
+    b->backend.vkGetImageMemoryRequirements(b->backend.device, *out_image, &req);
 
-    /* Some integrated GPUs only expose HOST_VISIBLE for the bits we
-     * need; fall back to "any" matching type when DEVICE_LOCAL fails. */
     uint32_t mtype =
         pick_memory_type(&b->backend, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     if (mtype == UINT32_MAX) {
@@ -363,8 +270,8 @@ int ww_vk_blitter_ensure_shadow(ww_vk_blitter_t* b, uint32_t w, uint32_t h, VkFo
                "vk blitter: no memory type for shadow image "
                "(typeBits=0x%08x)",
                req.memoryTypeBits);
-        b->backend.vkDestroyImage(b->backend.device, b->shadow_image, NULL);
-        b->shadow_image = VK_NULL_HANDLE;
+        destroy_shadow_handles(b, *out_image, VK_NULL_HANDLE);
+        *out_image = VK_NULL_HANDLE;
         return -EIO;
     }
 
@@ -373,39 +280,35 @@ int ww_vk_blitter_ensure_shadow(ww_vk_blitter_t* b, uint32_t w, uint32_t h, VkFo
         .allocationSize  = req.size,
         .memoryTypeIndex = mtype,
     };
-    vr = b->backend.vkAllocateMemory(b->backend.device, &mai, NULL, &b->shadow_mem);
+    vr = b->backend.vkAllocateMemory(b->backend.device, &mai, NULL, out_memory);
     if (vr != VK_SUCCESS) {
         ww_log(WAYWALLEN_LOG_ERROR,
                "vk blitter: vkAllocateMemory(shadow size=%" PRIu64 ") failed: %s",
                (uint64_t)req.size,
                ww_vk_result_str(vr));
-        b->backend.vkDestroyImage(b->backend.device, b->shadow_image, NULL);
-        b->shadow_image = VK_NULL_HANDLE;
+        destroy_shadow_handles(b, *out_image, VK_NULL_HANDLE);
+        *out_image = VK_NULL_HANDLE;
         return -EIO;
     }
-    vr = b->backend.vkBindImageMemory(b->backend.device, b->shadow_image, b->shadow_mem, 0);
+    vr = b->backend.vkBindImageMemory(b->backend.device, *out_image, *out_memory, 0);
     if (vr != VK_SUCCESS) {
         ww_log(WAYWALLEN_LOG_ERROR,
                "vk blitter: vkBindImageMemory(shadow) failed: %s",
                ww_vk_result_str(vr));
-        destroy_shadow(b);
+        destroy_shadow_handles(b, *out_image, *out_memory);
+        *out_image  = VK_NULL_HANDLE;
+        *out_memory = VK_NULL_HANDLE;
         return -EIO;
     }
 
-    b->shadow_w   = w;
-    b->shadow_h   = h;
-    b->shadow_fmt = fmt;
-    /* Fresh image; layout is VK_IMAGE_LAYOUT_UNDEFINED. Until the
-     * first blit transitions it to SHADER_READ_ONLY_OPTIMAL, the
-     * host MUST NOT expose this shadow as a sampled texture. */
-    b->shadow_has_content = false;
     ww_log(WAYWALLEN_LOG_INFO,
-           "vk blitter: shadow %ux%u fmt=%d ready (mtype=%u size=%" PRIu64 ")",
+           "vk blitter: shadow candidate %ux%u fmt=%d ready (mtype=%u size=%" PRIu64 ")",
            w,
            h,
            (int)fmt,
            mtype,
            (uint64_t)req.size);
+    *out_allocation_size = req.size;
     return 0;
 }
 
@@ -442,8 +345,7 @@ int ww_vk_blitter_ensure_shadow_exportable(ww_vk_blitter_t* b, uint32_t w, uint3
     int rc = resolve_export_fns(b);
     if (rc != 0) return rc;
 
-    /* Drain in-flight blit referencing the old shadow first. Same
-     * bounded-wait shape as `ensure_shadow`. */
+    /* Drain any in-flight blit that still references the old shadow. */
     static const uint64_t WW_SHADOW_DRAIN_NS = 2ull * 1000ull * 1000ull * 1000ull;
     if (b->fence_armed) {
         VkResult vrw =
@@ -455,7 +357,10 @@ int ww_vk_blitter_ensure_shadow_exportable(ww_vk_blitter_t* b, uint32_t w, uint3
         b->vkResetFences(b->backend.device, 1, &b->fence);
         b->fence_armed = false;
     }
-    enqueue_shadow_destroy(b);
+    /* Export consumers own a duplicated dma-buf fd and an independent
+     * imported image. Once our copy fence is complete, dropping the
+     * local image, memory and fd does not invalidate their payload. */
+    destroy_shadow(b);
 
     VkExternalMemoryImageCreateInfo ext_img = {
         .sType       = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
@@ -573,6 +478,7 @@ int ww_vk_blitter_ensure_shadow_exportable(ww_vk_blitter_t* b, uint32_t w, uint3
     b->shadow_w               = w;
     b->shadow_h               = h;
     b->shadow_fmt             = fmt;
+    b->shadow_allocation_size = req.size;
     b->shadow_export_fd       = dmabuf_fd;
     b->shadow_export_n_planes = 1;
     /* rowPitch fits in uint32_t for any realistic surface; explicit cast
@@ -626,9 +532,10 @@ static VkImageSubresourceRange full_color_range(void) {
     return r;
 }
 
-int ww_vk_blitter_blit(ww_vk_blitter_t* b, VkImage imported, uint32_t w, uint32_t h,
-                       VkSemaphore acquire_sem, int release_syncobj_fd) {
-    if (! b || ! b->initialized || b->shadow_image == VK_NULL_HANDLE) {
+static int blit_to_shadow(ww_vk_blitter_t* b, VkImage shadow_image, int shadow_export_fd,
+                          VkImage imported, uint32_t w, uint32_t h, VkSemaphore acquire_sem,
+                          int release_syncobj_fd) {
+    if (! b || ! b->initialized || shadow_image == VK_NULL_HANDLE) {
         if (release_syncobj_fd >= 0) close(release_syncobj_fd);
         return -EINVAL;
     }
@@ -636,17 +543,6 @@ int ww_vk_blitter_blit(ww_vk_blitter_t* b, VkImage imported, uint32_t w, uint32_
         if (release_syncobj_fd >= 0) close(release_syncobj_fd);
         return -EINVAL;
     }
-    if (w != b->shadow_w || h != b->shadow_h) {
-        ww_log(WAYWALLEN_LOG_WARN,
-               "vk blitter: size mismatch (frame=%ux%u shadow=%ux%u)",
-               w,
-               h,
-               b->shadow_w,
-               b->shadow_h);
-        if (release_syncobj_fd >= 0) close(release_syncobj_fd);
-        return -EINVAL;
-    }
-
     /* 2 s is well above any plausible blit duration (hundreds of µs
      * even on AMD with DCC). Producer death between FrameReady and
      * its acquire dma_fence signal is the only realistic path to a
@@ -715,7 +611,7 @@ int ww_vk_blitter_blit(ww_vk_blitter_t* b, VkImage imported, uint32_t w, uint32_
         .newLayout           = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .image               = b->shadow_image,
+        .image               = shadow_image,
         .subresourceRange    = full_color_range(),
     };
     VkImageMemoryBarrier pre_bars[2] = { in_bar, shadow_bar0 };
@@ -753,7 +649,7 @@ int ww_vk_blitter_blit(ww_vk_blitter_t* b, VkImage imported, uint32_t w, uint32_
     b->vkCmdCopyImage(b->cb,
                       imported,
                       VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                      b->shadow_image,
+                      shadow_image,
                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                       1,
                       &region);
@@ -780,7 +676,7 @@ int ww_vk_blitter_blit(ww_vk_blitter_t* b, VkImage imported, uint32_t w, uint32_
         .newLayout           = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .image               = b->shadow_image,
+        .image               = shadow_image,
         .subresourceRange    = full_color_range(),
     };
     VkImageMemoryBarrier post_bars[2] = { out_bar, shadow_bar1 };
@@ -804,16 +700,17 @@ int ww_vk_blitter_blit(ww_vk_blitter_t* b, VkImage imported, uint32_t w, uint32_
         return -EIO;
     }
 
-    VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-    VkSubmitInfo         si         = {
+    VkPipelineStageFlags wait_stage    = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    const bool           signal_export = shadow_export_fd >= 0 && b->export_sem != VK_NULL_HANDLE;
+    VkSubmitInfo         si            = {
         .sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO,
         .waitSemaphoreCount   = (acquire_sem != VK_NULL_HANDLE) ? 1u : 0u,
         .pWaitSemaphores      = (acquire_sem != VK_NULL_HANDLE) ? &acquire_sem : NULL,
         .pWaitDstStageMask    = (acquire_sem != VK_NULL_HANDLE) ? &wait_stage : NULL,
         .commandBufferCount   = 1,
         .pCommandBuffers      = &b->cb,
-        .signalSemaphoreCount = (b->export_sem != VK_NULL_HANDLE) ? 1u : 0u,
-        .pSignalSemaphores    = (b->export_sem != VK_NULL_HANDLE) ? &b->export_sem : NULL,
+        .signalSemaphoreCount = signal_export ? 1u : 0u,
+        .pSignalSemaphores    = signal_export ? &b->export_sem : NULL,
     };
     /* Don't try to signal release_syncobj_fd from this submit via
      * vkImportSemaphoreFdKHR(OPAQUE_FD): NVIDIA rejects drm_syncobj
@@ -856,7 +753,7 @@ int ww_vk_blitter_blit(ww_vk_blitter_t* b, VkImage imported, uint32_t w, uint32_
      * long-lived imported VkImage's sampler sees fresh content without
      * us having to rebuild the GdkTexture every frame. Direct copy of
      * the gsk/gpu/gskgpudownloadop.c pattern. */
-    if (b->shadow_export_fd >= 0 && b->vkGetSemaphoreFdKHR) {
+    if (shadow_export_fd >= 0 && b->vkGetSemaphoreFdKHR) {
         int                     sync_fd = -1;
         VkSemaphoreGetFdInfoKHR get     = {
             .sType      = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR,
@@ -869,12 +766,12 @@ int ww_vk_blitter_blit(ww_vk_blitter_t* b, VkImage imported, uint32_t w, uint32_
                 .flags = DMA_BUF_SYNC_WRITE,
                 .fd    = sync_fd,
             };
-            if (ioctl(b->shadow_export_fd, DMA_BUF_IOCTL_IMPORT_SYNC_FILE, &sf) != 0) {
+            if (ioctl(shadow_export_fd, DMA_BUF_IOCTL_IMPORT_SYNC_FILE, &sf) != 0) {
                 ww_log(WAYWALLEN_LOG_WARN,
                        "vk blitter: dma_buf import_sync_file(fd=%d shadow=%d) "
                        "failed: %s",
                        sync_fd,
-                       b->shadow_export_fd,
+                       shadow_export_fd,
                        strerror(errno));
             }
             close(sync_fd);
@@ -886,10 +783,6 @@ int ww_vk_blitter_blit(ww_vk_blitter_t* b, VkImage imported, uint32_t w, uint32_
     }
     b->vkResetFences(b->backend.device, 1, &b->fence);
     b->fence_armed = false;
-    /* Blit transitioned shadow into SHADER_READ_ONLY_OPTIMAL; the
-     * host can now safely sample it. */
-    b->shadow_has_content = true;
-
     if (release_syncobj_fd >= 0) {
         int rc = waywallen_display_signal_release_syncobj(release_syncobj_fd);
         if (rc != WAYWALLEN_OK) {
@@ -902,6 +795,128 @@ int ww_vk_blitter_blit(ww_vk_blitter_t* b, VkImage imported, uint32_t w, uint32_
     return 0;
 }
 
+int ww_vk_blitter_blit(ww_vk_blitter_t* b, VkImage imported, uint32_t w, uint32_t h,
+                       VkSemaphore acquire_sem, int release_syncobj_fd) {
+    if (! b || ! b->initialized || b->shadow_image == VK_NULL_HANDLE || w != b->shadow_w ||
+        h != b->shadow_h) {
+        if (release_syncobj_fd >= 0) close(release_syncobj_fd);
+        return -EINVAL;
+    }
+    int rc = blit_to_shadow(
+        b, b->shadow_image, b->shadow_export_fd, imported, w, h, acquire_sem, release_syncobj_fd);
+    if (rc == 0) b->shadow_has_content = true;
+    return rc;
+}
+
+int ww_vk_blitter_discard_candidate(ww_vk_blitter_t* b) {
+    if (! b || ! b->initialized) return -EINVAL;
+    if (b->candidate_image == VK_NULL_HANDLE && b->candidate_mem == VK_NULL_HANDLE) return 0;
+
+    if (b->fence_armed) {
+        static const uint64_t WW_CANDIDATE_DRAIN_NS = 2ull * 1000ull * 1000ull * 1000ull;
+        VkResult              vr =
+            b->vkWaitForFences(b->backend.device, 1, &b->fence, VK_TRUE, WW_CANDIDATE_DRAIN_NS);
+        if (vr == VK_TIMEOUT) {
+            ww_log(WAYWALLEN_LOG_ERROR,
+                   "vk blitter: candidate discard timed out; presentation session must stop");
+            return -EBUSY;
+        }
+        if (vr != VK_SUCCESS) {
+            ww_log(WAYWALLEN_LOG_ERROR,
+                   "vk blitter: candidate discard wait failed: %s",
+                   ww_vk_result_str(vr));
+            return -EIO;
+        }
+        b->vkResetFences(b->backend.device, 1, &b->fence);
+        b->fence_armed = false;
+    }
+
+    destroy_shadow_handles(b, b->candidate_image, b->candidate_mem);
+    b->candidate_image           = VK_NULL_HANDLE;
+    b->candidate_mem             = VK_NULL_HANDLE;
+    b->candidate_w               = 0;
+    b->candidate_h               = 0;
+    b->candidate_fmt             = VK_FORMAT_UNDEFINED;
+    b->candidate_allocation_size = 0;
+    b->candidate_has_content     = false;
+    return 0;
+}
+
+int ww_vk_blitter_prepare(ww_vk_blitter_t* b, VkImage imported, uint32_t w, uint32_t h,
+                          uint32_t fourcc, bool force_replace, VkSemaphore acquire_sem,
+                          int release_syncobj_fd, bool* out_candidate_ready) {
+    if (out_candidate_ready) *out_candidate_ready = false;
+    const VkFormat fmt = ww_fourcc_to_vk_format(fourcc);
+    if (! b || ! b->initialized || w == 0 || h == 0 || fmt == VK_FORMAT_UNDEFINED) {
+        if (release_syncobj_fd >= 0) close(release_syncobj_fd);
+        return -EINVAL;
+    }
+    int rc = ww_vk_blitter_discard_candidate(b);
+    if (rc != 0) {
+        if (release_syncobj_fd >= 0) close(release_syncobj_fd);
+        return rc;
+    }
+    if (! force_replace && b->shadow_image != VK_NULL_HANDLE && b->shadow_w == w &&
+        b->shadow_h == h && b->shadow_fmt == fmt) {
+        return ww_vk_blitter_blit(b, imported, w, h, acquire_sem, release_syncobj_fd);
+    }
+
+    rc = create_regular_shadow(
+        b, w, h, fmt, &b->candidate_image, &b->candidate_mem, &b->candidate_allocation_size);
+    if (rc != 0) {
+        if (release_syncobj_fd >= 0) close(release_syncobj_fd);
+        return rc;
+    }
+    b->candidate_w   = w;
+    b->candidate_h   = h;
+    b->candidate_fmt = fmt;
+
+    rc = blit_to_shadow(b, b->candidate_image, -1, imported, w, h, acquire_sem, release_syncobj_fd);
+    if (rc != 0) {
+        if (! b->fence_armed) (void)ww_vk_blitter_discard_candidate(b);
+        return rc;
+    }
+
+    b->candidate_has_content = true;
+    if (out_candidate_ready) *out_candidate_ready = true;
+    return 0;
+}
+
+VkResult ww_vk_blitter_commit_candidate(ww_vk_blitter_t* b) {
+    if (! b || ! b->initialized || b->candidate_image == VK_NULL_HANDLE ||
+        ! b->candidate_has_content) {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
+    if (b->shadow_image != VK_NULL_HANDLE) {
+        VkResult vr = b->vkQueueWaitIdle(b->queue);
+        if (vr != VK_SUCCESS) {
+            ww_log(WAYWALLEN_LOG_ERROR,
+                   "vk blitter: vkQueueWaitIdle before shadow retirement failed: %s",
+                   ww_vk_result_str(vr));
+            return vr;
+        }
+    }
+
+    destroy_shadow_handles(b, b->shadow_image, b->shadow_mem);
+    b->shadow_image           = b->candidate_image;
+    b->shadow_mem             = b->candidate_mem;
+    b->shadow_w               = b->candidate_w;
+    b->shadow_h               = b->candidate_h;
+    b->shadow_fmt             = b->candidate_fmt;
+    b->shadow_allocation_size = b->candidate_allocation_size;
+    b->shadow_has_content     = true;
+
+    b->candidate_image           = VK_NULL_HANDLE;
+    b->candidate_mem             = VK_NULL_HANDLE;
+    b->candidate_w               = 0;
+    b->candidate_h               = 0;
+    b->candidate_fmt             = VK_FORMAT_UNDEFINED;
+    b->candidate_allocation_size = 0;
+    b->candidate_has_content     = false;
+    return VK_SUCCESS;
+}
+
 void ww_vk_blitter_shutdown(ww_vk_blitter_t* b) {
     if (! b) return;
     if (! b->initialized && b->pool == VK_NULL_HANDLE && b->fence == VK_NULL_HANDLE &&
@@ -912,21 +927,9 @@ void ww_vk_blitter_shutdown(ww_vk_blitter_t* b) {
     if (b->backend.device != VK_NULL_HANDLE && b->backend.vkDeviceWaitIdle) {
         b->backend.vkDeviceWaitIdle(b->backend.device);
     }
-    /* Drain anything still parked in the deferred-destroy queue.
-     * vkDeviceWaitIdle above ensures no in-flight cmd buffer
-     * references these; we don't strictly need Qt RHI's view to be
-     * gone by now (the host is tearing the whole session down) but
-     * if it isn't, validation will yell — that's acceptable on
-     * shutdown. */
-    for (int i = 0; i < b->pending_shadow_destroy_count; i++) {
-        if (b->pending_shadow_destroy[i].image != VK_NULL_HANDLE) {
-            b->backend.vkDestroyImage(b->backend.device, b->pending_shadow_destroy[i].image, NULL);
-        }
-        if (b->pending_shadow_destroy[i].memory != VK_NULL_HANDLE) {
-            b->backend.vkFreeMemory(b->backend.device, b->pending_shadow_destroy[i].memory, NULL);
-        }
-    }
-    b->pending_shadow_destroy_count = 0;
+    destroy_shadow_handles(b, b->candidate_image, b->candidate_mem);
+    b->candidate_image = VK_NULL_HANDLE;
+    b->candidate_mem   = VK_NULL_HANDLE;
     destroy_shadow(b);
     if (b->export_sem != VK_NULL_HANDLE && b->backend.vkDestroySemaphore) {
         b->backend.vkDestroySemaphore(b->backend.device, b->export_sem, NULL);
