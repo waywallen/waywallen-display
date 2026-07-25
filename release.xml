@@ -1,3 +1,11 @@
+<release version="0.2.9" date="2026-07-25">
+  <description>
+    <ul>
+      <li>Fix wrong texture content when switching wallpaper.</li>
+      <li>KDE and GNOME display labels now use monitor model names.</li>
+    </ul>
+  </description>
+</release>
 <release version="0.2.8" date="2026-07-04">
   <description>
     <p>Added:</p>
