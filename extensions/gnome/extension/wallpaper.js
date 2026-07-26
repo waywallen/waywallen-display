@@ -17,9 +17,16 @@ export const LiveWallpaper = GObject.registerClass(
 class LiveWallpaper extends St.Widget {
     _init(backgroundActor) {
         super._init({
-            layout_manager: new Clutter.BinLayout(),
-            width: backgroundActor.width,
-            height: backgroundActor.height,
+            // FixedLayout: we position the clone ourselves in vfunc_allocate
+            // (top-left origin, scaled to fill). BinLayout centered the
+            // monitor-sized clone inside the smaller overview preview box,
+            // which misaligned it and made it collapse when the preview
+            // shrank for the app grid.
+            layout_manager: new Clutter.FixedLayout(),
+            // No explicit width/height: MetaBackgroundActor is content-driven,
+            // and its width/height props are 0 in the overview. We expand to
+            // fill whatever the parent allocates and report no preferred size
+            // (see vfuncs) so we don't distort the overview workspace layout.
             x_expand: true,
             y_expand: true,
             opacity: 0,
@@ -38,12 +45,39 @@ class LiveWallpaper extends St.Widget {
         this._tryAttach();
     }
 
+    // Report no preferred size: the clone's natural (monitor) size would
+    // otherwise feed back into the overview workspace-preview layout and
+    // distort it.
+    vfunc_get_preferred_width(_forHeight) {
+        return [0, 0];
+    }
+    vfunc_get_preferred_height(_forWidth) {
+        return [0, 0];
+    }
+
+    // Scale the clone from the top-left to fill our ACTUAL allocation. The
+    // backing actor's width/height props stay 0 in the content-driven overview
+    // path, so the allocation box is the source of truth. Pinning to (0,0)
+    // with pivot (0,0) fills the preview exactly in both the desktop and the
+    // overview (including when the preview shrinks for the app grid).
+    vfunc_allocate(box) {
+        super.vfunc_allocate(box);
+        const clone = this._cloneActor;
+        if (clone && clone.source && clone.source.width > 0) {
+            const sx = box.get_width() / clone.source.width;
+            const sy = box.get_height() / clone.source.height;
+            clone.set_position(0, 0);
+            if (Math.abs((clone.scale_x ?? 1) - sx) > 0.001 ||
+                Math.abs((clone.scale_y ?? 1) - sy) > 0.001)
+                clone.set_scale(sx, sy);
+        }
+    }
+
     _tryAttach() {
         const renderer = this._findRenderer();
         if (renderer) {
             this._cloneActor = new Clutter.Clone({
                 source: renderer,
-                pivot_point: new Graphene.Point({x: 0.5, y: 0.5}),
             });
             this._cloneDestroyId = this._cloneActor.connect('destroy', () => {
                 this._cloneActor = null;
@@ -58,6 +92,8 @@ class LiveWallpaper extends St.Widget {
                 duration: FADE_IN_MS,
                 mode: Clutter.AnimationMode.EASE_OUT_QUAD,
             });
+            // Black out the gsettings placeholder behind us (see _dimBackdrop).
+            this._dimBackdrop(true);
             // No redraw timer: Clutter.Clone repaints on the source's
             // queue-redraw, i.e. exactly when the renderer commits a buffer.
             return;
@@ -76,6 +112,29 @@ class LiveWallpaper extends St.Widget {
         });
     }
 
+    // The gsettings MetaBackground behind us is a placeholder solid color.
+    // Where the clone has alpha or at clip edges it bleeds through as a
+    // colored veil — most visible in the overview workspace preview, which
+    // renders that content at brightness 0.5. While we are actively covering
+    // the actor, pin the backdrop to black so any bleed reads as shadow.
+    // Restored when the source goes away so lock-screen / fallback still get
+    // the normal dimmed GNOME background.
+    _dimBackdrop(dim) {
+        try {
+            const content = this._backgroundActor?.content;
+            if (!content)
+                return;
+            if (dim) {
+                if (this._origBrightness === undefined)
+                    this._origBrightness = content.brightness;
+                content.brightness = 0;
+            } else if (this._origBrightness !== undefined) {
+                content.brightness = this._origBrightness;
+                this._origBrightness = undefined;
+            }
+        } catch (_e) {}
+    }
+
     _onSourceDestroyed() {
         this._sourceDestroyId = 0;
         this._sourceActor = null;
@@ -89,6 +148,7 @@ class LiveWallpaper extends St.Widget {
             this.opacity = 0;
             try { clone.destroy(); } catch (_e) {}
         }
+        this._dimBackdrop(false);
         this._schedulePoll();
     }
 
@@ -111,6 +171,11 @@ class LiveWallpaper extends St.Widget {
     }
 
     on_destroy() {
+        // Mark first so GnomeShellOverride.disable() can skip us when GNOME
+        // has already destroyed our parent backgroundActor — avoids the
+        // "already disposed" warning (and any GC-sweep jitter) from a
+        // redundant second destroy() at extension teardown.
+        this._wwDestroyed = true;
         if (this._pollId) {
             GLib.source_remove(this._pollId);
             this._pollId = 0;

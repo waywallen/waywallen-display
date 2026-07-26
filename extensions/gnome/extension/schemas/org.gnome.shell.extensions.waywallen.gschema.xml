@@ -22,5 +22,25 @@
       <summary>Overlay connection / resolution / window-state on the wallpaper</summary>
     </key>
 
+    <key name="overview-blur" type="b">
+      <default>true</default>
+      <summary>Blur the overview background</summary>
+      <description>
+        Apply a gaussian blur to the overview background wallpaper, like
+        Blur my Shell does for the static wallpaper. Pairs well with Blur
+        my Shell (the two are z-ordered to coexist), but does not require it.
+      </description>
+    </key>
+
+    <key name="overview-blur-strength" type="i">
+      <range min="0" max="100"/>
+      <default>30</default>
+      <summary>Overview background blur radius</summary>
+      <description>
+        Gaussian blur radius (in pixels) for the overview background. Higher
+        is blurrier. 0 effectively disables the blur even when it is on.
+      </description>
+    </key>
+
   </schema>
 </schemalist>

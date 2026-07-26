@@ -11,5 +11,6 @@
         "50"
     ],
     "settings-schema": "org.gnome.shell.extensions.waywallen",
-    "gettext-domain": "waywallen-gnome"
+    "gettext-domain": "waywallen-gnome",
+    "session-modes": ["user", "unlock-dialog"]
 }
