@@ -187,8 +187,9 @@ int ww_vk_blitter_init(ww_vk_blitter_t* b, VkInstance instance, VkPhysicalDevice
         return rc;
     }
 
-    b->shadow_export_fd = -1;
-    b->initialized      = true;
+    b->shadow_export_fd           = -1;
+    b->pending_release_syncobj_fd = -1;
+    b->initialized                = true;
     ww_log(
         WAYWALLEN_LOG_INFO, "vk blitter ready (qfi=%u queue=%p)", queue_family_index, (void*)queue);
     return 0;
@@ -532,15 +533,24 @@ static VkImageSubresourceRange full_color_range(void) {
     return r;
 }
 
+static void resolve_unused_release(int release_syncobj_fd, bool* out_release_armed) {
+    if (release_syncobj_fd < 0) return;
+    if (waywallen_display_signal_release_syncobj(release_syncobj_fd) == WAYWALLEN_OK &&
+        out_release_armed) {
+        *out_release_armed = true;
+    }
+}
+
 static int blit_to_shadow(ww_vk_blitter_t* b, VkImage shadow_image, int shadow_export_fd,
                           VkImage imported, uint32_t w, uint32_t h, VkSemaphore acquire_sem,
-                          int release_syncobj_fd) {
+                          int release_syncobj_fd, bool* out_release_armed) {
+    if (out_release_armed) *out_release_armed = false;
     if (! b || ! b->initialized || shadow_image == VK_NULL_HANDLE) {
-        if (release_syncobj_fd >= 0) close(release_syncobj_fd);
+        resolve_unused_release(release_syncobj_fd, out_release_armed);
         return -EINVAL;
     }
     if (imported == VK_NULL_HANDLE || w == 0 || h == 0) {
-        if (release_syncobj_fd >= 0) close(release_syncobj_fd);
+        resolve_unused_release(release_syncobj_fd, out_release_armed);
         return -EINVAL;
     }
     /* 2 s is well above any plausible blit duration (hundreds of µs
@@ -560,13 +570,19 @@ static int blit_to_shadow(ww_vk_blitter_t* b, VkImage shadow_image, int shadow_e
                    "vk blitter: pre-submit fence wait timed out (>%llu ms); "
                    "skipping this blit",
                    (unsigned long long)(WW_BLIT_FENCE_WAIT_NS / 1000000ull));
-            if (release_syncobj_fd >= 0) close(release_syncobj_fd);
+            resolve_unused_release(release_syncobj_fd, out_release_armed);
             return -EIO;
         }
         if (vrw != VK_SUCCESS) {
             ww_log(WAYWALLEN_LOG_WARN,
                    "vk blitter: vkWaitForFences failed: %s",
                    ww_vk_result_str(vrw));
+            resolve_unused_release(release_syncobj_fd, out_release_armed);
+            return -EIO;
+        }
+        if (b->pending_release_syncobj_fd >= 0) {
+            resolve_unused_release(b->pending_release_syncobj_fd, NULL);
+            b->pending_release_syncobj_fd = -1;
         }
         b->vkResetFences(b->backend.device, 1, &b->fence);
         b->fence_armed = false;
@@ -582,7 +598,7 @@ static int blit_to_shadow(ww_vk_blitter_t* b, VkImage shadow_image, int shadow_e
         ww_log(WAYWALLEN_LOG_ERROR,
                "vk blitter: vkBeginCommandBuffer failed: %s",
                ww_vk_result_str(vr));
-        if (release_syncobj_fd >= 0) close(release_syncobj_fd);
+        resolve_unused_release(release_syncobj_fd, out_release_armed);
         return -EIO;
     }
 
@@ -696,13 +712,14 @@ static int blit_to_shadow(ww_vk_blitter_t* b, VkImage shadow_image, int shadow_e
     if (vr != VK_SUCCESS) {
         ww_log(
             WAYWALLEN_LOG_ERROR, "vk blitter: vkEndCommandBuffer failed: %s", ww_vk_result_str(vr));
-        if (release_syncobj_fd >= 0) close(release_syncobj_fd);
+        resolve_unused_release(release_syncobj_fd, out_release_armed);
         return -EIO;
     }
 
-    VkPipelineStageFlags wait_stage    = VK_PIPELINE_STAGE_TRANSFER_BIT;
-    const bool           signal_export = shadow_export_fd >= 0 && b->export_sem != VK_NULL_HANDLE;
-    VkSubmitInfo         si            = {
+    VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    const bool           signal_export =
+        (shadow_export_fd >= 0 || release_syncobj_fd >= 0) && b->export_sem != VK_NULL_HANDLE;
+    VkSubmitInfo si = {
         .sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO,
         .waitSemaphoreCount   = (acquire_sem != VK_NULL_HANDLE) ? 1u : 0u,
         .pWaitSemaphores      = (acquire_sem != VK_NULL_HANDLE) ? &acquire_sem : NULL,
@@ -721,39 +738,14 @@ static int blit_to_shadow(ww_vk_blitter_t* b, VkImage shadow_image, int shadow_e
     vr = b->vkQueueSubmit(b->queue, 1, &si, b->fence);
     if (vr != VK_SUCCESS) {
         ww_log(WAYWALLEN_LOG_ERROR, "vk blitter: vkQueueSubmit failed: %s", ww_vk_result_str(vr));
-        if (release_syncobj_fd >= 0) close(release_syncobj_fd);
+        resolve_unused_release(release_syncobj_fd, out_release_armed);
         return -EIO;
     }
     b->fence_armed = true;
 
-    /* Bounded wait: see WW_BLIT_FENCE_WAIT_NS comment above for the
-     * 2 s rationale. On VK_TIMEOUT the fence is still in-flight, so
-     * we leave fence_armed=true and let the next blit's pre-submit
-     * wait try again — the daemon will time out the buffer slot if
-     * we never recover. */
-    vr = b->vkWaitForFences(b->backend.device, 1, &b->fence, VK_TRUE, WW_BLIT_FENCE_WAIT_NS);
-    if (vr == VK_TIMEOUT) {
-        ww_log(WAYWALLEN_LOG_WARN,
-               "vk blitter: post-submit fence wait timed out (>%llu ms); "
-               "shadow may be stale until GPU recovers",
-               (unsigned long long)(WW_BLIT_FENCE_WAIT_NS / 1000000ull));
-        if (release_syncobj_fd >= 0) close(release_syncobj_fd);
-        return -EIO;
-    }
-    if (vr != VK_SUCCESS) {
-        ww_log(WAYWALLEN_LOG_ERROR,
-               "vk blitter: vkWaitForFences post-submit failed: %s",
-               ww_vk_result_str(vr));
-        if (release_syncobj_fd >= 0) close(release_syncobj_fd);
-        return -EIO;
-    }
-    /* Publish blit's signal as a sync_file → ioctl-import into shadow
-     * dmabuf's dma_resv as DMA_BUF_SYNC_WRITE. GSK's later read
-     * submission picks it up via kernel implicit DMA-BUF sync, so the
-     * long-lived imported VkImage's sampler sees fresh content without
-     * us having to rebuild the GdkTexture every frame. Direct copy of
-     * the gsk/gpu/gskgpudownloadop.c pattern. */
-    if (shadow_export_fd >= 0 && b->vkGetSemaphoreFdKHR) {
+    int release_fallback_fd = -1;
+    if (release_syncobj_fd >= 0) release_fallback_fd = dup(release_syncobj_fd);
+    if (signal_export && b->vkGetSemaphoreFdKHR) {
         int                     sync_fd = -1;
         VkSemaphoreGetFdInfoKHR get     = {
             .sType      = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR,
@@ -762,48 +754,107 @@ static int blit_to_shadow(ww_vk_blitter_t* b, VkImage shadow_image, int shadow_e
         };
         VkResult er = b->vkGetSemaphoreFdKHR(b->backend.device, &get, &sync_fd);
         if (er == VK_SUCCESS && sync_fd >= 0) {
-            struct ww_dma_buf_sync_file sf = {
-                .flags = DMA_BUF_SYNC_WRITE,
-                .fd    = sync_fd,
-            };
-            if (ioctl(shadow_export_fd, DMA_BUF_IOCTL_IMPORT_SYNC_FILE, &sf) != 0) {
-                ww_log(WAYWALLEN_LOG_WARN,
-                       "vk blitter: dma_buf import_sync_file(fd=%d shadow=%d) "
-                       "failed: %s",
-                       sync_fd,
-                       shadow_export_fd,
-                       strerror(errno));
+            if (shadow_export_fd >= 0) {
+                struct ww_dma_buf_sync_file sf = {
+                    .flags = DMA_BUF_SYNC_WRITE,
+                    .fd    = sync_fd,
+                };
+                if (ioctl(shadow_export_fd, DMA_BUF_IOCTL_IMPORT_SYNC_FILE, &sf) != 0) {
+                    ww_log(WAYWALLEN_LOG_WARN,
+                           "vk blitter: dma_buf import_sync_file(fd=%d shadow=%d) failed: %s",
+                           sync_fd,
+                           shadow_export_fd,
+                           strerror(errno));
+                }
             }
-            close(sync_fd);
-        } else if (er != VK_SUCCESS) {
+            if (release_syncobj_fd >= 0 && release_fallback_fd >= 0) {
+                int attach_rc =
+                    waywallen_display_release_after_sync_file(release_syncobj_fd, sync_fd);
+                release_syncobj_fd = -1;
+                sync_fd            = -1;
+                if (attach_rc == WAYWALLEN_OK) {
+                    close(release_fallback_fd);
+                    release_fallback_fd = -1;
+                    if (out_release_armed) *out_release_armed = true;
+                } else {
+                    ww_log(WAYWALLEN_LOG_WARN,
+                           "vk blitter: attach release sync_file failed: %d",
+                           attach_rc);
+                }
+            }
+            if (sync_fd >= 0) close(sync_fd);
+        } else {
             ww_log(WAYWALLEN_LOG_WARN,
                    "vk blitter: vkGetSemaphoreFdKHR failed: %s",
                    ww_vk_result_str(er));
         }
     }
+    if (release_syncobj_fd >= 0 && release_fallback_fd >= 0) {
+        close(release_syncobj_fd);
+        release_syncobj_fd = -1;
+    } else if (release_syncobj_fd >= 0) {
+        release_fallback_fd = release_syncobj_fd;
+        release_syncobj_fd  = -1;
+    }
+
+    /* Bounded wait: see WW_BLIT_FENCE_WAIT_NS comment above for the
+     * 2 s rationale. On VK_TIMEOUT the fence is still in-flight, so
+     * we leave fence_armed=true and let the next blit's pre-submit
+     * wait try again. The producer slot remains owned until the real
+     * submission fence completes. */
+    vr = b->vkWaitForFences(b->backend.device, 1, &b->fence, VK_TRUE, WW_BLIT_FENCE_WAIT_NS);
+    if (vr == VK_TIMEOUT) {
+        ww_log(WAYWALLEN_LOG_WARN,
+               "vk blitter: post-submit fence wait timed out (>%llu ms); "
+               "shadow may be stale until GPU recovers",
+               (unsigned long long)(WW_BLIT_FENCE_WAIT_NS / 1000000ull));
+        b->pending_release_syncobj_fd = release_fallback_fd;
+        return -ETIMEDOUT;
+    }
+    if (vr != VK_SUCCESS) {
+        ww_log(WAYWALLEN_LOG_ERROR,
+               "vk blitter: vkWaitForFences post-submit failed: %s",
+               ww_vk_result_str(vr));
+        b->pending_release_syncobj_fd = release_fallback_fd;
+        return -EIO;
+    }
+    /* Publish blit's signal as a sync_file → ioctl-import into shadow
+     * dmabuf's dma_resv as DMA_BUF_SYNC_WRITE. GSK's later read
+     * submission picks it up via kernel implicit DMA-BUF sync, so the
+     * long-lived imported VkImage's sampler sees fresh content without
+     * us having to rebuild the GdkTexture every frame. Direct copy of
+     * the gsk/gpu/gskgpudownloadop.c pattern. */
     b->vkResetFences(b->backend.device, 1, &b->fence);
     b->fence_armed = false;
-    if (release_syncobj_fd >= 0) {
-        int rc = waywallen_display_signal_release_syncobj(release_syncobj_fd);
+    if (release_fallback_fd >= 0) {
+        int rc = waywallen_display_signal_release_syncobj(release_fallback_fd);
         if (rc != WAYWALLEN_OK) {
-            ww_log(WAYWALLEN_LOG_WARN,
-                   "vk blitter: signal_release_syncobj failed: %d "
-                   "(daemon will time out the slot)",
-                   rc);
+            ww_log(
+                WAYWALLEN_LOG_WARN, "vk blitter: signal_release_syncobj fallback failed: %d", rc);
+        } else if (out_release_armed) {
+            *out_release_armed = true;
         }
     }
     return 0;
 }
 
 int ww_vk_blitter_blit(ww_vk_blitter_t* b, VkImage imported, uint32_t w, uint32_t h,
-                       VkSemaphore acquire_sem, int release_syncobj_fd) {
+                       VkSemaphore acquire_sem, int release_syncobj_fd, bool* out_release_armed) {
+    if (out_release_armed) *out_release_armed = false;
     if (! b || ! b->initialized || b->shadow_image == VK_NULL_HANDLE || w != b->shadow_w ||
         h != b->shadow_h) {
-        if (release_syncobj_fd >= 0) close(release_syncobj_fd);
+        resolve_unused_release(release_syncobj_fd, out_release_armed);
         return -EINVAL;
     }
-    int rc = blit_to_shadow(
-        b, b->shadow_image, b->shadow_export_fd, imported, w, h, acquire_sem, release_syncobj_fd);
+    int rc = blit_to_shadow(b,
+                            b->shadow_image,
+                            b->shadow_export_fd,
+                            imported,
+                            w,
+                            h,
+                            acquire_sem,
+                            release_syncobj_fd,
+                            out_release_armed);
     if (rc == 0) b->shadow_has_content = true;
     return rc;
 }
@@ -844,34 +895,45 @@ int ww_vk_blitter_discard_candidate(ww_vk_blitter_t* b) {
 
 int ww_vk_blitter_prepare(ww_vk_blitter_t* b, VkImage imported, uint32_t w, uint32_t h,
                           uint32_t fourcc, bool force_replace, VkSemaphore acquire_sem,
-                          int release_syncobj_fd, bool* out_candidate_ready) {
+                          int release_syncobj_fd, bool* out_candidate_ready,
+                          bool* out_release_armed) {
     if (out_candidate_ready) *out_candidate_ready = false;
+    if (out_release_armed) *out_release_armed = false;
     const VkFormat fmt = ww_fourcc_to_vk_format(fourcc);
     if (! b || ! b->initialized || w == 0 || h == 0 || fmt == VK_FORMAT_UNDEFINED) {
-        if (release_syncobj_fd >= 0) close(release_syncobj_fd);
+        resolve_unused_release(release_syncobj_fd, out_release_armed);
         return -EINVAL;
     }
     int rc = ww_vk_blitter_discard_candidate(b);
     if (rc != 0) {
-        if (release_syncobj_fd >= 0) close(release_syncobj_fd);
+        resolve_unused_release(release_syncobj_fd, out_release_armed);
         return rc;
     }
     if (! force_replace && b->shadow_image != VK_NULL_HANDLE && b->shadow_w == w &&
         b->shadow_h == h && b->shadow_fmt == fmt) {
-        return ww_vk_blitter_blit(b, imported, w, h, acquire_sem, release_syncobj_fd);
+        return ww_vk_blitter_blit(
+            b, imported, w, h, acquire_sem, release_syncobj_fd, out_release_armed);
     }
 
     rc = create_regular_shadow(
         b, w, h, fmt, &b->candidate_image, &b->candidate_mem, &b->candidate_allocation_size);
     if (rc != 0) {
-        if (release_syncobj_fd >= 0) close(release_syncobj_fd);
+        resolve_unused_release(release_syncobj_fd, out_release_armed);
         return rc;
     }
     b->candidate_w   = w;
     b->candidate_h   = h;
     b->candidate_fmt = fmt;
 
-    rc = blit_to_shadow(b, b->candidate_image, -1, imported, w, h, acquire_sem, release_syncobj_fd);
+    rc = blit_to_shadow(b,
+                        b->candidate_image,
+                        -1,
+                        imported,
+                        w,
+                        h,
+                        acquire_sem,
+                        release_syncobj_fd,
+                        out_release_armed);
     if (rc != 0) {
         if (! b->fence_armed) (void)ww_vk_blitter_discard_candidate(b);
         return rc;
@@ -917,6 +979,31 @@ VkResult ww_vk_blitter_commit_candidate(ww_vk_blitter_t* b) {
     return VK_SUCCESS;
 }
 
+int ww_vk_blitter_drain_pending_release(ww_vk_blitter_t* b, bool* out_release_armed) {
+    if (out_release_armed) *out_release_armed = false;
+    if (! b || b->backend.device == VK_NULL_HANDLE || ! b->backend.vkDeviceWaitIdle) {
+        return -EINVAL;
+    }
+    VkResult idle = b->backend.vkDeviceWaitIdle(b->backend.device);
+    if (idle != VK_SUCCESS && idle != VK_ERROR_DEVICE_LOST) {
+        ww_log(WAYWALLEN_LOG_WARN,
+               "vk blitter: vkDeviceWaitIdle while draining release failed: %s",
+               ww_vk_result_str(idle));
+        return -EIO;
+    }
+    if (b->fence_armed) {
+        b->vkResetFences(b->backend.device, 1, &b->fence);
+        b->fence_armed = false;
+    }
+    if (b->pending_release_syncobj_fd < 0) return 0;
+    int release_fd                = b->pending_release_syncobj_fd;
+    b->pending_release_syncobj_fd = -1;
+    int rc                        = waywallen_display_signal_release_syncobj(release_fd);
+    if (rc != WAYWALLEN_OK) return -EIO;
+    if (out_release_armed) *out_release_armed = true;
+    return 0;
+}
+
 void ww_vk_blitter_shutdown(ww_vk_blitter_t* b) {
     if (! b) return;
     if (! b->initialized && b->pool == VK_NULL_HANDLE && b->fence == VK_NULL_HANDLE &&
@@ -924,9 +1011,7 @@ void ww_vk_blitter_shutdown(ww_vk_blitter_t* b) {
         memset(b, 0, sizeof(*b));
         return;
     }
-    if (b->backend.device != VK_NULL_HANDLE && b->backend.vkDeviceWaitIdle) {
-        b->backend.vkDeviceWaitIdle(b->backend.device);
-    }
+    (void)ww_vk_blitter_drain_pending_release(b, NULL);
     destroy_shadow_handles(b, b->candidate_image, b->candidate_mem);
     b->candidate_image = VK_NULL_HANDLE;
     b->candidate_mem   = VK_NULL_HANDLE;

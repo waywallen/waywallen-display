@@ -40,10 +40,11 @@
 #endif
 
 struct state {
-    int64_t frames_seen;
-    int64_t max_frames;
-    int     disconnected;
-    int     textures_valid;
+    waywallen_display_t* display;
+    int64_t              frames_seen;
+    int64_t              max_frames;
+    int                  disconnected;
+    int                  textures_valid;
 };
 
 static void on_textures_ready(void* ud, const waywallen_textures_t* t) {
@@ -97,7 +98,9 @@ static void on_frame_ready(void* ud, const waywallen_frame_t* f) {
     // buffer" moment to defer to. The helper closes the fd in all
     // paths.
     if (f->release_syncobj_fd >= 0) {
-        (void)waywallen_display_signal_release_syncobj(f->release_syncobj_fd);
+        if (waywallen_display_signal_release_syncobj(f->release_syncobj_fd) == WAYWALLEN_OK) {
+            (void)waywallen_display_frame_armed(s->display, f->buffer_generation, f->seq);
+        }
     }
 }
 
@@ -195,6 +198,7 @@ int main(int argc, char** argv) {
 
     /* ---- waywallen_display ---- */
     struct state st = {
+        .display        = NULL,
         .frames_seen    = 0,
         .max_frames     = max_frames,
         .disconnected   = 0,
@@ -213,6 +217,7 @@ int main(int argc, char** argv) {
         fprintf(stderr, "waywallen_display_new failed\n");
         goto cleanup_ctx;
     }
+    st.display                  = d;
     waywallen_egl_ctx_t egl_ctx = {
         .egl_display      = egl_dpy,
         .get_proc_address = NULL,
@@ -260,7 +265,9 @@ int main(int argc, char** argv) {
     }
     fprintf(stderr, "connected; dispatch loop...\n");
     while (! st.disconnected) {
-        struct pollfd pfd = { .fd = ww_fd, .events = POLLIN, .revents = 0 };
+        short events = POLLIN;
+        if (waywallen_display_wants_writable(d)) events |= POLLOUT;
+        struct pollfd pfd = { .fd = ww_fd, .events = events, .revents = 0 };
         int           pr  = poll(&pfd, 1, 2000);
         if (pr < 0) {
             perror("poll");
@@ -274,10 +281,16 @@ int main(int argc, char** argv) {
         if (pfd.revents & POLLIN) {
             int r = waywallen_display_dispatch(d);
             if (r < 0) break;
+            if (waywallen_display_wants_writable(d) && waywallen_display_handle_writable(d) < 0) {
+                break;
+            }
             if (st.max_frames > 0 && st.frames_seen >= st.max_frames) {
                 fprintf(stderr, "max-frames reached\n");
                 break;
             }
+        }
+        if (pfd.revents & POLLOUT) {
+            if (waywallen_display_handle_writable(d) < 0) break;
         }
     }
 

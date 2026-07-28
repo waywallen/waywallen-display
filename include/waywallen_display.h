@@ -53,7 +53,7 @@ extern "C" {
  * `hello.client_protocol_version`. The daemon owns the supported
  * range and rejects out-of-range clients with `error{code=2}`.
  */
-#define WAYWALLEN_DISPLAY_PROTOCOL_VERSION 7
+#define WAYWALLEN_DISPLAY_PROTOCOL_VERSION 8
 
 /*
  * Library version baked in at build time.
@@ -266,12 +266,11 @@ typedef struct waywallen_frame {
      * this to its next `VkQueueSubmit`'s wait list. */
     void* vk_acquire_semaphore;
     /* Raw drm_syncobj fd (binary, unsignaled). Ownership transfers
-     * to the host: the host MUST signal it from its release GPU work
-     * (typically via `vkImportSemaphoreFdKHR(OPAQUE_FD)` on a binary
-     * semaphore signaled by the consume submit, then `close(2)`).
-     * If the host cannot signal it, `close(2)` it anyway — the daemon
-     * will time out the corresponding frame. -1 means the library
-     * could not extract a release_syncobj fd from this frame_ready. */
+     * to the host. Attach the consume submission's real sync_file via
+     * waywallen_display_release_after_sync_file(), or signal it when
+     * no GPU work uses the frame, then call waywallen_display_frame_armed().
+     * Closing an unresolved fd does not release the producer slot.
+     * -1 means the library owns the release path for this backend. */
     int      release_syncobj_fd;
     uint64_t buffer_generation;
 } waywallen_frame_t;
@@ -523,6 +522,12 @@ int waywallen_display_signal_release_syncobj(int fd);
  * work represented by the sync_file completes; this call does not wait
  * for that work on the CPU. */
 int waywallen_display_release_after_sync_file(int release_syncobj_fd, int sync_file_fd);
+
+/* Confirm that the matching frame's release syncobj now contains a
+ * pending GPU fence or is already signaled. Call only after the fence
+ * attachment/signal operation succeeds. This acknowledges ownership;
+ * completion still comes from the syncobj itself. */
+int waywallen_display_frame_armed(waywallen_display_t* d, uint64_t buffer_generation, uint64_t seq);
 
 /* -------------------------------------------------------------------------
  * Pointer event forwarding

@@ -67,6 +67,8 @@ struct test_state {
     uint64_t last_config_buffer_generation;
     uint64_t last_config_generation;
     uint64_t last_frame_buffer_generation;
+    uint64_t last_armed_buffer_generation;
+    uint64_t last_armed_seq;
 
     /* Populated by handler_full_handshake_capture_caps after decoding
      * the client's consumer_caps request. */
@@ -351,6 +353,26 @@ static int handler_full_handshake_capture_caps(int client_fd, struct test_state*
     return complete_handshake_capture_caps(client_fd, ts);
 }
 
+static int handler_frame_armed(int client_fd, struct test_state* ts) {
+    if (complete_handshake_capture_caps(client_fd, ts) != 0) return -1;
+    static uint8_t body_buf[WW_CODEC_MAX_BODY_BYTES];
+    uint16_t       op;
+    size_t         body_len;
+    int            fds[1];
+    size_t         n_fds;
+    if (ww_codec_recv_request(
+            client_fd, &op, body_buf, sizeof(body_buf), &body_len, fds, 1, &n_fds) != 0 ||
+        op != WW_REQ_FRAME_ARMED || n_fds != 0) {
+        return -1;
+    }
+    ww_req_frame_armed_t armed;
+    if (ww_req_frame_armed_decode(body_buf, body_len, &armed) != WW_OK) return -1;
+    ts->last_armed_buffer_generation = armed.buffer_generation;
+    ts->last_armed_seq               = armed.seq;
+    ww_req_frame_armed_free(&armed);
+    return 0;
+}
+
 static int send_bind_buffers(int client_fd, uint64_t buffer_generation) {
     int dmabuf[2];
     if (pipe(dmabuf) != 0) return -1;
@@ -447,9 +469,16 @@ static int send_unbind(int client_fd, uint64_t buffer_generation) {
 static int handler_generation_sequence(int client_fd, struct test_state* ts) {
     if (complete_handshake_capture_caps(client_fd, ts) != 0) return -1;
     if (send_bind_buffers(client_fd, 7) != 0) return -1;
-    if (send_frame_ready(client_fd, 6, 1) != 0) return -1;
     if (send_set_config(client_fd, 11) != 0) return -1;
     if (send_frame_ready(client_fd, 7, 2) != 0) return -1;
+    sleep_ms(50);
+    return 0;
+}
+
+static int handler_stale_frame_invalid_release(int client_fd, struct test_state* ts) {
+    if (complete_handshake_capture_caps(client_fd, ts) != 0) return -1;
+    if (send_bind_buffers(client_fd, 7) != 0) return -1;
+    if (send_frame_ready(client_fd, 6, 1) != 0) return -1;
     sleep_ms(50);
     return 0;
 }
@@ -846,10 +875,6 @@ static void test_generation_payload_and_pending_config(void) {
     assert(ts.on_textures_ready_count == 1);
     assert(ts.last_textures_buffer_generation == 7);
 
-    assert(dispatch_next_event(d) == WAYWALLEN_OK); /* stale frame gen=6 */
-    assert(ts.on_frame_ready_count == 0);
-    assert(ts.on_disconnected_count == 0);
-
     assert(dispatch_next_event(d) == WAYWALLEN_OK); /* config gen=11 */
     assert(ts.on_config_count == 1);
     assert(ts.last_config_buffer_generation == 7);
@@ -865,6 +890,28 @@ static void test_generation_payload_and_pending_config(void) {
     pthread_join(srv, NULL);
     ts_teardown(&ts);
     printf("  ok test_generation_payload_and_pending_config\n");
+}
+
+static void test_invalid_stale_release_disconnects(void) {
+    struct test_state ts;
+    ts_init(&ts);
+    pthread_t srv = spawn_server(&ts, handler_stale_frame_invalid_release);
+
+    waywallen_display_t* d = make_client(&ts);
+    int                  rc =
+        waywallen_display_begin_connect(d, ts.sock_path, "test-display", NULL, 1920, 1080, 60000);
+    assert(rc == WAYWALLEN_OK);
+    assert(drive_handshake(d, 2000) == WAYWALLEN_OK);
+    assert(dispatch_next_event(d) == WAYWALLEN_OK);
+    assert(dispatch_next_event(d) == WAYWALLEN_ERR_IO);
+    assert(ts.on_frame_ready_count == 0);
+    assert(ts.on_disconnected_count == 1);
+    assert(strcmp(ts.last_disconnect_msg, "stale frame release failed") == 0);
+
+    waywallen_display_free(d);
+    pthread_join(srv, NULL);
+    ts_teardown(&ts);
+    printf("  ok test_invalid_stale_release_disconnects\n");
 }
 
 static void test_current_frame_before_config_is_protocol_error(void) {
@@ -883,7 +930,7 @@ static void test_current_frame_before_config_is_protocol_error(void) {
     assert(dispatch_next_event(d) == WAYWALLEN_ERR_PROTO);
     assert(ts.on_frame_ready_count == 0);
     assert(ts.on_disconnected_count == 1);
-    assert(strcmp(ts.last_disconnect_msg, "frame_ready before set_config") == 0);
+    assert(strcmp(ts.last_disconnect_msg, "pre-config frame release failed") == 0);
 
     waywallen_display_free(d);
     pthread_join(srv, NULL);
@@ -1022,6 +1069,30 @@ static void test_buffer_generation_restarts_on_new_connection(void) {
     printf("  ok test_buffer_generation_restarts_on_new_connection\n");
 }
 
+static void test_frame_armed_round_trip(void) {
+    struct test_state ts;
+    ts_init(&ts);
+    pthread_t srv = spawn_server(&ts, handler_frame_armed);
+
+    waywallen_display_t* d = make_client(&ts);
+    int                  rc =
+        waywallen_display_begin_connect(d, ts.sock_path, "test-display", NULL, 1920, 1080, 60000);
+    assert(rc == WAYWALLEN_OK);
+    assert(drive_handshake(d, 2000) == WAYWALLEN_OK);
+    assert(waywallen_display_frame_armed(d, 17, 42) == WAYWALLEN_OK);
+    while (waywallen_display_wants_writable(d)) {
+        assert(waywallen_display_handle_writable(d) == WAYWALLEN_OK);
+    }
+
+    pthread_join(srv, NULL);
+    assert(ts.last_armed_buffer_generation == 17);
+    assert(ts.last_armed_seq == 42);
+    waywallen_display_close(d);
+    waywallen_display_free(d);
+    ts_teardown(&ts);
+    printf("  ok test_frame_armed_round_trip\n");
+}
+
 /* ------------------------------------------------------------------ */
 /*  Driver                                                             */
 /* ------------------------------------------------------------------ */
@@ -1036,12 +1107,14 @@ int main(void) {
     test_server_closes_during_welcome_wait();
     test_server_sends_error_event();
     test_generation_payload_and_pending_config();
+    test_invalid_stale_release_disconnects();
     test_current_frame_before_config_is_protocol_error();
     test_non_monotonic_buffer_generation_is_protocol_error();
     test_mismatched_unbind_generation_is_protocol_error();
     test_set_config_while_idle_is_protocol_error();
     test_unbind_is_valid_before_and_after_config();
     test_buffer_generation_restarts_on_new_connection();
+    test_frame_armed_round_trip();
     printf("test_display: OK\n");
     return 0;
 }

@@ -332,7 +332,10 @@ void WaywallenDisplay::c_on_textures_releasing(void* ud, const waywallen_texture
         QMutexLocker lk(&self->m_pendingMutex);
         if (self->m_pendingVk.valid && self->m_pendingVk.releaseSyncobjFd >= 0) {
             // The queued frame was never submitted to GPU work.
-            (void)waywallen_display_signal_release_syncobj(self->m_pendingVk.releaseSyncobjFd);
+            self->signalFrameRelease(self->m_pendingVk.releaseSyncobjFd,
+                                     self->m_pendingVk.bufferGeneration,
+                                     self->m_pendingVk.seq,
+                                     "retired Vulkan frame");
         }
         self->m_pendingVk = PendingVkFrame {};
     }
@@ -398,7 +401,8 @@ void WaywallenDisplay::c_on_frame_ready(void* ud, const waywallen_frame_t* f) {
                   "dropping frame for unconfigured generation=%llu",
                   qulonglong(f->buffer_generation));
         if (f->release_syncobj_fd >= 0) {
-            (void)waywallen_display_signal_release_syncobj(f->release_syncobj_fd);
+            self->signalFrameRelease(
+                f->release_syncobj_fd, f->buffer_generation, f->seq, "unconfigured frame");
         }
         emit self->framesReceivedChanged();
         return;
@@ -410,13 +414,17 @@ void WaywallenDisplay::c_on_frame_ready(void* ud, const waywallen_frame_t* f) {
         // release_syncobj immediately. The buffer was never read.
         QMutexLocker lk(&self->m_pendingMutex);
         if (self->m_pendingVk.valid && self->m_pendingVk.releaseSyncobjFd >= 0) {
-            (void)waywallen_display_signal_release_syncobj(self->m_pendingVk.releaseSyncobjFd);
+            self->signalFrameRelease(self->m_pendingVk.releaseSyncobjFd,
+                                     self->m_pendingVk.bufferGeneration,
+                                     self->m_pendingVk.seq,
+                                     "superseded Vulkan frame");
         }
         self->m_pendingVk.valid            = true;
         self->m_pendingVk.slot             = static_cast<int>(f->buffer_index);
         self->m_pendingVk.acquireSem       = f->vk_acquire_semaphore;
         self->m_pendingVk.releaseSyncobjFd = f->release_syncobj_fd;
         self->m_pendingVk.bufferGeneration = f->buffer_generation;
+        self->m_pendingVk.seq              = f->seq;
     } else
 #endif
         if (self->m_activeBackend == BackendEGL) {
@@ -429,12 +437,16 @@ void WaywallenDisplay::c_on_frame_ready(void* ud, const waywallen_frame_t* f) {
         {
             QMutexLocker lk(&self->m_pendingMutex);
             if (self->m_pendingEgl.valid && self->m_pendingEgl.releaseSyncobjFd >= 0) {
-                (void)waywallen_display_signal_release_syncobj(self->m_pendingEgl.releaseSyncobjFd);
+                self->signalFrameRelease(self->m_pendingEgl.releaseSyncobjFd,
+                                         self->m_pendingEgl.bufferGeneration,
+                                         self->m_pendingEgl.seq,
+                                         "superseded EGL frame");
             }
             self->m_pendingEgl.valid            = true;
             self->m_pendingEgl.slot             = static_cast<int>(f->buffer_index);
             self->m_pendingEgl.releaseSyncobjFd = f->release_syncobj_fd;
             self->m_pendingEgl.bufferGeneration = f->buffer_generation;
+            self->m_pendingEgl.seq              = f->seq;
         }
         if (auto* w = self->window()) {
             QPointer<WaywallenDisplay> guard(self);
@@ -445,7 +457,8 @@ void WaywallenDisplay::c_on_frame_ready(void* ud, const waywallen_frame_t* f) {
         }
     } else if (f->release_syncobj_fd >= 0) {
         // No active backend yet, so no ownership was transferred to GPU work.
-        (void)waywallen_display_signal_release_syncobj(f->release_syncobj_fd);
+        self->signalFrameRelease(
+            f->release_syncobj_fd, f->buffer_generation, f->seq, "frame without active backend");
     }
 
     emit self->framesReceivedChanged();
@@ -529,7 +542,10 @@ void WaywallenDisplay::cleanup() {
     {
         QMutexLocker lk(&m_pendingMutex);
         if (m_pendingVk.valid && m_pendingVk.releaseSyncobjFd >= 0) {
-            (void)waywallen_display_signal_release_syncobj(m_pendingVk.releaseSyncobjFd);
+            signalFrameRelease(m_pendingVk.releaseSyncobjFd,
+                               m_pendingVk.bufferGeneration,
+                               m_pendingVk.seq,
+                               "cleanup Vulkan frame");
         }
         m_pendingVk = PendingVkFrame {};
     }
@@ -1082,7 +1098,10 @@ void WaywallenDisplay::onWindowReady() {
             {
                 QMutexLocker lk(&m_pendingMutex);
                 if (m_pendingVk.valid && m_pendingVk.releaseSyncobjFd >= 0) {
-                    (void)waywallen_display_signal_release_syncobj(m_pendingVk.releaseSyncobjFd);
+                    signalFrameRelease(m_pendingVk.releaseSyncobjFd,
+                                       m_pendingVk.bufferGeneration,
+                                       m_pendingVk.seq,
+                                       "invalidated Vulkan frame");
                 }
                 m_pendingVk = PendingVkFrame {};
             }
@@ -1340,20 +1359,69 @@ void WaywallenDisplay::armWriteNotifier() {
     }
 }
 
+void WaywallenDisplay::reportFrameArmed(uint64_t generation, uint64_t seq) {
+    QPointer<WaywallenDisplay> guard(this);
+    QMetaObject::invokeMethod(
+        this,
+        [guard, generation, seq]() {
+            if (! guard) return;
+            auto* display = guard->displayHandle();
+            if (! display) return;
+            const int rc = waywallen_display_frame_armed(display, generation, seq);
+            if (rc != WAYWALLEN_OK) {
+                qCWarning(lcWD,
+                          "frame_armed enqueue failed: generation=%llu seq=%llu rc=%d",
+                          qulonglong(generation),
+                          qulonglong(seq),
+                          rc);
+                guard->handleDisconnect(rc, "frame_armed enqueue failed");
+                return;
+            }
+            guard->armWriteNotifier();
+        },
+        Qt::QueuedConnection);
+}
+
+void WaywallenDisplay::signalFrameRelease(int fd, uint64_t generation, uint64_t seq,
+                                          const char* context) {
+    if (fd < 0) return;
+    const int rc = waywallen_display_signal_release_syncobj(fd);
+    if (rc == WAYWALLEN_OK) {
+        reportFrameArmed(generation, seq);
+        return;
+    }
+    const QString reason =
+        QStringLiteral("%1 release signal failed").arg(QString::fromUtf8(context));
+    qCWarning(lcWD,
+              "%s: signal release failed for generation=%llu seq=%llu rc=%d",
+              context,
+              qulonglong(generation),
+              qulonglong(seq),
+              rc);
+    QPointer<WaywallenDisplay> guard(this);
+    QMetaObject::invokeMethod(
+        this,
+        [guard, rc, reason]() {
+            if (guard) guard->handleDisconnect(rc, reason.toUtf8().constData());
+        },
+        Qt::QueuedConnection);
+}
+
 void WaywallenDisplay::flushPendingRelease() {
-    int releaseFd = -1;
+    PendingEglFrame frame;
     {
         QMutexLocker lk(&m_pendingMutex);
-        if (m_pendingEgl.valid) releaseFd = m_pendingEgl.releaseSyncobjFd;
+        frame        = m_pendingEgl;
         m_pendingEgl = PendingEglFrame {};
     }
-    if (releaseFd >= 0) {
-        int rc = waywallen_display_signal_release_syncobj(releaseFd);
-        if (rc != WAYWALLEN_OK) qCWarning(lcWD, "EGL: signal skipped frame release failed: %d", rc);
+    if (frame.releaseSyncobjFd >= 0) {
+        signalFrameRelease(
+            frame.releaseSyncobjFd, frame.bufferGeneration, frame.seq, "skipped EGL frame");
     }
 }
 
-void WaywallenDisplay::releaseEglFrame(int releaseSyncobjFd, bool afterGpuWork) {
+void WaywallenDisplay::releaseEglFrame(int releaseSyncobjFd, bool afterGpuWork, uint64_t generation,
+                                       uint64_t seq) {
     if (releaseSyncobjFd < 0) return;
 
     auto* ctx       = QOpenGLContext::currentContext();
@@ -1378,24 +1446,19 @@ void WaywallenDisplay::releaseEglFrame(int releaseSyncobjFd, bool afterGpuWork) 
                     if (fallbackReleaseFd < 0) {
                         ::close(syncFileFd);
                         ctx->extraFunctions()->glFinish();
-                        int rc = waywallen_display_signal_release_syncobj(releaseSyncobjFd);
-                        if (rc != WAYWALLEN_OK) {
-                            qCWarning(lcWD, "EGL: fallback release signal failed: %d", rc);
-                        }
+                        signalFrameRelease(releaseSyncobjFd, generation, seq, "EGL dup fallback");
                         return;
                     }
                     int rc =
                         waywallen_display_release_after_sync_file(releaseSyncobjFd, syncFileFd);
                     if (rc == WAYWALLEN_OK) {
                         ::close(fallbackReleaseFd);
+                        reportFrameArmed(generation, seq);
                     } else {
                         qCWarning(lcWD, "EGL: attach release fence failed: %d", rc);
                         ctx->extraFunctions()->glFinish();
-                        int fallbackRc =
-                            waywallen_display_signal_release_syncobj(fallbackReleaseFd);
-                        if (fallbackRc != WAYWALLEN_OK) {
-                            qCWarning(lcWD, "EGL: fallback release signal failed: %d", fallbackRc);
-                        }
+                        signalFrameRelease(
+                            fallbackReleaseFd, generation, seq, "EGL fence fallback");
                     }
                     return;
                 }
@@ -1405,8 +1468,7 @@ void WaywallenDisplay::releaseEglFrame(int releaseSyncobjFd, bool afterGpuWork) 
         ctx->extraFunctions()->glFinish();
     }
 
-    int rc = waywallen_display_signal_release_syncobj(releaseSyncobjFd);
-    if (rc != WAYWALLEN_OK) qCWarning(lcWD, "EGL: signal release failed: %d", rc);
+    signalFrameRelease(releaseSyncobjFd, generation, seq, "EGL frame");
 }
 
 void WaywallenDisplay::handleDisconnect(int errCode, const char* msg) {
@@ -1580,14 +1642,14 @@ void WaywallenDisplay::renderThreadBlitEgl() {
         replacesPresentation = m_presentationState.sourceChangesWith(frame.bufferGeneration);
     }
     if (! incoming.valid || m_activeBackend != BackendEGL || ! m_eglImagesValid) {
-        releaseEglFrame(frame.releaseSyncobjFd, false);
+        releaseEglFrame(frame.releaseSyncobjFd, false, frame.bufferGeneration, frame.seq);
         return;
     }
     // EGLImage → GL texture binding is render-thread work; safe here.
     if (! m_glTexturesCreated) ensureGlTextures();
     if (! m_glTexturesCreated || frame.slot < 0 || frame.slot >= m_glTextures.size() ||
         incoming.width <= 0 || incoming.height <= 0) {
-        releaseEglFrame(frame.releaseSyncobjFd, false);
+        releaseEglFrame(frame.releaseSyncobjFd, false, frame.bufferGeneration, frame.seq);
         return;
     }
     const EglBlitResult result =
@@ -1598,17 +1660,17 @@ void WaywallenDisplay::renderThreadBlitEgl() {
                                incoming.height,
                                incoming.fourcc,
                                incoming.config);
-        releaseEglFrame(frame.releaseSyncobjFd, true);
+        releaseEglFrame(frame.releaseSyncobjFd, true, frame.bufferGeneration, frame.seq);
     } else if (result == EglBlitResult::CandidateReady) {
         {
             QMutexLocker lk(&m_pendingMutex);
             m_preparedEglContent = incoming;
         }
-        releaseEglFrame(frame.releaseSyncobjFd, true);
+        releaseEglFrame(frame.releaseSyncobjFd, true, frame.bufferGeneration, frame.seq);
     } else if (result == EglBlitResult::FailedAfterGpuWork) {
-        releaseEglFrame(frame.releaseSyncobjFd, true);
+        releaseEglFrame(frame.releaseSyncobjFd, true, frame.bufferGeneration, frame.seq);
     } else {
-        releaseEglFrame(frame.releaseSyncobjFd, false);
+        releaseEglFrame(frame.releaseSyncobjFd, false, frame.bufferGeneration, frame.seq);
     }
 }
 
@@ -1698,13 +1760,17 @@ QSGNode* WaywallenDisplay::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData
                            incoming.width > 0 && incoming.height > 0;
     if (frame.valid && ! canBlitVk) {
         if (frame.releaseSyncobjFd >= 0) {
-            (void)waywallen_display_signal_release_syncobj(frame.releaseSyncobjFd);
+            signalFrameRelease(
+                frame.releaseSyncobjFd, frame.bufferGeneration, frame.seq, "unusable Vulkan frame");
         }
     } else if (canBlitVk) {
         if (! resources || ! resources->vkBlitterInited) {
             if (! resources) {
                 if (frame.releaseSyncobjFd >= 0) {
-                    (void)waywallen_display_signal_release_syncobj(frame.releaseSyncobjFd);
+                    signalFrameRelease(frame.releaseSyncobjFd,
+                                       frame.bufferGeneration,
+                                       frame.seq,
+                                       "Vulkan frame without resources");
                 }
                 frame.valid = false;
             }
@@ -1722,7 +1788,10 @@ QSGNode* WaywallenDisplay::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData
                 qCWarning(
                     lcWD, "vk blitter init failed (%d); Vulkan path disabled this session", rc);
                 if (frame.releaseSyncobjFd >= 0) {
-                    (void)waywallen_display_signal_release_syncobj(frame.releaseSyncobjFd);
+                    signalFrameRelease(frame.releaseSyncobjFd,
+                                       frame.bufferGeneration,
+                                       frame.seq,
+                                       "Vulkan blitter init failure");
                 }
                 frame.valid = false;
             } else {
@@ -1734,6 +1803,7 @@ QSGNode* WaywallenDisplay::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData
             auto      imported       = reinterpret_cast<VkImage>(m_vkImages[frame.slot]);
             auto      acquireSem     = reinterpret_cast<VkSemaphore>(frame.acquireSem);
             bool      candidateReady = false;
+            bool      releaseArmed   = false;
             const int rc             = ww_vk_blitter_prepare(&resources->vkBlitter,
                                                              imported,
                                                              static_cast<uint32_t>(incoming.width),
@@ -1742,7 +1812,9 @@ QSGNode* WaywallenDisplay::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData
                                                              replacesPresentation,
                                                              acquireSem,
                                                              frame.releaseSyncobjFd,
-                                                             &candidateReady);
+                                                             &candidateReady,
+                                                             &releaseArmed);
+            if (releaseArmed) reportFrameArmed(frame.bufferGeneration, frame.seq);
             if (rc == 0) {
                 if (candidateReady) {
                     vkCandidateContent = incoming;
@@ -1762,6 +1834,11 @@ QSGNode* WaywallenDisplay::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData
                                            incoming.fourcc,
                                            incoming.config);
                 }
+            } else if (! releaseArmed) {
+                bool drainedRelease = false;
+                (void)ww_vk_blitter_drain_pending_release(&resources->vkBlitter, &drainedRelease);
+                if (drainedRelease) reportFrameArmed(frame.bufferGeneration, frame.seq);
+                scheduleSessionFailure(QStringLiteral("Vulkan frame release could not be armed"));
             } else if (ww_vk_blitter_candidate(&resources->vkBlitter) != VK_NULL_HANDLE &&
                        ww_vk_blitter_discard_candidate(&resources->vkBlitter) != 0) {
                 qCCritical(lcWD, "Vulkan shadow candidate remains in flight; ending session");

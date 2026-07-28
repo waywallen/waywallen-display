@@ -193,6 +193,8 @@ private:
     QString                                 screenIdentityKey() const;
     QString                                 effectiveInstanceId() const;
     uint32_t                                screenRefreshMhz() const;
+    void                                    reportFrameArmed(uint64_t generation, uint64_t seq);
+    void signalFrameRelease(int fd, uint64_t generation, uint64_t seq, const char* context);
     /* Probe wants_writable and toggle m_notifierWrite::setEnabled.
      * Call after any post-handshake send that may have left bytes
      * queued in the lib's outbox (update_size, pointer events). */
@@ -211,7 +213,8 @@ private:
     /* Blit an imported GL texture into the current shadow or a separate
      * replacement. Render thread only. */
     EglBlitResult blitEglShadow(int slot, int width, int height, bool forceReplace);
-    void          releaseEglFrame(int releaseSyncobjFd, bool afterGpuWork);
+    void          releaseEglFrame(int releaseSyncobjFd, bool afterGpuWork, uint64_t generation,
+                                  uint64_t seq);
     /* Render-thread job: drains m_pendingEgl, ensures GL textures,
      * runs blitEglShadow. Scheduled from c_on_frame_ready via
      * scheduleRenderJob(BeforeSynchronizingStage). */
@@ -305,6 +308,7 @@ private:
         int      slot { -1 };
         int      releaseSyncobjFd { -1 };
         uint64_t bufferGeneration { 0 };
+        uint64_t seq { 0 };
     };
     PendingEglFrame m_pendingEgl;
     ContentSnapshot m_preparedEglContent;
@@ -335,6 +339,7 @@ private:
         void*    acquireSem { nullptr }; // VkSemaphore (lib-imported sync_fd)
         int      releaseSyncobjFd { -1 };
         uint64_t bufferGeneration { 0 };
+        uint64_t seq { 0 };
     };
     PendingVkFrame m_pendingVk;
 #endif

@@ -37,9 +37,10 @@ struct args {
 };
 
 struct run_state {
-    int64_t frames_seen;
-    int64_t max_frames;
-    int     disconnected;
+    waywallen_display_t* display;
+    int64_t              frames_seen;
+    int64_t              max_frames;
+    int                  disconnected;
 };
 
 static void on_textures_ready(void* ud, const waywallen_textures_t* t) {
@@ -87,7 +88,9 @@ static void on_frame_ready(void* ud, const waywallen_frame_t* f) {
     // No GPU work in this demo, so signal the release_syncobj
     // immediately. The helper closes the fd.
     if (f->release_syncobj_fd >= 0) {
-        (void)waywallen_display_signal_release_syncobj(f->release_syncobj_fd);
+        if (waywallen_display_signal_release_syncobj(f->release_syncobj_fd) == WAYWALLEN_OK) {
+            (void)waywallen_display_frame_armed(rs->display, f->buffer_generation, f->seq);
+        }
     }
 }
 
@@ -166,6 +169,7 @@ int main(int argc, char** argv) {
     }
 
     struct run_state rs = {
+        .display      = NULL,
         .frames_seen  = 0,
         .max_frames   = a.max_frames,
         .disconnected = 0,
@@ -185,6 +189,7 @@ int main(int argc, char** argv) {
         fprintf(stderr, "new failed\n");
         return 1;
     }
+    rs.display = d;
 
     fprintf(stderr,
             "connecting to %s...\n",
@@ -223,7 +228,9 @@ int main(int argc, char** argv) {
     }
     fprintf(stderr, "connected; draining events...\n");
     while (! rs.disconnected) {
-        struct pollfd p  = { .fd = fd, .events = POLLIN, .revents = 0 };
+        short events = POLLIN;
+        if (waywallen_display_wants_writable(d)) events |= POLLOUT;
+        struct pollfd p  = { .fd = fd, .events = events, .revents = 0 };
         int           pr = poll(&p, 1, -1);
         if (pr < 0) {
             if (errno == EINTR) continue;
@@ -240,10 +247,16 @@ int main(int argc, char** argv) {
                 /* on_disconnected has fired */
                 break;
             }
+            if (waywallen_display_wants_writable(d) && waywallen_display_handle_writable(d) < 0) {
+                break;
+            }
             if (rs.max_frames >= 0 && rs.frames_seen >= rs.max_frames) {
                 fprintf(stderr, "max-frames reached\n");
                 break;
             }
+        }
+        if (p.revents & POLLOUT) {
+            if (waywallen_display_handle_writable(d) < 0) break;
         }
     }
 

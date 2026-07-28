@@ -1379,6 +1379,21 @@ static int enc_window_state(const void* m, ww_buf_t* out) {
     return ww_req_window_state_encode((const ww_req_window_state_t*)m, out);
 }
 
+static int enc_frame_armed(const void* m, ww_buf_t* out) {
+    return ww_req_frame_armed_encode((const ww_req_frame_armed_t*)m, out);
+}
+
+int waywallen_display_frame_armed(waywallen_display_t* d, uint64_t buffer_generation,
+                                  uint64_t seq) {
+    if (! d) return WAYWALLEN_ERR_INVAL;
+    if (d->conn != WW_CONN_CONNECTED) return WAYWALLEN_ERR_STATE;
+    ww_req_frame_armed_t msg = {
+        .buffer_generation = buffer_generation,
+        .seq               = seq,
+    };
+    return outbox_enqueue_request(d, WW_REQ_FRAME_ARMED, enc_frame_armed, &msg);
+}
+
 int waywallen_display_set_window_state(waywallen_display_t* d, uint32_t flags) {
     if (! d) return WAYWALLEN_ERR_INVAL;
     if (d->conn != WW_CONN_CONNECTED) return WAYWALLEN_ERR_STATE;
@@ -2050,6 +2065,26 @@ static int handle_set_config(waywallen_display_t* d, const uint8_t* body, size_t
     return WAYWALLEN_OK;
 }
 
+static int acknowledge_frame_release(waywallen_display_t* d, uint64_t buffer_generation,
+                                     uint64_t seq) {
+    int rc = waywallen_display_frame_armed(d, buffer_generation, seq);
+    if (rc != WAYWALLEN_OK) {
+        fire_disconnected(d, rc, "frame_armed enqueue failed");
+    }
+    return rc;
+}
+
+static int resolve_frame_without_gpu(waywallen_display_t* d, int release_syncobj_fd,
+                                     uint64_t buffer_generation, uint64_t seq,
+                                     const char* context) {
+    int rc = waywallen_display_signal_release_syncobj(release_syncobj_fd);
+    if (rc != WAYWALLEN_OK) {
+        fire_disconnected(d, rc, context);
+        return rc;
+    }
+    return acknowledge_frame_release(d, buffer_generation, seq);
+}
+
 static int handle_frame_ready(waywallen_display_t* d, const uint8_t* body, size_t body_len,
                               int* fd_buf, size_t n_fds) {
     ww_evt_frame_ready_t fr;
@@ -2071,19 +2106,26 @@ static int handle_frame_ready(waywallen_display_t* d, const uint8_t* body, size_
      * BindBuffers. It is stale regardless of the new pool's config state. */
     if (! d->bound.valid || fr.buffer_generation != d->bound.generation) {
         close(acquire_fd);
-        (void)waywallen_display_signal_release_syncobj(release_syncobj_fd);
+        int rc = resolve_frame_without_gpu(
+            d, release_syncobj_fd, fr.buffer_generation, fr.seq, "stale frame release failed");
+        if (rc != WAYWALLEN_OK) {
+            ww_evt_frame_ready_free(&fr);
+            return rc;
+        }
         ww_evt_frame_ready_free(&fr);
         return WAYWALLEN_OK;
     }
     if (d->bound.phase != WW_STREAM_ACTIVE) {
         close(acquire_fd);
-        (void)waywallen_display_signal_release_syncobj(release_syncobj_fd);
+        (void)resolve_frame_without_gpu(
+            d, release_syncobj_fd, fr.buffer_generation, fr.seq, "pre-config frame release failed");
         ww_evt_frame_ready_free(&fr);
         fire_disconnected(d, WAYWALLEN_ERR_PROTO, "frame_ready before set_config");
         return WAYWALLEN_ERR_PROTO;
     }
 
     int   fd_handled        = 0;
+    int   release_armed     = 0;
     void* acquire_semaphore = NULL;
 
 #ifdef WW_HAVE_EGL
@@ -2128,15 +2170,30 @@ static int handle_frame_ready(waywallen_display_t* d, const uint8_t* body, size_
         if (slot < d->vk_import_count && d->vk_images[slot].image != VK_NULL_HANDLE) {
             /* Blit consumes release_syncobj_fd (signals + close) on its
              * own success/failure paths — pass ownership through. */
-            (void)ww_vk_blitter_blit(&d->vk_blitter,
-                                     d->vk_images[slot].image,
-                                     d->bound.textures.tex_width,
-                                     d->bound.textures.tex_height,
-                                     acq_sem,
-                                     release_syncobj_fd);
+            bool armed    = false;
+            int  blit_rc  = ww_vk_blitter_blit(&d->vk_blitter,
+                                               d->vk_images[slot].image,
+                                               d->bound.textures.tex_width,
+                                               d->bound.textures.tex_height,
+                                               acq_sem,
+                                               release_syncobj_fd,
+                                               &armed);
+            release_armed = armed ? 1 : 0;
+            if (blit_rc != 0 && ! armed) {
+                ww_vk_blitter_shutdown(&d->vk_blitter);
+                ww_evt_frame_ready_free(&fr);
+                fire_disconnected(d, WAYWALLEN_ERR_IO, "relay frame release could not be armed");
+                return WAYWALLEN_ERR_IO;
+            }
         } else if (release_syncobj_fd >= 0) {
             /* No image to blit — still need to release. */
-            (void)waywallen_display_signal_release_syncobj(release_syncobj_fd);
+            int rc = waywallen_display_signal_release_syncobj(release_syncobj_fd);
+            if (rc != WAYWALLEN_OK) {
+                ww_evt_frame_ready_free(&fr);
+                fire_disconnected(d, rc, "relay missing-image release failed");
+                return rc;
+            }
+            release_armed = 1;
         }
         /* The lib already drove sync to completion; host sees no sem +
          * no release fd to deal with. */
@@ -2157,13 +2214,24 @@ static int handle_frame_ready(waywallen_display_t* d, const uint8_t* body, size_
      * DMABUF_RELAY mode sets this to -1: the lib already signaled. */
     frame.release_syncobj_fd = release_syncobj_fd;
     frame.buffer_generation  = fr.buffer_generation;
+    if (release_armed) {
+        if (acknowledge_frame_release(d, fr.buffer_generation, fr.seq) != WAYWALLEN_OK) {
+            ww_evt_frame_ready_free(&fr);
+            return WAYWALLEN_ERR_IO;
+        }
+    }
     ww_evt_frame_ready_free(&fr);
 
     if (d->cb.on_frame_ready) {
         d->cb.on_frame_ready(d->cb.user_data, &frame);
-    } else {
+    } else if (release_syncobj_fd >= 0) {
         /* No callback means the host never reads this frame. */
-        (void)waywallen_display_signal_release_syncobj(release_syncobj_fd);
+        int rc = resolve_frame_without_gpu(d,
+                                           release_syncobj_fd,
+                                           frame.buffer_generation,
+                                           frame.seq,
+                                           "uncallbacked frame release failed");
+        if (rc != WAYWALLEN_OK) return rc;
     }
     return WAYWALLEN_OK;
 }

@@ -18,7 +18,7 @@
 use core::ffi::{c_char, c_int, c_void};
 
 include!(concat!(env!("OUT_DIR"), "/version.rs"));
-pub const WAYWALLEN_DISPLAY_PROTOCOL_VERSION: u32 = 7;
+pub const WAYWALLEN_DISPLAY_PROTOCOL_VERSION: u32 = 8;
 
 // -----------------------------------------------------------------------------
 // Return codes
@@ -321,6 +321,11 @@ extern "C" {
     pub fn waywallen_display_release_after_sync_file(
         release_syncobj_fd: c_int,
         sync_file_fd: c_int,
+    ) -> c_int;
+    pub fn waywallen_display_frame_armed(
+        d: *mut waywallen_display_t,
+        buffer_generation: u64,
+        seq: u64,
     ) -> c_int;
 
     pub fn waywallen_display_conn_state(d: *mut waywallen_display_t) -> waywallen_conn_state_t;

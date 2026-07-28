@@ -61,6 +61,7 @@ typedef struct ww_vk_blitter {
     VkCommandBuffer cb;
     VkFence         fence;
     bool            fence_armed;
+    int             pending_release_syncobj_fd;
 
     /* Signal semaphore for each blit submission, exportable as SYNC_FD.
      * After submit, vkGetSemaphoreFdKHR(SYNC_FD) gives us a sync_file
@@ -154,14 +155,15 @@ int ww_vk_blitter_get_export(const ww_vk_blitter_t* b, int* out_fd, uint32_t* ou
  * the shadow. Waits on `acquire_sem` (may be VK_NULL_HANDLE), then
  * blocks the calling thread until the copy completes (vkWaitForFences).
  *
- * `release_syncobj_fd` ownership transfers in: signaled host-side via
- * waywallen_display_signal_release_syncobj after the wait, or closed
- * on early failure. Pass -1 if the caller has no syncobj to signal.
+ * `release_syncobj_fd` ownership transfers in. The blitter attaches the
+ * submission's exported sync_file to it before waiting for the copy, or
+ * signals it directly when no GPU work was submitted. `out_release_armed`
+ * reports whether the release syncobj now represents completion.
  *
  * Returns 0 on success, negative errno on failure.
  */
 int ww_vk_blitter_blit(ww_vk_blitter_t* b, VkImage imported, uint32_t w, uint32_t h,
-                       VkSemaphore acquire_sem, int release_syncobj_fd);
+                       VkSemaphore acquire_sem, int release_syncobj_fd, bool* out_release_armed);
 
 /*
  * Copy into the current shadow or prepare a one-off replacement. When
@@ -172,7 +174,8 @@ int ww_vk_blitter_blit(ww_vk_blitter_t* b, VkImage imported, uint32_t w, uint32_
  */
 int ww_vk_blitter_prepare(ww_vk_blitter_t* b, VkImage imported, uint32_t w, uint32_t h,
                           uint32_t fourcc, bool force_replace, VkSemaphore acquire_sem,
-                          int release_syncobj_fd, bool* out_candidate_ready);
+                          int release_syncobj_fd, bool* out_candidate_ready,
+                          bool* out_release_armed);
 
 /* Promote a prepared candidate after the host has rebound its native
  * texture wrapper. Waits for the exact host graphics queue to become
@@ -182,6 +185,10 @@ VkResult ww_vk_blitter_commit_candidate(ww_vk_blitter_t* b);
 /* Destroy a prepared candidate without changing the current shadow.
  * Returns -EBUSY when a timed-out copy still references it. */
 int ww_vk_blitter_discard_candidate(ww_vk_blitter_t* b);
+
+/* Drain submitted work and resolve a deferred release syncobj before
+ * the host closes its display session after a submission error. */
+int ww_vk_blitter_drain_pending_release(ww_vk_blitter_t* b, bool* out_release_armed);
 
 static inline VkImage ww_vk_blitter_shadow(const ww_vk_blitter_t* b) {
     return b ? b->shadow_image : VK_NULL_HANDLE;

@@ -10,11 +10,10 @@
  *     own Vulkan instance and re-exports a LINEAR shadow DMA-BUF that
  *     GTK imports via GdkDmabufTexture.
  *
- *   - Frame ownership: `frame-ready` emits the release_syncobj fd as
- *     a plain int. The C trampoline holds the original; the JS handler
- *     calls `Waywallen.Display.signal_release_syncobj(fd)` (a class
- *     method that internally dups) to signal release. Trampoline closes
- *     the original after emit returns regardless.
+ *   - Frame ownership: DMABUF_RELAY attaches and acknowledges the real
+ *     Vulkan release fence inside the C library, so `frame-ready` normally
+ *     emits -1 for the release fd. The integer remains in the signal ABI
+ *     for compatibility with non-relay backends.
  *
  *   - Boxed types: `WwTexturesInfo`, `WwFrameInfo`, `WwConfigInfo` are
  *     not exposed — signal payloads are flat primitives. Adding boxed
