@@ -1,5 +1,7 @@
 # waywallen-display
 
+<a href="README.CN.md">中文 README</a> · <a href="README.RU.md">Русский README</a>
+
 Desktop integration for the `waywallen` wallpaper daemon — lets KDE Plasma,
 GNOME Shell, and other Linux desktop shells display `waywallen` wallpaper
 output as a regular surface, with zero-copy GPU sharing via DMA-BUF.
@@ -27,7 +29,7 @@ Prebuilt artifacts are published on the
 Download `waywallen-kde-<version>-<arch>-embed.zip` from the latest release, then:
 
 ```sh
-kpackagetool6 --type Plasma/Wallpaper -i waywallen-kde-<version>-<arch>.zip
+kpackagetool6 --type Plasma/Wallpaper -i waywallen-kde-<version>-<arch>-embed.zip
 # -u to upgrade, -r to remove
 ```
 
@@ -74,8 +76,12 @@ Hyprland, Sway, Niri), download
 
 ```sh
 tar -xzf waywallen-layer-shell-<version>-<arch>.tar.gz
-install -Dm755 waywallen-layer-shell ~/.local/bin/waywallen-layer-shell
+install -Dm755 waywallen-layer-shell-<version>-<arch>/waywallen-layer-shell ~/.local/bin/waywallen-layer-shell
+cp -r waywallen-layer-shell-<version>-<arch>/share ~/.local/
 ```
+
+The `share` directory contains the translation catalogs. Keep it when moving
+the binary if localized CLI output is required.
 
 ```sh
 waywallen-layer-shell

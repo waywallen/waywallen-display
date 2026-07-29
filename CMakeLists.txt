@@ -27,6 +27,27 @@ endif()
 
 include(GNUInstallDirs)
 
+set(_ww_layer_shell_domain "waywallen-layer-shell")
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/po/layer-shell/LINGUAS" _ww_layer_shell_languages
+    REGEX "^[A-Za-z_@.-]+$")
+set(_ww_layer_shell_mo_files "")
+find_program(MSGFMT_EXECUTABLE msgfmt REQUIRED)
+foreach(_lang IN LISTS _ww_layer_shell_languages)
+    set(_po "${CMAKE_CURRENT_SOURCE_DIR}/po/layer-shell/${_lang}.po")
+    set(_mo "${CMAKE_CURRENT_BINARY_DIR}/locale/${_lang}/LC_MESSAGES/${_ww_layer_shell_domain}.mo")
+    add_custom_command(
+        OUTPUT "${_mo}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/locale/${_lang}/LC_MESSAGES"
+        COMMAND ${MSGFMT_EXECUTABLE} --check --check-format -o "${_mo}" "${_po}"
+        DEPENDS "${_po}"
+        COMMENT "Compiling ${_ww_layer_shell_domain} ${_lang} translation"
+        VERBATIM)
+    list(APPEND _ww_layer_shell_mo_files "${_mo}")
+    install(FILES "${_mo}"
+        DESTINATION "${CMAKE_INSTALL_LOCALEDIR}/${_lang}/LC_MESSAGES")
+endforeach()
+add_custom_target(waywallen-layer-shell-translations ALL DEPENDS ${_ww_layer_shell_mo_files})
+
 set(WAYWALLEN_DISPLAY_GENERATED_INCLUDE_DIR
     "${CMAKE_CURRENT_BINARY_DIR}/generated/include")
 file(MAKE_DIRECTORY "${WAYWALLEN_DISPLAY_GENERATED_INCLUDE_DIR}")
@@ -347,6 +368,31 @@ endif()
 if(WAYWALLEN_DISPLAY_PLUGIN_QML)
     add_subdirectory(plugins/qml)
     message(STATUS "libwaywallen_display: QML plugin ENABLED")
+
+    find_program(MSGFMT_EXECUTABLE msgfmt REQUIRED)
+    set(_ww_kde_domain "plasma_wallpaper_org.waywallen.kde")
+    file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/extensions/kde/po/LINGUAS" _ww_kde_languages
+        REGEX "^[A-Za-z_@.-]+$")
+    set(_ww_kde_mo_files "")
+    foreach(_lang IN LISTS _ww_kde_languages)
+        set(_po "${CMAKE_CURRENT_SOURCE_DIR}/extensions/kde/po/${_lang}.po")
+        set(_mo "${CMAKE_CURRENT_BINARY_DIR}/extensions/kde/locale/${_lang}/LC_MESSAGES/${_ww_kde_domain}.mo")
+        add_custom_command(
+            OUTPUT "${_mo}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/extensions/kde/locale/${_lang}/LC_MESSAGES"
+            COMMAND ${MSGFMT_EXECUTABLE} --check --check-format -o "${_mo}" "${_po}"
+            DEPENDS "${_po}"
+            COMMENT "Compiling ${_ww_kde_domain} ${_lang} translation"
+            VERBATIM)
+        list(APPEND _ww_kde_mo_files "${_mo}")
+        install(FILES "${_mo}"
+            DESTINATION "org.waywallen.kde/contents/locale/${_lang}/LC_MESSAGES"
+            COMPONENT kde_extension
+            EXCLUDE_FROM_ALL)
+        install(FILES "${_mo}"
+            DESTINATION "${CMAKE_INSTALL_LOCALEDIR}/${_lang}/LC_MESSAGES")
+    endforeach()
+    add_custom_target(waywallen-kde-translations ALL DEPENDS ${_ww_kde_mo_files})
 
     # KDE Plasma kpackage extension. The zip root must be
     # `org.waywallen.kde/{metadata.json,contents/...}` so it can be installed

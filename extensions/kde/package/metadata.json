@@ -8,6 +8,7 @@
         ],
         "Category": "",
         "Description": "Display-side plugin for the waywallen daemon",
+        "Description[ru]": "Модуль вывода изображения для фоновой службы waywallen",
         "Icon": "preferences-desktop-wallpaper",
         "Id": "org.waywallen.kde",
         "License": "GPL-2.0-or-later",

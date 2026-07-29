@@ -29,7 +29,7 @@ jobs:
             artifact: waywallen-kde
             pattern: build/waywallen-kde-*.zip
             packages: >-
-              cmake ninja-build g++ pkg-config
+              cmake gettext ninja-build g++ pkg-config
               qt6-base-dev qt6-declarative-dev
               libegl-dev libgles-dev libvulkan-dev
           - name: gnome
@@ -37,7 +37,7 @@ jobs:
             artifact: waywallen-gnome
             pattern: build/waywallen-gnome-*.zip
             packages: >-
-              cmake ninja-build g++ pkg-config
+              cmake gettext ninja-build g++ pkg-config
               libgtk-4-dev libglib2.0-dev
               gobject-introspection libgirepository1.0-dev
               gir1.2-gtk-4.0
@@ -54,6 +54,21 @@ jobs:
 
       - name: Build ${{ matrix.name }} extension
         run: ${{ matrix.script }}
+
+      - name: Verify translation assets
+        run: |
+          archive=$(compgen -G '${{ matrix.pattern }}' | head -n1)
+          test -n "$archive"
+          entries=$(unzip -Z1 "$archive")
+          if [ '${{ matrix.name }}' = kde ]; then
+            grep -qx 'org.waywallen.kde/contents/locale/ru/LC_MESSAGES/plasma_wallpaper_org.waywallen.kde.mo' <<<"$entries"
+          else
+            grep -qx 'locale/ru/LC_MESSAGES/waywallen-gnome.mo' <<<"$entries"
+          fi
+          if grep -Eq '\.(po|pot)$' <<<"$entries"; then
+            echo 'source translation catalog found in runtime archive' >&2
+            exit 1
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -75,7 +90,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            gcc pkg-config libegl-dev libgles-dev libvulkan-dev
+            gcc gettext pkg-config libegl-dev libgles-dev libvulkan-dev
 
       - name: Build waywallen-layer-shell
         run: cargo build --bin waywallen-layer-shell --release --locked
@@ -87,8 +102,29 @@ jobs:
               | python3 -c 'import json, sys; data = json.load(sys.stdin); print(next(p["version"] for p in data["packages"] if p["name"] == "waywallen-display"))'
           )
           arch=$(uname -m)
-          mkdir -p dist
-          tar -C target/release -czf "dist/waywallen-layer-shell-${version}-${arch}.tar.gz" waywallen-layer-shell
+          root="waywallen-layer-shell-${version}-${arch}"
+          mkdir -p "dist/$root"
+          install -Dm755 target/release/waywallen-layer-shell "dist/$root/waywallen-layer-shell"
+          while IFS= read -r lang; do
+            case "$lang" in ''|'#'*) continue ;; esac
+            locale_dir="dist/$root/share/locale/$lang/LC_MESSAGES"
+            mkdir -p "$locale_dir"
+            msgfmt --check --check-format -o "$locale_dir/waywallen-layer-shell.mo" \
+              "po/layer-shell/$lang.po"
+          done < po/layer-shell/LINGUAS
+          tar -C dist -czf "dist/$root.tar.gz" "$root"
+          rm -rf "dist/$root"
+
+      - name: Verify translation assets
+        run: |
+          archive=$(compgen -G 'dist/waywallen-layer-shell-*.tar.gz' | head -n1)
+          test -n "$archive"
+          entries=$(tar -tzf "$archive")
+          grep -Eq '/share/locale/ru/LC_MESSAGES/waywallen-layer-shell.mo$' <<<"$entries"
+          if grep -Eq '\.(po|pot)$' <<<"$entries"; then
+            echo 'source translation catalog found in runtime archive' >&2
+            exit 1
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

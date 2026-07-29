@@ -7,6 +7,7 @@ import Gio from 'gi://Gio';
 import Gdk from 'gi://Gdk?version=4.0';
 import Gtk from 'gi://Gtk?version=4.0';
 import Waywallen from 'gi://Waywallen?version=1.0';
+import Gettext from 'gettext';
 import cairo from 'cairo';
 import system from 'system';
 
@@ -18,6 +19,11 @@ let GioUnix = null;
 try { GioUnix = imports.gi.GioUnix; } catch (_e) {}
 
 const APP_ID = 'io.github.waywallen.WaywallenRenderer';
+const GETTEXT_DOMAIN = 'waywallen-gnome';
+const localeDir = GLib.getenv('WAYWALLEN_LOCALEDIR');
+if (localeDir)
+    Gettext.bindtextdomain(GETTEXT_DOMAIN, localeDir);
+const _ = message => Gettext.dgettext(GETTEXT_DOMAIN, message);
 
 // WwHandshakeResult / WwHandshakeState values.
 const HS_DONE = 1;
@@ -196,16 +202,16 @@ class MonitorRenderer {
         this._diagLast = now;
         this._diagFrames = frames;
         const f = this._winFlags ?? 0;
-        const ws = `${f & 1 ? 'win ' : ''}${f & 2 ? 'active ' : ''}` +
-                   `${f & 4 ? 'max ' : ''}${f & 8 ? 'full' : ''}`.trim() || 'none';
+        const ws = `${f & 1 ? _('win') + ' ' : ''}${f & 2 ? _('active') + ' ' : ''}` +
+                   `${f & 4 ? _('max') + ' ' : ''}${f & 8 ? _('full') : ''}`.trim() || _('none');
         this._diagLabel.set_text([
-            `mon ${this._index}  ${this._displayName}`,
-            `id ${this._instanceId || '—'}`,
-            `disp ${this._pw ?? '?'}x${this._ph ?? '?'} scale=${this._scale ?? '?'}`,
-            `tex ${this._texW ?? '?'}x${this._texH ?? '?'} ` +
-                `fourcc=0x${(this._fourcc ?? 0).toString(16)} backend=${this._backend ?? '?'}`,
-            `fps ${fps.toFixed(1)}  frames ${frames}`,
-            `winstate 0x${f.toString(16)} (${ws})`,
+            _('mon %d  %s').format(this._index, this._displayName),
+            _('id %s').format(this._instanceId || '—'),
+            _('disp %dx%d scale=%s').format(this._pw ?? '?', this._ph ?? '?', this._scale ?? '?'),
+            _('tex %dx%d fourcc=0x%s backend=%s').format(
+                this._texW ?? '?', this._texH ?? '?', (this._fourcc ?? 0).toString(16), this._backend ?? '?'),
+            _('fps %s  frames %d').format(fps.toFixed(1), frames),
+            _('winstate 0x%s (%s)').format(f.toString(16), ws),
         ].join('\n'));
     }
 

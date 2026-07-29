@@ -161,26 +161,26 @@ WallpaperItem {
                 font.family: "monospace"
                 text: {
                     const d = diagBox.display;
-                    let s = "name:   " + d.displayName
-                    s += "  id: " + (d.displayId === 0 ? "—" : d.displayId)
-                    s += "\ninst:   " + (d.instanceId.length > 0 ? d.instanceId : "—")
-                    s += "\nscreen: " + Screen.name + screenVendor()
-                    s += "\n  geom:  " + Screen.width + "x" + Screen.height
+                    let s = i18nd("plasma_wallpaper_org.waywallen.kde", "name:") + "   " + d.displayName
+                    s += "  " + i18nd("plasma_wallpaper_org.waywallen.kde", "id:") + " " + (d.displayId === 0 ? "—" : d.displayId)
+                    s += "\n" + i18nd("plasma_wallpaper_org.waywallen.kde", "inst:") + "   " + (d.instanceId.length > 0 ? d.instanceId : "—")
+                    s += "\n" + i18nd("plasma_wallpaper_org.waywallen.kde", "screen:") + " " + Screen.name + screenVendor()
+                    s += "\n  " + i18nd("plasma_wallpaper_org.waywallen.kde", "geom:") + "  " + Screen.width + "x" + Screen.height
                           + " @ (" + Screen.virtualX + "," + Screen.virtualY + ")"
-                    s += "\n  avail: " + Screen.desktopAvailableWidth
+                    s += "\n  " + i18nd("plasma_wallpaper_org.waywallen.kde", "avail:") + " " + Screen.desktopAvailableWidth
                           + "x" + Screen.desktopAvailableHeight
                     s += "\n  dpr=" + Screen.devicePixelRatio
                           + "  density=" + Screen.pixelDensity.toFixed(2) + " px/mm"
-                    s += "\n  orient: " + orientText(Screen.orientation)
-                    s += "\nconn:   " + connText(d.connState)
-                          + "  stream: " + streamText(d.streamState)
-                    s += "\nframes: " + d.framesReceived
-                    s += "\nclear:  " + d.clearColor.toString()
-                    s += "\nwindows: " + windowsText()
+                    s += "\n  " + i18nd("plasma_wallpaper_org.waywallen.kde", "orient:") + " " + orientText(Screen.orientation)
+                    s += "\n" + i18nd("plasma_wallpaper_org.waywallen.kde", "conn:") + "   " + connText(d.connState)
+                          + "  " + i18nd("plasma_wallpaper_org.waywallen.kde", "stream:") + " " + streamText(d.streamState)
+                    s += "\n" + i18nd("plasma_wallpaper_org.waywallen.kde", "frames:") + " " + d.framesReceived
+                    s += "\n" + i18nd("plasma_wallpaper_org.waywallen.kde", "clear:") + "  " + d.clearColor.toString()
+                    s += "\n" + i18nd("plasma_wallpaper_org.waywallen.kde", "windows:") + " " + windowsText()
                     if (d.lastDisconnectReason !== 0) {
-                        s += "\nreason: " + reasonText(d.lastDisconnectReason)
+                        s += "\n" + i18nd("plasma_wallpaper_org.waywallen.kde", "reason:") + " " + reasonText(d.lastDisconnectReason)
                         if (d.lastDisconnectMessage.length > 0)
-                            s += "\n  msg:  " + d.lastDisconnectMessage
+                            s += "\n  " + i18nd("plasma_wallpaper_org.waywallen.kde", "msg:") + "  " + d.lastDisconnectMessage
                     }
                     return s
                 }
@@ -199,7 +199,7 @@ WallpaperItem {
                         const label = (w.app && w.app.length > 0)
                             ? w.app + " — " + w.title
                             : w.title
-                        s += "\n  [" + winTag(w) + "] " + (label || "(untitled)")
+                        s += "\n  [" + winTag(w) + "] " + (label || i18nd("plasma_wallpaper_org.waywallen.kde", "(untitled)"))
                     }
                     return s
                 }
@@ -209,10 +209,10 @@ WallpaperItem {
                 function flagsBits(f) {
                     if (f === 0) return "—"
                     const names = []
-                    if (f & 1) names.push("nonmin")
-                    if (f & 2) names.push("active")
-                    if (f & 4) names.push("max")
-                    if (f & 8) names.push("full")
+                    if (f & 1) names.push(i18nd("plasma_wallpaper_org.waywallen.kde", "nonmin"))
+                    if (f & 2) names.push(i18nd("plasma_wallpaper_org.waywallen.kde", "active"))
+                    if (f & 4) names.push(i18nd("plasma_wallpaper_org.waywallen.kde", "max"))
+                    if (f & 8) names.push(i18nd("plasma_wallpaper_org.waywallen.kde", "full"))
                     return names.join("+")
                 }
 
@@ -229,15 +229,15 @@ WallpaperItem {
                 function reasonText(r) {
                     switch (r) {
                     case 0: return "—"
-                    case 1: return "version unsupported"
-                    case 2: return "protocol mismatch"
-                    case 3: return "daemon error"
-                    case 4: return "handshake failed"
-                    case 5: return "socket io"
-                    case 6: return "protocol error"
-                    case 7: return "daemon gone"
+                    case 1: return i18nd("plasma_wallpaper_org.waywallen.kde", "version unsupported")
+                    case 2: return i18nd("plasma_wallpaper_org.waywallen.kde", "protocol mismatch")
+                    case 3: return i18nd("plasma_wallpaper_org.waywallen.kde", "daemon error")
+                    case 4: return i18nd("plasma_wallpaper_org.waywallen.kde", "handshake failed")
+                    case 5: return i18nd("plasma_wallpaper_org.waywallen.kde", "socket io")
+                    case 6: return i18nd("plasma_wallpaper_org.waywallen.kde", "protocol error")
+                    case 7: return i18nd("plasma_wallpaper_org.waywallen.kde", "daemon gone")
                     }
-                    return "unknown"
+                    return i18nd("plasma_wallpaper_org.waywallen.kde", "unknown")
                 }
 
                 function screenVendor() {
@@ -250,31 +250,31 @@ WallpaperItem {
                 // Mirrors WaywallenDisplay::ConnState.
                 function connText(st) {
                     switch (st) {
-                    case 0: return "disconnected"
-                    case 1: return "connecting…"
-                    case 2: return "handshaking…"
-                    case 3: return "connected"
-                    case 4: return "error"
+                    case 0: return i18nd("plasma_wallpaper_org.waywallen.kde", "disconnected")
+                    case 1: return i18nd("plasma_wallpaper_org.waywallen.kde", "connecting…")
+                    case 2: return i18nd("plasma_wallpaper_org.waywallen.kde", "handshaking…")
+                    case 3: return i18nd("plasma_wallpaper_org.waywallen.kde", "connected")
+                    case 4: return i18nd("plasma_wallpaper_org.waywallen.kde", "error")
                     }
-                    return "unknown"
+                    return i18nd("plasma_wallpaper_org.waywallen.kde", "unknown")
                 }
 
                 // Mirrors WaywallenDisplay::StreamState.
                 function streamText(st) {
                     switch (st) {
-                    case 0: return "inactive"
-                    case 1: return "active"
+                    case 0: return i18nd("plasma_wallpaper_org.waywallen.kde", "inactive")
+                    case 1: return i18nd("plasma_wallpaper_org.waywallen.kde", "active")
                     }
-                    return "unknown"
+                    return i18nd("plasma_wallpaper_org.waywallen.kde", "unknown")
                 }
 
                 function orientText(o) {
                     switch (o) {
-                    case Qt.PrimaryOrientation:           return "primary"
-                    case Qt.PortraitOrientation:          return "portrait"
-                    case Qt.LandscapeOrientation:         return "landscape"
-                    case Qt.InvertedPortraitOrientation:  return "portrait (inv)"
-                    case Qt.InvertedLandscapeOrientation: return "landscape (inv)"
+                    case Qt.PrimaryOrientation:           return i18nd("plasma_wallpaper_org.waywallen.kde", "primary")
+                    case Qt.PortraitOrientation:          return i18nd("plasma_wallpaper_org.waywallen.kde", "portrait")
+                    case Qt.LandscapeOrientation:         return i18nd("plasma_wallpaper_org.waywallen.kde", "landscape")
+                    case Qt.InvertedPortraitOrientation:  return i18nd("plasma_wallpaper_org.waywallen.kde", "portrait (inv)")
+                    case Qt.InvertedLandscapeOrientation: return i18nd("plasma_wallpaper_org.waywallen.kde", "landscape (inv)")
                     }
                     return "?"
                 }

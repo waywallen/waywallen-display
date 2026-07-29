@@ -1,0 +1,59 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) YEAR THE PACKAGE'S COPYRIGHT HOLDER
+# This file is distributed under the same license as the waywallen-layer-shell package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: waywallen-layer-shell\n"
+"Report-Msgid-Bugs-To: https://github.com/waywallen/waywallen-display/issues\n"
+"POT-Creation-Date: 1970-01-01 00:00+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"Language: \n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: src/bin/layer_shell/main.rs:1515
+msgid ""
+"usage: waywallen-layer-shell [--socket PATH] [--name STR]\n"
+"\n"
+"Environment:\n"
+"WAYWALLEN_SOCKET   fallback UDS path when --socket is omitted\n"
+"WAYLAND_DISPLAY    required — picks the compositor to attach to"
+msgstr ""
+
+#: src/bin/layer_shell/main.rs:1537
+msgid "--socket requires a value"
+msgstr ""
+
+#: src/bin/layer_shell/main.rs:1543
+msgid "--name requires a value"
+msgstr ""
+
+#: src/bin/layer_shell/main.rs:1549
+msgid "unknown argument"
+msgstr ""
+
+#: src/bin/layer_shell/main.rs:1564
+msgid "connect to WAYLAND_DISPLAY — are you running under a Wayland compositor?"
+msgstr ""
+
+#: src/bin/layer_shell/main.rs:1660
+msgid "compositor does not expose wl_compositor"
+msgstr ""
+
+#: src/bin/layer_shell/main.rs:1664
+msgid "compositor does not expose zwlr_layer_shell_v1 — try a different compositor (Hyprland/Sway/KWin/new Mutter)"
+msgstr ""
+
+#: src/bin/layer_shell/main.rs:1669
+msgid "compositor does not expose zwp_linux_dmabuf_v1"
+msgstr ""
+
+#: src/bin/layer_shell/main.rs:1673
+msgid "no wl_output available"
+msgstr ""
