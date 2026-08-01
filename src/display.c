@@ -193,6 +193,12 @@ struct waywallen_display {
      * explicitly via `waywallen_display_set_drm_render_node`. */
     uint32_t hs_drm_render_major;
     uint32_t hs_drm_render_minor;
+    uint32_t presentation_caps;
+
+    /* Presentation state is connection-local and independent of the
+     * buffer/layout generations below. */
+    waywallen_presentation_snapshot_t presentation;
+    bool                              has_presentation;
 
     /* Backend selection. */
     waywallen_backend_t backend;
@@ -253,6 +259,7 @@ struct waywallen_display {
      * the host can safely free `d` from — no more "callback may free
      * me, lib must not touch d after" UAF foot-gun. */
     bool dead_event_pending;
+    bool presentation_reset_pending;
     int  dead_err;
 };
 
@@ -268,6 +275,41 @@ static waywallen_disconnect_reason_t map_daemon_error_code(uint32_t code) {
     }
 }
 
+enum
+{
+    WW_PRESENTATION_BLUR_RADIUS_MIN     = 1,
+    WW_PRESENTATION_BLUR_RADIUS_MAX     = 64,
+    WW_PRESENTATION_BLUR_RADIUS_DEFAULT = 30,
+};
+
+static waywallen_presentation_snapshot_t presentation_reset_snapshot(void) {
+    waywallen_presentation_snapshot_t presentation = { 0 };
+    presentation.config.pause_effect.kind          = WAYWALLEN_PAUSE_EFFECT_KIND_NONE;
+    presentation.config.pause_effect.blur.radius   = WW_PRESENTATION_BLUR_RADIUS_DEFAULT;
+    return presentation;
+}
+
+static bool presentation_snapshot_valid(const waywallen_presentation_snapshot_t* presentation) {
+    if (! presentation) return false;
+    if (presentation->config.generation == 0 || presentation->dynamic_config.generation == 0) {
+        return false;
+    }
+    if (presentation->dynamic_config.config_generation != presentation->config.generation) {
+        return false;
+    }
+    const waywallen_pause_effect_config_t* effect = &presentation->config.pause_effect;
+    if (effect->kind != WAYWALLEN_PAUSE_EFFECT_KIND_NONE &&
+        effect->kind != WAYWALLEN_PAUSE_EFFECT_KIND_BLUR) {
+        return false;
+    }
+    if (effect->blur.radius < WW_PRESENTATION_BLUR_RADIUS_MIN ||
+        effect->blur.radius > WW_PRESENTATION_BLUR_RADIUS_MAX) {
+        return false;
+    }
+    return effect->kind == WAYWALLEN_PAUSE_EFFECT_KIND_BLUR ||
+           ! presentation->dynamic_config.pause_effect.active;
+}
+
 /* Latch the display into DEAD state and queue an `on_disconnected`
  * notification. Does NOT call the callback — that happens via
  * flush_dead_event from a host-facing entry. Idempotent on already-
@@ -275,11 +317,14 @@ static waywallen_disconnect_reason_t map_daemon_error_code(uint32_t code) {
 static void fire_disconnected_r(waywallen_display_t* d, waywallen_disconnect_reason_t reason,
                                 int err, const char* msg) {
     if (d->conn == WW_CONN_DEAD) return;
-    d->conn        = WW_CONN_DEAD;
-    d->bound.phase = WW_STREAM_IDLE;
-    d->hs_state    = WW_HS_IDLE;
-    d->display_id  = 0;
-    d->last_reason = reason;
+    d->conn                       = WW_CONN_DEAD;
+    d->bound.phase                = WW_STREAM_IDLE;
+    d->hs_state                   = WW_HS_IDLE;
+    d->display_id                 = 0;
+    d->presentation_reset_pending = d->has_presentation;
+    d->presentation               = presentation_reset_snapshot();
+    d->has_presentation           = false;
+    d->last_reason                = reason;
     if (msg) {
         size_t n = sizeof(d->last_message) - 1;
         strncpy(d->last_message, msg, n);
@@ -306,13 +351,19 @@ static void fire_disconnected_r(waywallen_display_t* d, waywallen_disconnect_rea
  * must not touch `d` afterwards. */
 static void flush_dead_event(waywallen_display_t* d) {
     if (! d || ! d->dead_event_pending) return;
-    d->dead_event_pending             = false;
-    waywallen_display_callbacks_t cb  = d->cb;
-    int                           err = d->dead_err;
+    d->dead_event_pending                          = false;
+    bool presentation_reset_pending                = d->presentation_reset_pending;
+    d->presentation_reset_pending                  = false;
+    waywallen_display_callbacks_t     cb           = d->cb;
+    int                               err          = d->dead_err;
+    waywallen_presentation_snapshot_t presentation = d->presentation;
     /* Snapshot the message pointer into d's own buffer; the lib's API
      * doc says it stays valid for d's lifetime. The host MAY free d
      * from inside on_disconnected — after that, the buffer is gone. */
     const char* msg = d->last_message;
+    if (presentation_reset_pending && cb.on_presentation_config) {
+        cb.on_presentation_config(cb.user_data, &presentation);
+    }
     if (cb.on_disconnected) {
         cb.on_disconnected(cb.user_data, err, msg);
     }
@@ -738,12 +789,13 @@ waywallen_display_t* waywallen_display_new(const waywallen_display_callbacks_t* 
     if (! cb) return NULL;
     waywallen_display_t* d = (waywallen_display_t*)calloc(1, sizeof(*d));
     if (! d) return NULL;
-    d->cb          = *cb;
-    d->fd          = -1;
-    d->conn        = WW_CONN_DISCONNECTED;
-    d->bound.phase = WW_STREAM_IDLE;
-    d->backend     = WAYWALLEN_BACKEND_NONE;
-    d->hs_state    = WW_HS_IDLE;
+    d->cb           = *cb;
+    d->fd           = -1;
+    d->conn         = WW_CONN_DISCONNECTED;
+    d->bound.phase  = WW_STREAM_IDLE;
+    d->backend      = WAYWALLEN_BACKEND_NONE;
+    d->hs_state     = WW_HS_IDLE;
+    d->presentation = presentation_reset_snapshot();
     /* 0 is a valid fd; shadow_dmabuf_fd "unset" sentinel must be -1. */
     d->bound.textures.shadow_dmabuf_fd = -1;
     ww_codec_recv_state_init(&d->hs_recv);
@@ -974,6 +1026,13 @@ int waywallen_display_set_drm_render_node(waywallen_display_t* d, uint32_t major
     return WAYWALLEN_OK;
 }
 
+int waywallen_display_set_presentation_caps(waywallen_display_t* d, uint32_t flags) {
+    if (! d) return WAYWALLEN_ERR_INVAL;
+    if (d->conn != WW_CONN_DISCONNECTED) return WAYWALLEN_ERR_STATE;
+    d->presentation_caps = flags;
+    return WAYWALLEN_OK;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Connect + handshake                                                */
 /* ------------------------------------------------------------------ */
@@ -1049,15 +1108,16 @@ static int hs_queue_hello(waywallen_display_t* d) {
 static int hs_queue_register(waywallen_display_t* d) {
     ww_req_register_display_t reg;
     memset(&reg, 0, sizeof(reg));
-    reg.name             = d->hs_display_name;
-    reg.instance_id      = d->hs_instance_id;
-    reg.width            = d->hs_display_width;
-    reg.height           = d->hs_display_height;
-    reg.refresh_mhz      = d->hs_display_refresh_mhz;
-    reg.drm_render_major = d->hs_drm_render_major;
-    reg.drm_render_minor = d->hs_drm_render_minor;
-    reg.properties.count = 0;
-    reg.properties.data  = NULL;
+    reg.name                    = d->hs_display_name;
+    reg.instance_id             = d->hs_instance_id;
+    reg.width                   = d->hs_display_width;
+    reg.height                  = d->hs_display_height;
+    reg.refresh_mhz             = d->hs_display_refresh_mhz;
+    reg.drm_render_major        = d->hs_drm_render_major;
+    reg.drm_render_minor        = d->hs_drm_render_minor;
+    reg.properties.count        = 0;
+    reg.properties.data         = NULL;
+    reg.presentation_caps.flags = d->presentation_caps;
     return hs_queue_request(d, WW_REQ_REGISTER_DISPLAY, enc_register, &reg);
 }
 
@@ -1108,6 +1168,8 @@ int waywallen_display_begin_connect(waywallen_display_t* d, const char* socket_p
     d->last_buffer_generation     = 0;
     d->has_last_config_generation = false;
     d->last_config_generation     = 0;
+    d->presentation               = presentation_reset_snapshot();
+    d->has_presentation           = false;
     ww_codec_recv_state_reset(&d->hs_recv);
     d->out_len            = 0;
     d->out_pos            = 0;
@@ -1289,6 +1351,16 @@ static int hs_advance_one(waywallen_display_t* d) {
             return WAYWALLEN_ERR_PROTO;
         }
         d->display_id = accepted.display_id;
+        if (! presentation_snapshot_valid(&accepted.presentation)) {
+            ww_evt_display_accepted_free(&accepted);
+            fire_disconnected_r(d,
+                                WAYWALLEN_DISCONNECT_HANDSHAKE_FAILED,
+                                WAYWALLEN_ERR_PROTO,
+                                "invalid display_accepted presentation snapshot");
+            return WAYWALLEN_ERR_PROTO;
+        }
+        d->presentation     = accepted.presentation;
+        d->has_presentation = true;
         ww_evt_display_accepted_free(&accepted);
         d->conn            = WW_CONN_CONNECTED;
         d->last_reason     = WAYWALLEN_DISCONNECT_NONE;
@@ -1306,6 +1378,9 @@ static int hs_advance_one(waywallen_display_t* d) {
         }
         d->hs_state = WW_HS_READY;
         ww_codec_recv_state_reset(&d->hs_recv);
+        if (d->cb.on_presentation_config) {
+            d->cb.on_presentation_config(d->cb.user_data, &d->presentation);
+        }
         return WAYWALLEN_HS_DONE;
     }
     }
@@ -2065,6 +2140,56 @@ static int handle_set_config(waywallen_display_t* d, const uint8_t* body, size_t
     return WAYWALLEN_OK;
 }
 
+static int handle_set_presentation_config(waywallen_display_t* d, const uint8_t* body,
+                                          size_t body_len) {
+    ww_evt_set_presentation_config_t event;
+    if (ww_evt_set_presentation_config_decode(body, body_len, &event) != WW_OK) {
+        fire_disconnected(d, WAYWALLEN_ERR_PROTO, "decode set_presentation_config");
+        return WAYWALLEN_ERR_PROTO;
+    }
+    bool valid =
+        d->has_presentation && presentation_snapshot_valid(&event.presentation) &&
+        event.presentation.config.generation > d->presentation.config.generation &&
+        event.presentation.dynamic_config.generation > d->presentation.dynamic_config.generation;
+    if (! valid) {
+        ww_evt_set_presentation_config_free(&event);
+        fire_disconnected(d, WAYWALLEN_ERR_PROTO, "invalid presentation config snapshot");
+        return WAYWALLEN_ERR_PROTO;
+    }
+    d->presentation = event.presentation;
+    ww_evt_set_presentation_config_free(&event);
+    if (d->cb.on_presentation_config) {
+        d->cb.on_presentation_config(d->cb.user_data, &d->presentation);
+    }
+    return WAYWALLEN_OK;
+}
+
+static int handle_set_presentation_dynamic_config(waywallen_display_t* d, const uint8_t* body,
+                                                  size_t body_len) {
+    ww_evt_set_presentation_dynamic_config_t event;
+    if (ww_evt_set_presentation_dynamic_config_decode(body, body_len, &event) != WW_OK) {
+        fire_disconnected(d, WAYWALLEN_ERR_PROTO, "decode set_presentation_dynamic_config");
+        return WAYWALLEN_ERR_PROTO;
+    }
+    const waywallen_presentation_dynamic_config_t* dynamic = &event.dynamic_config;
+    bool valid = d->has_presentation &&
+                 dynamic->generation > d->presentation.dynamic_config.generation &&
+                 dynamic->config_generation == d->presentation.config.generation &&
+                 (d->presentation.config.pause_effect.kind == WAYWALLEN_PAUSE_EFFECT_KIND_BLUR ||
+                  ! dynamic->pause_effect.active);
+    if (! valid) {
+        ww_evt_set_presentation_dynamic_config_free(&event);
+        fire_disconnected(d, WAYWALLEN_ERR_PROTO, "invalid presentation dynamic config");
+        return WAYWALLEN_ERR_PROTO;
+    }
+    d->presentation.dynamic_config = *dynamic;
+    ww_evt_set_presentation_dynamic_config_free(&event);
+    if (d->cb.on_presentation_dynamic_config) {
+        d->cb.on_presentation_dynamic_config(d->cb.user_data, &d->presentation.dynamic_config);
+    }
+    return WAYWALLEN_OK;
+}
+
 static int acknowledge_frame_release(waywallen_display_t* d, uint64_t buffer_generation,
                                      uint64_t seq) {
     int rc = waywallen_display_frame_armed(d, buffer_generation, seq);
@@ -2316,6 +2441,14 @@ int waywallen_display_dispatch(waywallen_display_t* d) {
         close_all_fds(fd_buf, n_fds);
         ret = handle_set_config(d, body_buf, body_len);
         break;
+    case WW_EVT_SET_PRESENTATION_CONFIG:
+        close_all_fds(fd_buf, n_fds);
+        ret = handle_set_presentation_config(d, body_buf, body_len);
+        break;
+    case WW_EVT_SET_PRESENTATION_DYNAMIC_CONFIG:
+        close_all_fds(fd_buf, n_fds);
+        ret = handle_set_presentation_dynamic_config(d, body_buf, body_len);
+        break;
     case WW_EVT_FRAME_READY: ret = handle_frame_ready(d, body_buf, body_len, fd_buf, n_fds); break;
     case WW_EVT_UNBIND:
         close_all_fds(fd_buf, n_fds);
@@ -2537,9 +2670,11 @@ void waywallen_display_close(waywallen_display_t* d) {
         ww_vk_destroy_owned(&d->vk_owned);
     }
 #endif
-    d->conn        = WW_CONN_DISCONNECTED;
-    d->bound.phase = WW_STREAM_IDLE;
-    d->hs_state    = WW_HS_IDLE;
+    d->conn             = WW_CONN_DISCONNECTED;
+    d->bound.phase      = WW_STREAM_IDLE;
+    d->hs_state         = WW_HS_IDLE;
+    d->presentation     = presentation_reset_snapshot();
+    d->has_presentation = false;
     ww_codec_recv_state_reset(&d->hs_recv);
     d->out_len = 0;
     d->out_pos = 0;
@@ -2584,6 +2719,14 @@ waywallen_stream_state_t waywallen_display_stream_state(waywallen_display_t* d) 
 uint64_t waywallen_display_get_display_id(waywallen_display_t* d) {
     if (! d) return 0;
     return d->display_id;
+}
+
+int waywallen_display_get_presentation_snapshot(
+    waywallen_display_t* d, waywallen_presentation_snapshot_t* out_presentation) {
+    if (! d || ! out_presentation) return WAYWALLEN_ERR_INVAL;
+    if (! d->has_presentation) return WAYWALLEN_ERR_NOTCONN;
+    *out_presentation = d->presentation;
+    return WAYWALLEN_OK;
 }
 
 waywallen_disconnect_reason_t waywallen_display_last_disconnect_reason(waywallen_display_t* d) {

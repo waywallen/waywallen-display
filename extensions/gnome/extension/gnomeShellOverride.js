@@ -10,6 +10,8 @@ import * as Workspace from 'resource:///org/gnome/shell/ui/workspace.js';
 import * as WorkspaceThumbnail from 'resource:///org/gnome/shell/ui/workspaceThumbnail.js';
 
 import * as Wallpaper from './wallpaper.js';
+import {BlurController} from './blur.js';
+import {PauseEffectKind} from './controlCodec.js';
 
 const APPLICATION_ID = Wallpaper.APPLICATION_ID;
 
@@ -24,6 +26,7 @@ export class GnomeShellOverride {
         // (the handler can fire after the JS context is being torn
         // down). Stale entries are pruned at disable() / on next switch.
         this._wallpaperActors = new Set();
+        this._desktopPresentation = new Map();
     }
 
     enable() {
@@ -34,8 +37,13 @@ export class GnomeShellOverride {
             '_createBackgroundActor',
             originalMethod => function () {
                 const backgroundActor = originalMethod.call(this);
-                this.waywallenActor = new Wallpaper.LiveWallpaper(backgroundActor);
+                const role = this._container === Main.layoutManager._backgroundGroup
+                    ? Wallpaper.WallpaperRole.Desktop
+                    : Wallpaper.WallpaperRole.Other;
+                this.waywallenActor = new Wallpaper.LiveWallpaper(backgroundActor, role);
                 self._wallpaperActors.add(this.waywallenActor);
+                if (role === Wallpaper.WallpaperRole.Desktop)
+                    self._applyPresentationToActor(this.waywallenActor);
                 return backgroundActor;
             });
 
@@ -125,9 +133,14 @@ export class GnomeShellOverride {
 
     _onOverviewPrefsChanged() {
         this._readOverviewPrefs();
-        // Rebuild so the backdrop clones' blur reflects the new state.
-        this._invalidateOverviewClones();
+        for (const entry of this._overviewClones || [])
+            this._applyOverviewBlur(entry.blurController);
         try { this._syncOverviewBackdrop(); } catch (_e) {}
+    }
+
+    _applyOverviewBlur(controller) {
+        const enabled = this._overviewBlur && this._overviewStrength > 0;
+        controller?.setState(enabled, enabled, this._overviewStrength);
     }
 
     disable() {
@@ -138,6 +151,7 @@ export class GnomeShellOverride {
         this._injection.clear();
         const actors = [...this._wallpaperActors];
         this._wallpaperActors.clear();
+        this._desktopPresentation.clear();
         for (const a of actors) {
             // Skip LiveWallpapers GNOME already destroyed (their on_destroy
             // ran and cleaned up); only destroy the still-live ones, so we
@@ -213,6 +227,7 @@ export class GnomeShellOverride {
 
     _invalidateOverviewClones() {
         for (const entry of [...(this._overviewClones || [])]) {
+            entry.blurController?.destroy();
             try { this._overviewGroup?.remove_child(entry.clone); } catch (_e) {}
             try { entry.clone.destroy(); } catch (_e) {}
         }
@@ -224,7 +239,8 @@ export class GnomeShellOverride {
 
         const actors = global.get_window_actors(false);
         const renderers = actors.filter(a =>
-            a?.meta_window?.title?.includes(APPLICATION_ID));
+            a?.meta_window?.title?.includes(APPLICATION_ID) &&
+            Wallpaper.rendererPresentationReady(a));
         const currentSources = new Set(renderers);
         const nMonitors = global.display.get_n_monitors();
 
@@ -236,6 +252,7 @@ export class GnomeShellOverride {
             let entry = this._overviewClones.find(c => c.monitor === m);
             if (!entry || entry.clone.source !== src) {
                 if (entry) {
+                    entry.blurController?.destroy();
                     try { group.remove_child(entry.clone); } catch (_e2) {}
                     try { entry.clone.destroy(); } catch (_e2) {}
                     this._overviewClones = this._overviewClones.filter(c => c !== entry);
@@ -244,25 +261,15 @@ export class GnomeShellOverride {
                     source: src,
                     opacity: 0,
                 });
-                // Optionally blur this backdrop (the overview background
-                // behind/around the workspace previews) so it reads as a
-                // blurred wallpaper, while the previews themselves stay sharp.
-                // Shell.BlurEffect is the same primitive blur-my-shell builds
-                // on; ACTOR mode blurs the clone's own pixels.
-                if (this._overviewBlur && this._overviewStrength > 0) {
-                    try {
-                        clone.add_effect(new Shell.BlurEffect({
-                            mode: Shell.BlurMode.ACTOR,
-                            radius: this._overviewStrength,
-                        }));
-                    } catch (_e) {}
-                }
+                const blurController = new BlurController(
+                    clone, 'waywallen-overview-blur');
+                this._applyOverviewBlur(blurController);
                 group.add_child(clone);
                 clone.ease({
                     opacity: 255, duration: 400,
                     mode: Clutter.AnimationMode.EASE_OUT_QUAD,
                 });
-                entry = {clone, monitor: m};
+                entry = {clone, monitor: m, blurController};
                 this._overviewClones.push(entry);
             }
             const sx = geom.width / src.width;
@@ -274,6 +281,7 @@ export class GnomeShellOverride {
         // prune clones whose renderer disappeared (e.g. it restarted)
         for (const entry of [...this._overviewClones]) {
             if (!currentSources.has(entry.clone.source)) {
+                entry.blurController?.destroy();
                 try { group.remove_child(entry.clone); } catch (_e) {}
                 try { entry.clone.destroy(); } catch (_e) {}
                 this._overviewClones = this._overviewClones.filter(c => c !== entry);
@@ -296,11 +304,82 @@ export class GnomeShellOverride {
                 }
             }
             for (const entry of [...(this._overviewClones || [])]) {
+                entry.blurController?.destroy();
                 try { this._overviewGroup?.remove_child(entry.clone); } catch (_e) {}
                 try { entry.clone.destroy(); } catch (_e) {}
             }
             this._overviewClones = [];
         } catch (_e) {}
+    }
+
+    applyControlFrame(frame) {
+        const key = this._geometryKey(frame.geometry);
+        if (frame.type === 'reset') {
+            this._desktopPresentation.delete(key);
+            this._syncDesktopPresentation(key);
+            return true;
+        }
+
+        if (frame.type === 'connection' || frame.type === 'presentation-config') {
+            const current = this._desktopPresentation.get(key);
+            if (frame.type === 'presentation-config' && !current)
+                return false;
+            if (current &&
+                (frame.presentation.config.generation <= current.config.generation ||
+                 frame.presentation.dynamicConfig.generation <=
+                    current.dynamicConfig.generation))
+                return false;
+            this._desktopPresentation.set(key, frame.presentation);
+            this._syncDesktopPresentation(key);
+            return true;
+        }
+
+        const current = this._desktopPresentation.get(key);
+        const dynamic = frame.dynamicConfig;
+        if (!current || dynamic.configGeneration !== current.config.generation ||
+            dynamic.generation <= current.dynamicConfig.generation ||
+            (current.config.pauseEffect.kind === PauseEffectKind.NONE &&
+             dynamic.pauseEffect.active))
+            return false;
+        current.dynamicConfig = dynamic;
+        this._syncDesktopPresentation(key);
+        return true;
+    }
+
+    resetPresentation() {
+        this._desktopPresentation.clear();
+        for (const actor of this._wallpaperActors) {
+            if (actor.role === Wallpaper.WallpaperRole.Desktop)
+                actor.setPresentation(null);
+        }
+    }
+
+    _geometryKey(geometry) {
+        return `${geometry.x}:${geometry.y}:${geometry.width}:${geometry.height}`;
+    }
+
+    _actorGeometryKey(actor) {
+        const geometry = global.display.get_monitor_geometry(actor.monitorIndex);
+        return this._geometryKey(geometry);
+    }
+
+    _applyPresentationToActor(actor) {
+        let presentation = null;
+        try {
+            presentation = this._desktopPresentation.get(this._actorGeometryKey(actor)) ?? null;
+        } catch (_e) {}
+        actor.setPresentation(presentation);
+    }
+
+    _syncDesktopPresentation(key) {
+        for (const actor of this._wallpaperActors) {
+            if (actor.role !== Wallpaper.WallpaperRole.Desktop)
+                continue;
+            try {
+                if (this._actorGeometryKey(actor) === key)
+                    this._applyPresentationToActor(actor);
+            } catch (_e) {}
+        }
     }
 
     _reloadBackgrounds() {

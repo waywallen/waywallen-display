@@ -54,6 +54,8 @@ set(_ext_files
     ${CMAKE_CURRENT_BINARY_DIR}/metadata.json
     extension/extension.js
     extension/launcher.js
+    extension/controlCodec.js
+    extension/blur.js
     extension/gnomeShellOverride.js
     extension/wallpaper.js
     extension/windowManager.js

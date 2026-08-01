@@ -465,6 +465,18 @@ void WaywallenDisplay::c_on_frame_ready(void* ud, const waywallen_frame_t* f) {
     self->update();
 }
 
+void WaywallenDisplay::c_on_presentation_config(
+    void* ud, const waywallen_presentation_snapshot_t* presentation) {
+    auto* self = static_cast<WaywallenDisplay*>(ud);
+    self->applyPresentationSnapshot(*presentation);
+}
+
+void WaywallenDisplay::c_on_presentation_dynamic_config(
+    void* ud, const waywallen_presentation_dynamic_config_t* config) {
+    auto* self = static_cast<WaywallenDisplay*>(ud);
+    self->applyPresentationDynamicConfig(*config);
+}
+
 void WaywallenDisplay::c_on_disconnected(void* ud, int err, const char* msg) {
     auto* self    = static_cast<WaywallenDisplay*>(ud);
     auto* display = self->displayHandle();
@@ -586,6 +598,7 @@ void WaywallenDisplay::cleanup() {
     }
     m_textureCount  = 0;
     m_activeBackend = BackendNone;
+    resetPresentation();
 
     if (m_displayId != 0) {
         m_displayId = 0;
@@ -608,6 +621,57 @@ void WaywallenDisplay::publishPresentationCommit(qulonglong serial, const QColor
     setPresentedClearColor(clearColor);
     m_contentRevision++;
     emit contentRevisionChanged();
+}
+
+void WaywallenDisplay::applyPresentationSnapshot(
+    const waywallen_presentation_snapshot_t& presentation) {
+    const auto kind = static_cast<PauseEffectKind>(presentation.config.pause_effect.kind);
+    const bool changed =
+        m_pauseEffectKind != kind ||
+        m_blurRadius != static_cast<int>(presentation.config.pause_effect.blur.radius) ||
+        m_pauseEffectActive != presentation.dynamic_config.pause_effect.active ||
+        m_presentationConfigGeneration != presentation.config.generation ||
+        m_presentationDynamicGeneration != presentation.dynamic_config.generation;
+    m_pauseEffectKind              = kind;
+    m_blurRadius                   = static_cast<int>(presentation.config.pause_effect.blur.radius);
+    m_pauseEffectActive            = presentation.dynamic_config.pause_effect.active;
+    m_presentationConfigGeneration = presentation.config.generation;
+    m_presentationDynamicGeneration = presentation.dynamic_config.generation;
+    qCInfo(lcWD,
+           "presentation config: config=%llu dynamic=%llu pause-effect kind=%d active=%d "
+           "radius=%d",
+           m_presentationConfigGeneration,
+           m_presentationDynamicGeneration,
+           int(m_pauseEffectKind),
+           m_pauseEffectActive,
+           m_blurRadius);
+    if (changed) emit presentationChanged();
+}
+
+void WaywallenDisplay::applyPresentationDynamicConfig(
+    const waywallen_presentation_dynamic_config_t& config) {
+    const bool changed              = m_pauseEffectActive != config.pause_effect.active ||
+                                      m_presentationDynamicGeneration != config.generation;
+    m_pauseEffectActive             = config.pause_effect.active;
+    m_presentationDynamicGeneration = config.generation;
+    qCDebug(lcWD,
+            "presentation dynamic config: config=%llu dynamic=%llu pause-effect active=%d",
+            qulonglong(config.config_generation),
+            qulonglong(config.generation),
+            config.pause_effect.active);
+    if (changed) emit presentationChanged();
+}
+
+void WaywallenDisplay::resetPresentation() {
+    const bool changed              = m_pauseEffectKind != NonePauseEffect || m_pauseEffectActive ||
+                                      m_blurRadius != 30 || m_presentationConfigGeneration != 0 ||
+                                      m_presentationDynamicGeneration != 0;
+    m_pauseEffectKind               = NonePauseEffect;
+    m_blurRadius                    = 30;
+    m_pauseEffectActive             = false;
+    m_presentationConfigGeneration  = 0;
+    m_presentationDynamicGeneration = 0;
+    if (changed) emit presentationChanged();
 }
 
 void WaywallenDisplay::commitPresentedContent(uint64_t generation, int width, int height,
@@ -855,6 +919,15 @@ void WaywallenDisplay::setWindowStateFlags(quint32 flags) {
         m_windowStateFlagsDirty = true;
     }
     if (changed) emit windowStateFlagsChanged();
+}
+
+void WaywallenDisplay::setPresentationCapabilities(quint32 capabilities) {
+    if (m_presentationCapabilities == capabilities) return;
+    if (displayHandle()) {
+        qCWarning(lcWD, "presentation capabilities apply on the next connection");
+    }
+    m_presentationCapabilities = capabilities;
+    emit presentationCapabilitiesChanged();
 }
 
 void WaywallenDisplay::setStreamState(StreamState s) {
@@ -1163,12 +1236,14 @@ void WaywallenDisplay::tryConnect() {
     setConnState(Connecting);
 
     waywallen_display_callbacks_t cb {};
-    cb.on_textures_ready     = c_on_textures_ready;
-    cb.on_textures_releasing = c_on_textures_releasing;
-    cb.on_config             = c_on_config;
-    cb.on_frame_ready        = c_on_frame_ready;
-    cb.on_disconnected       = c_on_disconnected;
-    cb.user_data             = this;
+    cb.on_textures_ready              = c_on_textures_ready;
+    cb.on_textures_releasing          = c_on_textures_releasing;
+    cb.on_config                      = c_on_config;
+    cb.on_frame_ready                 = c_on_frame_ready;
+    cb.on_presentation_config         = c_on_presentation_config;
+    cb.on_presentation_dynamic_config = c_on_presentation_dynamic_config;
+    cb.on_disconnected                = c_on_disconnected;
+    cb.user_data                      = this;
 
     auto resources     = std::make_shared<RenderSessionResources>();
     resources->display = waywallen_display_new(&cb);
@@ -1184,6 +1259,17 @@ void WaywallenDisplay::tryConnect() {
         m_renderResources = resources;
     }
     auto* display = resources->display;
+
+    if (waywallen_display_set_presentation_caps(display, m_presentationCapabilities) !=
+        WAYWALLEN_OK) {
+        qCWarning(lcWD, "failed to set presentation capabilities");
+        waywallen_display_free(display);
+        resources->display = nullptr;
+        QMutexLocker lock(&m_resourcesMutex);
+        if (m_renderResources == resources) m_renderResources.reset();
+        setConnState(Error);
+        return;
+    }
 
     // cleanup() removed the event filter on the prior session's
     // teardown; reinstall it now so mouse events resume forwarding

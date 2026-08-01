@@ -2,6 +2,8 @@
 
 #include "PresentationState.hpp"
 
+#include <waywallen_display_protocol_types.h>
+
 #include <QColor>
 #include <QMutex>
 #include <QPointer>
@@ -27,7 +29,6 @@ struct waywallen_config;
 typedef struct waywallen_config waywallen_config_t;
 struct waywallen_frame;
 typedef struct waywallen_frame waywallen_frame_t;
-
 class RenderSessionResources;
 
 class WaywallenDisplay : public QQuickItem {
@@ -61,6 +62,15 @@ class WaywallenDisplay : public QQuickItem {
     // `window_state` request; the daemon owns the autopause policy.
     Q_PROPERTY(quint32 windowStateFlags READ windowStateFlags WRITE setWindowStateFlags NOTIFY
                    windowStateFlagsChanged)
+    Q_PROPERTY(quint32 presentationCapabilities READ presentationCapabilities WRITE
+                   setPresentationCapabilities NOTIFY presentationCapabilitiesChanged)
+    Q_PROPERTY(PauseEffectKind pauseEffectKind READ pauseEffectKind NOTIFY presentationChanged)
+    Q_PROPERTY(int blurRadius READ blurRadius NOTIFY presentationChanged)
+    Q_PROPERTY(bool pauseEffectActive READ pauseEffectActive NOTIFY presentationChanged)
+    Q_PROPERTY(qulonglong presentationConfigGeneration READ presentationConfigGeneration NOTIFY
+                   presentationChanged)
+    Q_PROPERTY(qulonglong presentationDynamicGeneration READ presentationDynamicGeneration NOTIFY
+                   presentationChanged)
 
 public:
     enum ConnState
@@ -72,6 +82,13 @@ public:
         Error,
     };
     Q_ENUM(ConnState)
+
+    enum PauseEffectKind
+    {
+        NonePauseEffect = WAYWALLEN_PAUSE_EFFECT_KIND_NONE,
+        BlurPauseEffect = WAYWALLEN_PAUSE_EFFECT_KIND_BLUR,
+    };
+    Q_ENUM(PauseEffectKind)
 
     enum StreamState
     {
@@ -94,6 +111,12 @@ public:
         DaemonGone         = 7,
     };
     Q_ENUM(DisconnectReason)
+
+    enum PresentationCapability
+    {
+        BlurCapability = 1u << 0,
+    };
+    Q_ENUM(PresentationCapability)
 
     explicit WaywallenDisplay(QQuickItem* parent = nullptr);
     ~WaywallenDisplay() override;
@@ -135,6 +158,15 @@ public:
     quint32 windowStateFlags() const { return m_windowStateFlags; }
     void    setWindowStateFlags(quint32 flags);
 
+    quint32 presentationCapabilities() const { return m_presentationCapabilities; }
+    void    setPresentationCapabilities(quint32 capabilities);
+
+    PauseEffectKind pauseEffectKind() const { return m_pauseEffectKind; }
+    int             blurRadius() const { return m_blurRadius; }
+    bool            pauseEffectActive() const { return m_pauseEffectActive; }
+    qulonglong      presentationConfigGeneration() const { return m_presentationConfigGeneration; }
+    qulonglong presentationDynamicGeneration() const { return m_presentationDynamicGeneration; }
+
     // Attempt to connect now. No-op when already Connected. Triggered
     // automatically by the DBus NameOwnerChanged / Daemon Ready signals
     // (see setupDBusWatcher); also exposed for tests and manual cues.
@@ -160,6 +192,8 @@ signals:
     void autoReconnectChanged();
     void mouseForwardEnabledChanged();
     void windowStateFlagsChanged();
+    void presentationCapabilitiesChanged();
+    void presentationChanged();
 
 protected:
     QSGNode* updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData* data) override;
@@ -188,13 +222,16 @@ private:
     void                                    setupDBusWatcher();
     void                                    flushPendingRelease();
     void                                    handleDisconnect(int errCode, const char* msg);
-    void                                    setConnState(ConnState s);
-    void                                    setStreamState(StreamState s);
-    QString                                 screenIdentityKey() const;
-    QString                                 effectiveInstanceId() const;
-    uint32_t                                screenRefreshMhz() const;
-    void                                    reportFrameArmed(uint64_t generation, uint64_t seq);
-    void signalFrameRelease(int fd, uint64_t generation, uint64_t seq, const char* context);
+    void     applyPresentationSnapshot(const waywallen_presentation_snapshot_t& presentation);
+    void     applyPresentationDynamicConfig(const waywallen_presentation_dynamic_config_t& config);
+    void     resetPresentation();
+    void     setConnState(ConnState s);
+    void     setStreamState(StreamState s);
+    QString  screenIdentityKey() const;
+    QString  effectiveInstanceId() const;
+    uint32_t screenRefreshMhz() const;
+    void     reportFrameArmed(uint64_t generation, uint64_t seq);
+    void     signalFrameRelease(int fd, uint64_t generation, uint64_t seq, const char* context);
     /* Probe wants_writable and toggle m_notifierWrite::setEnabled.
      * Call after any post-handshake send that may have left bytes
      * queued in the lib's outbox (update_size, pointer events). */
@@ -229,6 +266,11 @@ private:
     static void c_on_textures_releasing(void* ud, const waywallen_textures_t* t);
     static void c_on_config(void* ud, const waywallen_config_t* c);
     static void c_on_frame_ready(void* ud, const waywallen_frame_t* f);
+    static void c_on_presentation_config(void*                                    ud,
+                                         const waywallen_presentation_snapshot_t* presentation);
+    static void
+    c_on_presentation_dynamic_config(void*                                          ud,
+                                     const waywallen_presentation_dynamic_config_t* config);
     static void c_on_disconnected(void* ud, int err, const char* msg);
 
     // Properties.
@@ -252,8 +294,14 @@ private:
     // connection is up; held until then so the post-handshake state
     // matches whatever the WindowModel last computed (replayed from
     // setConnState(Connected)).
-    quint32 m_windowStateFlags { 0 };
-    bool    m_windowStateFlagsDirty { false };
+    quint32         m_windowStateFlags { 0 };
+    bool            m_windowStateFlagsDirty { false };
+    quint32         m_presentationCapabilities { 0 };
+    PauseEffectKind m_pauseEffectKind { NonePauseEffect };
+    int             m_blurRadius { 30 };
+    bool            m_pauseEffectActive { false };
+    qulonglong      m_presentationConfigGeneration { 0 };
+    qulonglong      m_presentationDynamicGeneration { 0 };
 
     mutable QMutex                          m_resourcesMutex;
     std::shared_ptr<RenderSessionResources> m_renderResources;

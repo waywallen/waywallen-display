@@ -9,6 +9,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import Waywallen.Display
+import "components" as Example
 
 ApplicationWindow {
     id: root
@@ -18,12 +19,10 @@ ApplicationWindow {
     title: "waywallen — controls"
     color: "#1e1e2e"
 
-    WaywallenDisplay {
+    Example.WaywallenSurface {
         id: wallpaper
         anchors.fill: parent
         displayName: nameField.text
-        displayWidth: root.width
-        displayHeight: root.height
         autoReconnect: reconnectToggle.checked
     }
 

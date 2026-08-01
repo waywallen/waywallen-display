@@ -1187,6 +1187,8 @@ fn run_uds_session(sock: &Path, binding: &Arc<OutputBinding>) -> Result<()> {
         on_textures_releasing: Some(on_textures_releasing),
         on_config: Some(on_config),
         on_frame_ready: Some(on_frame_ready),
+        on_presentation_config: None,
+        on_presentation_dynamic_config: None,
         on_disconnected: Some(on_disconnected),
         user_data: Arc::as_ptr(binding) as *mut c_void,
     };

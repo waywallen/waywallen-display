@@ -59,16 +59,19 @@ struct test_state {
     int on_textures_releasing_count;
     int on_config_count;
     int on_frame_ready_count;
+    int on_presentation_config_count;
+    int on_presentation_dynamic_config_count;
 
     int  last_disconnect_code;
     char last_disconnect_msg[256];
 
-    uint64_t last_textures_buffer_generation;
-    uint64_t last_config_buffer_generation;
-    uint64_t last_config_generation;
-    uint64_t last_frame_buffer_generation;
-    uint64_t last_armed_buffer_generation;
-    uint64_t last_armed_seq;
+    uint64_t                          last_textures_buffer_generation;
+    uint64_t                          last_config_buffer_generation;
+    uint64_t                          last_config_generation;
+    uint64_t                          last_frame_buffer_generation;
+    uint64_t                          last_armed_buffer_generation;
+    uint64_t                          last_armed_seq;
+    waywallen_presentation_snapshot_t last_presentation;
 
     /* Populated by handler_full_handshake_capture_caps after decoding
      * the client's consumer_caps request. */
@@ -76,6 +79,7 @@ struct test_state {
     uint32_t consumer_caps_mem_hints;
     uint32_t consumer_caps_sync_caps;
     uint32_t consumer_caps_color_caps;
+    uint32_t presentation_caps;
 };
 
 static void cb_textures_ready(void* ud, const waywallen_textures_t* t) {
@@ -100,6 +104,18 @@ static void cb_frame_ready(void* ud, const waywallen_frame_t* f) {
     ts->last_frame_buffer_generation = f->buffer_generation;
     if (f->release_syncobj_fd >= 0) close(f->release_syncobj_fd);
 }
+static void cb_presentation_config(void*                                    ud,
+                                   const waywallen_presentation_snapshot_t* presentation) {
+    struct test_state* ts = (struct test_state*)ud;
+    ts->on_presentation_config_count++;
+    ts->last_presentation = *presentation;
+}
+static void cb_presentation_dynamic_config(void*                                          ud,
+                                           const waywallen_presentation_dynamic_config_t* config) {
+    struct test_state* ts = (struct test_state*)ud;
+    ts->on_presentation_dynamic_config_count++;
+    ts->last_presentation.dynamic_config = *config;
+}
 static void cb_disconnected(void* ud, int code, const char* msg) {
     struct test_state* ts = (struct test_state*)ud;
     ts->on_disconnected_count++;
@@ -112,13 +128,27 @@ static void cb_disconnected(void* ud, int code, const char* msg) {
 }
 
 static const waywallen_display_callbacks_t kCallbacks = {
-    .on_textures_ready     = cb_textures_ready,
-    .on_textures_releasing = cb_textures_releasing,
-    .on_config             = cb_config,
-    .on_frame_ready        = cb_frame_ready,
-    .on_disconnected       = cb_disconnected,
-    .user_data             = NULL,
+    .on_textures_ready              = cb_textures_ready,
+    .on_textures_releasing          = cb_textures_releasing,
+    .on_config                      = cb_config,
+    .on_frame_ready                 = cb_frame_ready,
+    .on_presentation_config         = cb_presentation_config,
+    .on_presentation_dynamic_config = cb_presentation_dynamic_config,
+    .on_disconnected                = cb_disconnected,
+    .user_data                      = NULL,
 };
+
+static ww_evt_display_accepted_t accepted_event(uint64_t display_id) {
+    ww_evt_display_accepted_t accepted                       = { 0 };
+    accepted.display_id                                      = display_id;
+    accepted.presentation.config.generation                  = 1;
+    accepted.presentation.config.pause_effect.kind           = WAYWALLEN_PAUSE_EFFECT_KIND_NONE;
+    accepted.presentation.config.pause_effect.blur.radius    = 30;
+    accepted.presentation.dynamic_config.generation          = 1;
+    accepted.presentation.dynamic_config.config_generation   = 1;
+    accepted.presentation.dynamic_config.pause_effect.active = false;
+    return accepted;
+}
 
 static void ts_init(struct test_state* ts) {
     memset(ts, 0, sizeof(*ts));
@@ -216,6 +246,8 @@ static int drive_handshake(waywallen_display_t* d, int timeout_ms) {
     }
 }
 
+static int dispatch_next_event(waywallen_display_t* d);
+
 /* ------------------------------------------------------------------ */
 /*  Mock server handlers                                               */
 /* ------------------------------------------------------------------ */
@@ -259,10 +291,11 @@ static int handler_full_handshake(int client_fd, struct test_state* ts) {
     if (rc != 0 || op != WW_REQ_REGISTER_DISPLAY) return -1;
     ww_req_register_display_t reg;
     if (ww_req_register_display_decode(body_buf, body_len, &reg) != WW_OK) return -1;
+    ts->presentation_caps = reg.presentation_caps.flags;
     ww_req_register_display_free(&reg);
 
     /* Send DISPLAY_ACCEPTED. */
-    ww_evt_display_accepted_t accepted = { .display_id = 42 };
+    ww_evt_display_accepted_t accepted = accepted_event(42);
     ww_buf_init(&out);
     if (ww_evt_display_accepted_encode(&accepted, &out) != WW_OK) {
         ww_buf_free(&out);
@@ -320,9 +353,10 @@ static int complete_handshake_capture_caps(int client_fd, struct test_state* ts)
     if (rc != 0 || op != WW_REQ_REGISTER_DISPLAY) return -1;
     ww_req_register_display_t reg;
     if (ww_req_register_display_decode(body_buf, body_len, &reg) != WW_OK) return -1;
+    ts->presentation_caps = reg.presentation_caps.flags;
     ww_req_register_display_free(&reg);
 
-    ww_evt_display_accepted_t accepted = { .display_id = 99 };
+    ww_evt_display_accepted_t accepted = accepted_event(99);
     ww_buf_init(&out);
     if (ww_evt_display_accepted_encode(&accepted, &out) != WW_OK) {
         ww_buf_free(&out);
@@ -420,6 +454,44 @@ static int send_set_config(int client_fd, uint64_t config_generation) {
     int rc = ww_evt_set_config_encode(&config, &out);
     if (rc == WW_OK) {
         rc = ww_codec_send_event(client_fd, WW_EVT_SET_CONFIG, out.data, out.len, NULL, 0);
+    }
+    ww_buf_free(&out);
+    return rc;
+}
+
+static int send_presentation_config(int client_fd, uint64_t config_generation,
+                                    uint64_t dynamic_generation, waywallen_pause_effect_kind_t kind,
+                                    uint32_t radius, bool active) {
+    ww_evt_set_presentation_config_t event                = { 0 };
+    event.presentation.config.generation                  = config_generation;
+    event.presentation.config.pause_effect.kind           = kind;
+    event.presentation.config.pause_effect.blur.radius    = radius;
+    event.presentation.dynamic_config.generation          = dynamic_generation;
+    event.presentation.dynamic_config.config_generation   = config_generation;
+    event.presentation.dynamic_config.pause_effect.active = active;
+    ww_buf_t out;
+    ww_buf_init(&out);
+    int rc = ww_evt_set_presentation_config_encode(&event, &out);
+    if (rc == WW_OK) {
+        rc = ww_codec_send_event(
+            client_fd, WW_EVT_SET_PRESENTATION_CONFIG, out.data, out.len, NULL, 0);
+    }
+    ww_buf_free(&out);
+    return rc;
+}
+
+static int send_presentation_dynamic_config(int client_fd, uint64_t dynamic_generation,
+                                            uint64_t config_generation, bool active) {
+    ww_evt_set_presentation_dynamic_config_t event = { 0 };
+    event.dynamic_config.generation                = dynamic_generation;
+    event.dynamic_config.config_generation         = config_generation;
+    event.dynamic_config.pause_effect.active       = active;
+    ww_buf_t out;
+    ww_buf_init(&out);
+    int rc = ww_evt_set_presentation_dynamic_config_encode(&event, &out);
+    if (rc == WW_OK) {
+        rc = ww_codec_send_event(
+            client_fd, WW_EVT_SET_PRESENTATION_DYNAMIC_CONFIG, out.data, out.len, NULL, 0);
     }
     ww_buf_free(&out);
     return rc;
@@ -538,6 +610,38 @@ static int handler_bind_generation_one(int client_fd, struct test_state* ts) {
     return 0;
 }
 
+static int handler_presentation_updates(int client_fd, struct test_state* ts) {
+    if (complete_handshake_capture_caps(client_fd, ts) != 0) return -1;
+    if (send_presentation_config(client_fd, 2, 2, WAYWALLEN_PAUSE_EFFECT_KIND_BLUR, 40, true) != 0)
+        return -1;
+    if (send_presentation_dynamic_config(client_fd, 3, 2, false) != 0) return -1;
+    sleep_ms(50);
+    return 0;
+}
+
+static int handler_cross_generation_dynamic(int client_fd, struct test_state* ts) {
+    if (complete_handshake_capture_caps(client_fd, ts) != 0) return -1;
+    if (send_presentation_dynamic_config(client_fd, 2, 99, false) != 0) return -1;
+    sleep_ms(50);
+    return 0;
+}
+
+static int handler_invalid_presentation_radius(int client_fd, struct test_state* ts) {
+    if (complete_handshake_capture_caps(client_fd, ts) != 0) return -1;
+    if (send_presentation_config(client_fd, 2, 2, WAYWALLEN_PAUSE_EFFECT_KIND_BLUR, 65, true) != 0)
+        return -1;
+    sleep_ms(50);
+    return 0;
+}
+
+static int handler_unknown_pause_effect_kind(int client_fd, struct test_state* ts) {
+    if (complete_handshake_capture_caps(client_fd, ts) != 0) return -1;
+    if (send_presentation_config(client_fd, 2, 2, (waywallen_pause_effect_kind_t)7, 30, false) != 0)
+        return -1;
+    sleep_ms(50);
+    return 0;
+}
+
 /* Recv hello then send welcome in two writes (header bytes 0..1, then
  * 2..3+body) with a small pause. Forces the client's recv state machine
  * to handle a partial header. */
@@ -602,7 +706,7 @@ static int handler_partial_welcome(int client_fd, struct test_state* ts) {
     rc = ww_codec_recv_request(
         client_fd, &op, body_buf, WW_CODEC_MAX_BODY_BYTES, &body_len, fds, 4, &n_fds);
     if (rc != 0 || op != WW_REQ_REGISTER_DISPLAY) return -1;
-    ww_evt_display_accepted_t accepted = { .display_id = 7 };
+    ww_evt_display_accepted_t accepted = accepted_event(7);
     ww_buf_t                  out;
     ww_buf_init(&out);
     if (ww_evt_display_accepted_encode(&accepted, &out) != WW_OK) {
@@ -727,20 +831,125 @@ static void test_full_handshake_via_async_api(void) {
     pthread_t srv = spawn_server(&ts, handler_full_handshake);
 
     waywallen_display_t* d = make_client(&ts);
-    int                  rc =
+    assert(waywallen_display_set_presentation_caps(d, WAYWALLEN_PRESENTATION_CAP_BLUR) ==
+           WAYWALLEN_OK);
+    int rc =
         waywallen_display_begin_connect(d, ts.sock_path, "test-display", NULL, 1920, 1080, 60000);
     assert(rc == WAYWALLEN_OK);
+    assert(waywallen_display_set_presentation_caps(d, 0) == WAYWALLEN_ERR_STATE);
     rc = drive_handshake(d, 2000);
     assert(rc == WAYWALLEN_OK);
     assert(waywallen_display_handshake_state(d) == WAYWALLEN_HS_READY);
     assert(waywallen_display_conn_state(d) == WAYWALLEN_CONN_CONNECTED);
     assert(ts.on_disconnected_count == 0);
+    assert(ts.presentation_caps == WAYWALLEN_PRESENTATION_CAP_BLUR);
+    assert(ts.on_presentation_config_count == 1);
+    waywallen_presentation_snapshot_t presentation;
+    assert(waywallen_display_get_presentation_snapshot(d, &presentation) == WAYWALLEN_OK);
+    assert(presentation.config.generation == 1);
+    assert(presentation.config.pause_effect.kind == WAYWALLEN_PAUSE_EFFECT_KIND_NONE);
 
     waywallen_display_close(d);
     waywallen_display_free(d);
     pthread_join(srv, NULL);
     ts_teardown(&ts);
     printf("  ok test_full_handshake_via_async_api\n");
+}
+
+static void test_presentation_snapshot_updates_and_disconnect_reset(void) {
+    struct test_state ts;
+    ts_init(&ts);
+    pthread_t srv = spawn_server(&ts, handler_presentation_updates);
+
+    waywallen_display_t* d = make_client(&ts);
+    assert(waywallen_display_begin_connect(
+               d, ts.sock_path, "test-display", NULL, 1920, 1080, 60000) == WAYWALLEN_OK);
+    assert(drive_handshake(d, 2000) == WAYWALLEN_OK);
+    assert(ts.on_presentation_config_count == 1);
+
+    assert(dispatch_next_event(d) == WAYWALLEN_OK);
+    assert(ts.on_presentation_config_count == 2);
+    assert(ts.last_presentation.config.generation == 2);
+    assert(ts.last_presentation.config.pause_effect.kind == WAYWALLEN_PAUSE_EFFECT_KIND_BLUR);
+    assert(ts.last_presentation.config.pause_effect.blur.radius == 40);
+    assert(ts.last_presentation.dynamic_config.pause_effect.active);
+
+    assert(dispatch_next_event(d) == WAYWALLEN_OK);
+    assert(ts.on_presentation_dynamic_config_count == 1);
+    assert(ts.last_presentation.dynamic_config.generation == 3);
+    assert(! ts.last_presentation.dynamic_config.pause_effect.active);
+
+    pthread_join(srv, NULL);
+    assert(dispatch_next_event(d) == WAYWALLEN_ERR_NOTCONN);
+    assert(ts.on_presentation_config_count == 3);
+    assert(ts.last_presentation.config.pause_effect.kind == WAYWALLEN_PAUSE_EFFECT_KIND_NONE);
+    assert(! ts.last_presentation.dynamic_config.pause_effect.active);
+    assert(waywallen_display_get_presentation_snapshot(d, &ts.last_presentation) ==
+           WAYWALLEN_ERR_NOTCONN);
+
+    waywallen_display_free(d);
+    ts_teardown(&ts);
+    printf("  ok test_presentation_snapshot_updates_and_disconnect_reset\n");
+}
+
+static void test_cross_generation_dynamic_is_protocol_error(void) {
+    struct test_state ts;
+    ts_init(&ts);
+    pthread_t srv = spawn_server(&ts, handler_cross_generation_dynamic);
+
+    waywallen_display_t* d = make_client(&ts);
+    assert(waywallen_display_begin_connect(
+               d, ts.sock_path, "test-display", NULL, 1920, 1080, 60000) == WAYWALLEN_OK);
+    assert(drive_handshake(d, 2000) == WAYWALLEN_OK);
+    assert(dispatch_next_event(d) == WAYWALLEN_ERR_PROTO);
+    assert(ts.on_presentation_dynamic_config_count == 0);
+    assert(ts.on_disconnected_count == 1);
+    assert(strcmp(ts.last_disconnect_msg, "invalid presentation dynamic config") == 0);
+
+    waywallen_display_free(d);
+    pthread_join(srv, NULL);
+    ts_teardown(&ts);
+    printf("  ok test_cross_generation_dynamic_is_protocol_error\n");
+}
+
+static void test_invalid_presentation_radius_is_protocol_error(void) {
+    struct test_state ts;
+    ts_init(&ts);
+    pthread_t srv = spawn_server(&ts, handler_invalid_presentation_radius);
+
+    waywallen_display_t* d = make_client(&ts);
+    assert(waywallen_display_begin_connect(
+               d, ts.sock_path, "test-display", NULL, 1920, 1080, 60000) == WAYWALLEN_OK);
+    assert(drive_handshake(d, 2000) == WAYWALLEN_OK);
+    assert(dispatch_next_event(d) == WAYWALLEN_ERR_PROTO);
+    assert(ts.on_presentation_config_count == 2);
+    assert(ts.last_presentation.config.pause_effect.kind == WAYWALLEN_PAUSE_EFFECT_KIND_NONE);
+    assert(ts.on_disconnected_count == 1);
+    assert(strcmp(ts.last_disconnect_msg, "invalid presentation config snapshot") == 0);
+
+    waywallen_display_free(d);
+    pthread_join(srv, NULL);
+    ts_teardown(&ts);
+    printf("  ok test_invalid_presentation_radius_is_protocol_error\n");
+}
+
+static void test_unknown_pause_effect_kind_is_protocol_error(void) {
+    struct test_state ts;
+    ts_init(&ts);
+    pthread_t srv = spawn_server(&ts, handler_unknown_pause_effect_kind);
+
+    waywallen_display_t* d = make_client(&ts);
+    assert(waywallen_display_begin_connect(
+               d, ts.sock_path, "test-display", NULL, 1920, 1080, 60000) == WAYWALLEN_OK);
+    assert(drive_handshake(d, 2000) == WAYWALLEN_OK);
+    assert(dispatch_next_event(d) == WAYWALLEN_ERR_PROTO);
+    assert(ts.on_disconnected_count == 1);
+    assert(strcmp(ts.last_disconnect_msg, "decode set_presentation_config") == 0);
+
+    waywallen_display_free(d);
+    pthread_join(srv, NULL);
+    ts_teardown(&ts);
+    printf("  ok test_unknown_pause_effect_kind_is_protocol_error\n");
 }
 
 /* No backend bound → consumer_caps probe falls through to the
@@ -1102,6 +1311,10 @@ int main(void) {
     test_legacy_blocking_connect();
     test_begin_connect_immediate();
     test_full_handshake_via_async_api();
+    test_presentation_snapshot_updates_and_disconnect_reset();
+    test_cross_generation_dynamic_is_protocol_error();
+    test_invalid_presentation_radius_is_protocol_error();
+    test_unknown_pause_effect_kind_is_protocol_error();
     test_consumer_caps_signals_linear_only_when_no_backend();
     test_partial_welcome();
     test_server_closes_during_welcome_wait();

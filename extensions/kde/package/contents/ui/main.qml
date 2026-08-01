@@ -176,6 +176,12 @@ WallpaperItem {
                           + "  " + i18nd("plasma_wallpaper_org.waywallen.kde", "stream:") + " " + streamText(d.streamState)
                     s += "\n" + i18nd("plasma_wallpaper_org.waywallen.kde", "frames:") + " " + d.framesReceived
                     s += "\n" + i18nd("plasma_wallpaper_org.waywallen.kde", "clear:") + "  " + d.clearColor.toString()
+                    s += "\n  pause-effect: cfg=" + d.presentationConfigGeneration
+                          + " dyn=" + d.presentationDynamicGeneration
+                          + " kind=" + d.pauseEffectKind
+                          + " active=" + d.pauseEffectActive
+                          + " loaded=" + d.blurLoaded
+                          + " radius=" + d.blurRadius
                     s += "\n" + i18nd("plasma_wallpaper_org.waywallen.kde", "windows:") + " " + windowsText()
                     if (d.lastDisconnectReason !== 0) {
                         s += "\n" + i18nd("plasma_wallpaper_org.waywallen.kde", "reason:") + " " + reasonText(d.lastDisconnectReason)

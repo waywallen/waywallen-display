@@ -6,6 +6,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -85,6 +86,51 @@ typedef struct ww_buf {
 #define WW_ERR_UNKNOWN_OPCODE  (-5)
 #define WW_ERR_NOMEM           (-6)
 #define WW_ERR_OVERFLOW        (-7)   /* frame bigger than u16 can address */
+#define WW_ERR_BAD_BOOL        (-8)   /* boolean is not canonical 0/1 */
+#define WW_ERR_BAD_ENUM        (-9)   /* enum value is not declared */
+
+#ifndef WAYWALLEN_PROTOCOL_NAMED_TYPES_DEFINED
+#define WAYWALLEN_PROTOCOL_NAMED_TYPES_DEFINED
+
+typedef enum waywallen_pause_effect_kind {
+    WAYWALLEN_PAUSE_EFFECT_KIND_NONE = 0,
+    WAYWALLEN_PAUSE_EFFECT_KIND_BLUR = 1,
+} waywallen_pause_effect_kind_t;
+
+typedef struct waywallen_blur_effect_config {
+    uint32_t radius;
+} waywallen_blur_effect_config_t;
+
+typedef struct waywallen_pause_effect_config {
+    waywallen_pause_effect_kind_t kind;
+    waywallen_blur_effect_config_t blur;
+} waywallen_pause_effect_config_t;
+
+typedef struct waywallen_pause_effect_dynamic_config {
+    bool active;
+} waywallen_pause_effect_dynamic_config_t;
+
+typedef struct waywallen_presentation_capabilities {
+    uint32_t flags;
+} waywallen_presentation_capabilities_t;
+
+typedef struct waywallen_presentation_config {
+    uint64_t generation;
+    waywallen_pause_effect_config_t pause_effect;
+} waywallen_presentation_config_t;
+
+typedef struct waywallen_presentation_dynamic_config {
+    uint64_t generation;
+    uint64_t config_generation;
+    waywallen_pause_effect_dynamic_config_t pause_effect;
+} waywallen_presentation_dynamic_config_t;
+
+typedef struct waywallen_presentation_snapshot {
+    waywallen_presentation_config_t config;
+    waywallen_presentation_dynamic_config_t dynamic_config;
+} waywallen_presentation_snapshot_t;
+
+#endif /* WAYWALLEN_PROTOCOL_NAMED_TYPES_DEFINED */
 
 /* --- Opcodes --- */
 
@@ -111,6 +157,8 @@ typedef enum ww_event_op {
     WW_EVT_FRAME_READY = 5,
     WW_EVT_UNBIND = 6,
     WW_EVT_ERROR = 7,
+    WW_EVT_SET_PRESENTATION_CONFIG = 8,
+    WW_EVT_SET_PRESENTATION_DYNAMIC_CONFIG = 9,
 } ww_event_op_t;
 
 typedef struct ww_req_hello_t {
@@ -129,6 +177,7 @@ typedef struct ww_req_register_display_t {
     uint32_t drm_render_major;
     uint32_t drm_render_minor;
     ww_kv_list_t properties;
+    waywallen_presentation_capabilities_t presentation_caps;
 } ww_req_register_display_t;
 
 typedef struct ww_req_update_display_t {
@@ -210,6 +259,7 @@ typedef struct ww_evt_welcome_t {
 
 typedef struct ww_evt_display_accepted_t {
     uint64_t display_id;
+    waywallen_presentation_snapshot_t presentation;
 } ww_evt_display_accepted_t;
 
 typedef struct ww_evt_bind_buffers_t {
@@ -250,6 +300,14 @@ typedef struct ww_evt_error_t {
     uint32_t code;
     char *message;
 } ww_evt_error_t;
+
+typedef struct ww_evt_set_presentation_config_t {
+    waywallen_presentation_snapshot_t presentation;
+} ww_evt_set_presentation_config_t;
+
+typedef struct ww_evt_set_presentation_dynamic_config_t {
+    waywallen_presentation_dynamic_config_t dynamic_config;
+} ww_evt_set_presentation_dynamic_config_t;
 
 /* --- Per-message functions ---
  * encode:        append wire body to `out` (header is the caller's job)
@@ -352,6 +410,16 @@ int  ww_evt_error_encode(const ww_evt_error_t *m, ww_buf_t *out);
 int  ww_evt_error_decode(const uint8_t *buf, size_t len, ww_evt_error_t *out);
 void ww_evt_error_free(ww_evt_error_t *m);
 uint32_t ww_evt_error_expected_fds(const ww_evt_error_t *m);
+
+int  ww_evt_set_presentation_config_encode(const ww_evt_set_presentation_config_t *m, ww_buf_t *out);
+int  ww_evt_set_presentation_config_decode(const uint8_t *buf, size_t len, ww_evt_set_presentation_config_t *out);
+void ww_evt_set_presentation_config_free(ww_evt_set_presentation_config_t *m);
+uint32_t ww_evt_set_presentation_config_expected_fds(const ww_evt_set_presentation_config_t *m);
+
+int  ww_evt_set_presentation_dynamic_config_encode(const ww_evt_set_presentation_dynamic_config_t *m, ww_buf_t *out);
+int  ww_evt_set_presentation_dynamic_config_decode(const uint8_t *buf, size_t len, ww_evt_set_presentation_dynamic_config_t *out);
+void ww_evt_set_presentation_dynamic_config_free(ww_evt_set_presentation_dynamic_config_t *m);
+uint32_t ww_evt_set_presentation_dynamic_config_expected_fds(const ww_evt_set_presentation_dynamic_config_t *m);
 
 /* --- Output buffer helpers --- */
 void ww_buf_init(ww_buf_t *b);

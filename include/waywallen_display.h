@@ -40,6 +40,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "waywallen_display_protocol_types.h"
 #include "waywallen_display_version.h"
 
 #ifdef __cplusplus
@@ -54,6 +55,9 @@ extern "C" {
  * range and rejects out-of-range clients with `error{code=2}`.
  */
 #define WAYWALLEN_DISPLAY_PROTOCOL_VERSION 8
+
+/* Presentation capabilities declared before connecting. */
+#define WAYWALLEN_PRESENTATION_CAP_BLUR (1u << 0)
 
 /*
  * Library version baked in at build time.
@@ -288,6 +292,15 @@ typedef struct waywallen_display_callbacks {
     void (*on_textures_releasing)(void* user_data, const waywallen_textures_t* textures);
     void (*on_config)(void* user_data, const waywallen_config_t* config);
     void (*on_frame_ready)(void* user_data, const waywallen_frame_t* frame);
+    /* A full snapshot replaces persistent and dynamic presentation
+     * state atomically. The initial snapshot is installed during the
+     * handshake before advance_handshake reports READY. */
+    void (*on_presentation_config)(void*                                    user_data,
+                                   const waywallen_presentation_snapshot_t* presentation);
+    /* A dynamic update is already validated against the current
+     * persistent config generation when this callback runs. */
+    void (*on_presentation_dynamic_config)(
+        void* user_data, const waywallen_presentation_dynamic_config_t* dynamic_config);
     void (*on_disconnected)(void* user_data, int err_code, const char* message);
     void* user_data;
 } waywallen_display_callbacks_t;
@@ -378,6 +391,11 @@ int waywallen_display_bind_dmabuf_relay(waywallen_display_t* d);
  * Must be called before `begin_connect` / `connect`.
  */
 int waywallen_display_set_drm_render_node(waywallen_display_t* d, uint32_t major, uint32_t minor);
+
+/* Declare final-presentation features implemented by this host. Must
+ * be called before begin_connect/connect; capability changes require a
+ * reconnect. Generic consumers should leave this at zero. */
+int waywallen_display_set_presentation_caps(waywallen_display_t* d, uint32_t flags);
 
 /* -------------------------------------------------------------------------
  * Async session (event-loop friendly)
@@ -587,6 +605,11 @@ waywallen_stream_state_t waywallen_display_stream_state(waywallen_display_t* d);
  * handshake completes or after disconnect. Intended for logs / debug
  * overlays — opaque to the protocol. */
 uint64_t waywallen_display_get_display_id(waywallen_display_t* d);
+
+/* Copy the current connection-local presentation snapshot. Returns
+ * WAYWALLEN_ERR_NOTCONN before display_accepted and after disconnect. */
+int waywallen_display_get_presentation_snapshot(
+    waywallen_display_t* d, waywallen_presentation_snapshot_t* out_presentation);
 
 /* -------------------------------------------------------------------------
  * Last disconnect reason

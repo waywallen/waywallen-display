@@ -50,6 +50,17 @@ typedef enum
     WW_HANDSHAKE_RESULT_PROGRESS   = 4,
 } WwHandshakeResult;
 
+typedef enum
+{
+    WW_PRESENTATION_CAPABILITY_BLUR = 1u << 0,
+} WwPresentationCapability;
+
+typedef enum
+{
+    WW_PAUSE_EFFECT_KIND_NONE = 0,
+    WW_PAUSE_EFFECT_KIND_BLUR = 1,
+} WwPauseEffectKind;
+
 #define WW_TYPE_DISPLAY (ww_display_get_type())
 G_DECLARE_FINAL_TYPE(WwDisplay, ww_display, WW, DISPLAY, GObject)
 
@@ -78,6 +89,18 @@ WwDisplay* ww_display_new(void);
  * Returns: TRUE on success
  */
 gboolean ww_display_bind_dmabuf_relay(WwDisplay* self);
+
+/**
+ * ww_display_set_presentation_capabilities:
+ * @self: a #WwDisplay
+ * @flags: a bitmask of #WwPresentationCapability
+ *
+ * Declares final-presentation effects implemented by the host. Must
+ * be called before ww_display_begin_connect().
+ *
+ * Returns: TRUE on success
+ */
+gboolean ww_display_set_presentation_capabilities(WwDisplay* self, guint flags);
 
 /**
  * ww_display_get_shadow_export:

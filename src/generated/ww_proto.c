@@ -63,6 +63,7 @@ int ww_buf_reserve(ww_buf_t *b, size_t additional) {
 static int w_bytes(ww_buf_t *b, const void *src, size_t n) {
     int rc = ww_buf_reserve(b, n);
     if (rc) return rc;
+    if (n > b->cap - b->len) return WW_ERR_OVERFLOW;
     memcpy(b->data + b->len, src, n);
     b->len += n;
     return WW_OK;
@@ -76,6 +77,7 @@ static int w_u32(ww_buf_t *b, uint32_t v) {
     out[3] = (uint8_t)(v >> 24);
     return w_bytes(b, out, 4);
 }
+static int w_bool(ww_buf_t *b, bool v) { return w_u32(b, v ? 1u : 0u); }
 static int w_i32(ww_buf_t *b, int32_t v) { return w_u32(b, (uint32_t)v); }
 
 static int w_u64(ww_buf_t *b, uint64_t v) {
@@ -231,6 +233,14 @@ static int rd_u32(ww_rd_t *r, uint32_t *out) {
     r->pos += 4;
     return WW_OK;
 }
+static int rd_bool(ww_rd_t *r, bool *out) {
+    uint32_t v;
+    int rc = rd_u32(r, &v);
+    if (rc) return rc;
+    if (v > 1u) return WW_ERR_BAD_BOOL;
+    *out = v != 0u;
+    return WW_OK;
+}
 static int rd_i32(ww_rd_t *r, int32_t *out) {
     uint32_t v; int rc = rd_u32(r, &v); *out = (int32_t)v; return rc;
 }
@@ -274,6 +284,7 @@ static int rd_string(ww_rd_t *r, char **out) {
     if (rc) return rc;
     if (len == 0) return WW_ERR_BAD_STRING;  /* includes NUL */
     size_t padded = ((size_t)len + 3u) & ~(size_t)3u;
+    if (padded < (size_t)len) return WW_ERR_OVERFLOW;
     rc = rd_need(r, padded);
     if (rc) return rc;
     if (r->buf[r->pos + len - 1] != 0) return WW_ERR_BAD_STRING;
@@ -388,6 +399,115 @@ static void free_kv_list(ww_kv_list_t *a) {
  * Per-message implementations
  * ====================================================================== */
 
+static int w_pause_effect_kind(ww_buf_t *b, waywallen_pause_effect_kind_t v) {
+    return w_u32(b, (uint32_t)v);
+}
+
+static int rd_pause_effect_kind(ww_rd_t *r, waywallen_pause_effect_kind_t *out) {
+    uint32_t value;
+    int rc = rd_u32(r, &value);
+    if (rc) return rc;
+    switch (value) {
+    case 0: *out = WAYWALLEN_PAUSE_EFFECT_KIND_NONE; return WW_OK;
+    case 1: *out = WAYWALLEN_PAUSE_EFFECT_KIND_BLUR; return WW_OK;
+    default: return WW_ERR_BAD_ENUM;
+    }
+}
+
+static int w_blur_effect_config(ww_buf_t *b, const waywallen_blur_effect_config_t *v) {
+    int rc;
+    if ((rc = w_u32(b, v->radius))) return rc;
+    return WW_OK;
+}
+
+static int rd_blur_effect_config(ww_rd_t *r, waywallen_blur_effect_config_t *v) {
+    int rc;
+    if ((rc = rd_u32(r, &v->radius))) return rc;
+    return WW_OK;
+}
+
+static int w_pause_effect_config(ww_buf_t *b, const waywallen_pause_effect_config_t *v) {
+    int rc;
+    if ((rc = w_pause_effect_kind(b, v->kind))) return rc;
+    if ((rc = w_blur_effect_config(b, &v->blur))) return rc;
+    return WW_OK;
+}
+
+static int rd_pause_effect_config(ww_rd_t *r, waywallen_pause_effect_config_t *v) {
+    int rc;
+    if ((rc = rd_pause_effect_kind(r, &v->kind))) return rc;
+    if ((rc = rd_blur_effect_config(r, &v->blur))) return rc;
+    return WW_OK;
+}
+
+static int w_pause_effect_dynamic_config(ww_buf_t *b, const waywallen_pause_effect_dynamic_config_t *v) {
+    int rc;
+    if ((rc = w_bool(b, v->active))) return rc;
+    return WW_OK;
+}
+
+static int rd_pause_effect_dynamic_config(ww_rd_t *r, waywallen_pause_effect_dynamic_config_t *v) {
+    int rc;
+    if ((rc = rd_bool(r, &v->active))) return rc;
+    return WW_OK;
+}
+
+static int w_presentation_capabilities(ww_buf_t *b, const waywallen_presentation_capabilities_t *v) {
+    int rc;
+    if ((rc = w_u32(b, v->flags))) return rc;
+    return WW_OK;
+}
+
+static int rd_presentation_capabilities(ww_rd_t *r, waywallen_presentation_capabilities_t *v) {
+    int rc;
+    if ((rc = rd_u32(r, &v->flags))) return rc;
+    return WW_OK;
+}
+
+static int w_presentation_config(ww_buf_t *b, const waywallen_presentation_config_t *v) {
+    int rc;
+    if ((rc = w_u64(b, v->generation))) return rc;
+    if ((rc = w_pause_effect_config(b, &v->pause_effect))) return rc;
+    return WW_OK;
+}
+
+static int rd_presentation_config(ww_rd_t *r, waywallen_presentation_config_t *v) {
+    int rc;
+    if ((rc = rd_u64(r, &v->generation))) return rc;
+    if ((rc = rd_pause_effect_config(r, &v->pause_effect))) return rc;
+    return WW_OK;
+}
+
+static int w_presentation_dynamic_config(ww_buf_t *b, const waywallen_presentation_dynamic_config_t *v) {
+    int rc;
+    if ((rc = w_u64(b, v->generation))) return rc;
+    if ((rc = w_u64(b, v->config_generation))) return rc;
+    if ((rc = w_pause_effect_dynamic_config(b, &v->pause_effect))) return rc;
+    return WW_OK;
+}
+
+static int rd_presentation_dynamic_config(ww_rd_t *r, waywallen_presentation_dynamic_config_t *v) {
+    int rc;
+    if ((rc = rd_u64(r, &v->generation))) return rc;
+    if ((rc = rd_u64(r, &v->config_generation))) return rc;
+    if ((rc = rd_pause_effect_dynamic_config(r, &v->pause_effect))) return rc;
+    return WW_OK;
+}
+
+static int w_presentation_snapshot(ww_buf_t *b, const waywallen_presentation_snapshot_t *v) {
+    int rc;
+    if ((rc = w_presentation_config(b, &v->config))) return rc;
+    if ((rc = w_presentation_dynamic_config(b, &v->dynamic_config))) return rc;
+    return WW_OK;
+}
+
+static int rd_presentation_snapshot(ww_rd_t *r, waywallen_presentation_snapshot_t *v) {
+    int rc;
+    if ((rc = rd_presentation_config(r, &v->config))) return rc;
+    if ((rc = rd_presentation_dynamic_config(r, &v->dynamic_config))) return rc;
+    return WW_OK;
+}
+
 int ww_req_hello_encode(const ww_req_hello_t *m, ww_buf_t *out) {
     int rc;
     (void)m;
@@ -440,6 +560,7 @@ int ww_req_register_display_encode(const ww_req_register_display_t *m, ww_buf_t 
     if ((rc = w_u32(out, m->drm_render_major))) return rc;
     if ((rc = w_u32(out, m->drm_render_minor))) return rc;
     if ((rc = w_kv_list(out, &m->properties))) return rc;
+    if ((rc = w_presentation_capabilities(out, &m->presentation_caps))) return rc;
     return WW_OK;
 }
 
@@ -455,6 +576,7 @@ int ww_req_register_display_decode(const uint8_t *buf, size_t len, ww_req_regist
     if ((rc = rd_u32(&r, &out->drm_render_major))) goto fail;
     if ((rc = rd_u32(&r, &out->drm_render_minor))) goto fail;
     if ((rc = rd_kv_list(&r, &out->properties))) goto fail;
+    if ((rc = rd_presentation_capabilities(&r, &out->presentation_caps))) goto fail;
     if (r.pos != r.len) {
         int rc2 = WW_ERR_TRAILING;
         (void)rc2;
@@ -909,6 +1031,7 @@ int ww_evt_display_accepted_encode(const ww_evt_display_accepted_t *m, ww_buf_t 
     int rc;
     (void)m;
     if ((rc = w_u64(out, m->display_id))) return rc;
+    if ((rc = w_presentation_snapshot(out, &m->presentation))) return rc;
     return WW_OK;
 }
 
@@ -917,6 +1040,7 @@ int ww_evt_display_accepted_decode(const uint8_t *buf, size_t len, ww_evt_displa
     ww_rd_t r = { buf, 0, len };
     int rc;
     if ((rc = rd_u64(&r, &out->display_id))) goto fail;
+    if ((rc = rd_presentation_snapshot(&r, &out->presentation))) goto fail;
     if (r.pos != r.len) {
         int rc2 = WW_ERR_TRAILING;
         (void)rc2;
@@ -1138,6 +1262,72 @@ void ww_evt_error_free(ww_evt_error_t *m) {
 }
 
 uint32_t ww_evt_error_expected_fds(const ww_evt_error_t *m) {
+    (void)m;
+    return 0;
+}
+
+int ww_evt_set_presentation_config_encode(const ww_evt_set_presentation_config_t *m, ww_buf_t *out) {
+    int rc;
+    (void)m;
+    if ((rc = w_presentation_snapshot(out, &m->presentation))) return rc;
+    return WW_OK;
+}
+
+int ww_evt_set_presentation_config_decode(const uint8_t *buf, size_t len, ww_evt_set_presentation_config_t *out) {
+    memset(out, 0, sizeof(*out));
+    ww_rd_t r = { buf, 0, len };
+    int rc;
+    if ((rc = rd_presentation_snapshot(&r, &out->presentation))) goto fail;
+    if (r.pos != r.len) {
+        int rc2 = WW_ERR_TRAILING;
+        (void)rc2;
+        ww_evt_set_presentation_config_free(out);
+        return WW_ERR_TRAILING;
+    }
+    return WW_OK;
+fail:
+    ww_evt_set_presentation_config_free(out);
+    return rc;
+}
+
+void ww_evt_set_presentation_config_free(ww_evt_set_presentation_config_t *m) {
+    (void)m;
+}
+
+uint32_t ww_evt_set_presentation_config_expected_fds(const ww_evt_set_presentation_config_t *m) {
+    (void)m;
+    return 0;
+}
+
+int ww_evt_set_presentation_dynamic_config_encode(const ww_evt_set_presentation_dynamic_config_t *m, ww_buf_t *out) {
+    int rc;
+    (void)m;
+    if ((rc = w_presentation_dynamic_config(out, &m->dynamic_config))) return rc;
+    return WW_OK;
+}
+
+int ww_evt_set_presentation_dynamic_config_decode(const uint8_t *buf, size_t len, ww_evt_set_presentation_dynamic_config_t *out) {
+    memset(out, 0, sizeof(*out));
+    ww_rd_t r = { buf, 0, len };
+    int rc;
+    if ((rc = rd_presentation_dynamic_config(&r, &out->dynamic_config))) goto fail;
+    if (r.pos != r.len) {
+        int rc2 = WW_ERR_TRAILING;
+        (void)rc2;
+        ww_evt_set_presentation_dynamic_config_free(out);
+        return WW_ERR_TRAILING;
+    }
+    return WW_OK;
+fail:
+    ww_evt_set_presentation_dynamic_config_free(out);
+    return rc;
+}
+
+void ww_evt_set_presentation_dynamic_config_free(ww_evt_set_presentation_dynamic_config_t *m) {
+    (void)m;
+}
+
+uint32_t ww_evt_set_presentation_dynamic_config_expected_fds(const ww_evt_set_presentation_dynamic_config_t *m) {
     (void)m;
     return 0;
 }

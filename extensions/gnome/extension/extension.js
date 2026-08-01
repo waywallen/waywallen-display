@@ -122,6 +122,7 @@ export default class WaywallenExtension extends Extension {
             this._currentProc.subprocess?.send_signal(15);
             this._currentProc = null;
         }
+        this._override?.resetPresentation();
     }
 
     _onDaemonReady() {
@@ -146,6 +147,17 @@ export default class WaywallenExtension extends Extension {
             argv.push('--diagnostics');
 
         this._currentProc = new LaunchSubprocess();
+        const proc = this._currentProc;
+        proc.setControlHandler(frame => {
+            if (this._currentProc !== proc || !this._override)
+                return;
+            const applied = this._override.applyControlFrame(frame);
+            if (applied && frame.type === 'connection') {
+                const g = frame.geometry;
+                proc.writeStdin(
+                    `R ${g.x} ${g.y} ${frame.presentation.config.generation}\n`);
+            }
+        });
         this._currentProc.set_cwd(GLib.get_home_dir());
 
         const bundleLib     = GLib.build_filenamev([this.path, 'lib']);
@@ -164,7 +176,6 @@ export default class WaywallenExtension extends Extension {
         this._pointer?.setLauncher(this._currentProc);
         this._winState?.setLauncher(this._currentProc);
 
-        const proc = this._currentProc;
         proc.subprocess?.wait_async(null, (subprocess, res) => {
             try {
                 subprocess.wait_finish(res);
@@ -172,6 +183,7 @@ export default class WaywallenExtension extends Extension {
             if (this._currentProc !== proc)
                 return;
             this._currentProc = null;
+            this._override?.resetPresentation();
             if (!this._isEnabled || !this._daemonUp)
                 return;
             // Daemon is up but renderer died: exponential backoff up to 30s.

@@ -9,13 +9,34 @@ import GObject from 'gi://GObject';
 import St from 'gi://St';
 import Graphene from 'gi://Graphene';
 
+import {BlurController} from './blur.js';
+import {PauseEffectKind} from './controlCodec.js';
+
 export const APPLICATION_ID = 'io.github.waywallen.WaywallenRenderer';
+const TITLE_PREFIX = `@${APPLICATION_ID}!`;
+
+export const WallpaperRole = Object.freeze({
+    Desktop: 'desktop',
+    Other: 'other',
+});
+
+export function rendererPresentationReady(actor) {
+    const title = actor?.meta_window?.title;
+    if (!title?.startsWith(TITLE_PREFIX))
+        return false;
+    const payload = title.slice(TITLE_PREFIX.length).split('|', 1)[0];
+    try {
+        return JSON.parse(payload).presentationReady === true;
+    } catch (_e) {
+        return false;
+    }
+}
 
 const FADE_IN_MS = 800;
 
 export const LiveWallpaper = GObject.registerClass(
 class LiveWallpaper extends St.Widget {
-    _init(backgroundActor) {
+    _init(backgroundActor, role = WallpaperRole.Other) {
         super._init({
             // FixedLayout: we position the clone ourselves in vfunc_allocate
             // (top-left origin, scaled to fill). BinLayout centered the
@@ -33,6 +54,9 @@ class LiveWallpaper extends St.Widget {
         });
         this._backgroundActor = backgroundActor;
         this._monitorIndex = backgroundActor.monitor;
+        this._role = role;
+        this._presentation = null;
+        this._blurController = null;
 
         backgroundActor.layout_manager = new Clutter.BinLayout();
         backgroundActor.add_child(this);
@@ -87,6 +111,11 @@ class LiveWallpaper extends St.Widget {
             this._sourceDestroyId = renderer.connect('destroy',
                 () => this._onSourceDestroyed());
             this.add_child(this._cloneActor);
+            if (this._role === WallpaperRole.Desktop) {
+                this._blurController = new BlurController(
+                    this._cloneActor, 'waywallen-desktop-blur');
+                this._applyPresentation();
+            }
             this.ease({
                 opacity: 255,
                 duration: FADE_IN_MS,
@@ -138,6 +167,8 @@ class LiveWallpaper extends St.Widget {
     _onSourceDestroyed() {
         this._sourceDestroyId = 0;
         this._sourceActor = null;
+        this._blurController?.destroy();
+        this._blurController = null;
         if (this._cloneActor) {
             const clone = this._cloneActor;
             this._cloneActor = null;
@@ -156,7 +187,8 @@ class LiveWallpaper extends St.Widget {
         // false bypasses the override that hides our windows elsewhere.
         const actors = global.get_window_actors(false);
         const ours = actors.filter(a =>
-            a.meta_window.title?.includes(APPLICATION_ID));
+            a.meta_window.title?.includes(APPLICATION_ID) &&
+            rendererPresentationReady(a));
 
         const numMonitors = global.display.get_n_monitors();
         if (ours.length < numMonitors)
@@ -168,6 +200,33 @@ class LiveWallpaper extends St.Widget {
 
         return ours.find(a =>
             a.meta_window.get_monitor() === this._monitorIndex) ?? null;
+    }
+
+    setPresentation(presentation) {
+        if (this._role !== WallpaperRole.Desktop)
+            return;
+        this._presentation = presentation;
+        this._applyPresentation();
+    }
+
+    get role() {
+        return this._role;
+    }
+
+    get monitorIndex() {
+        return this._monitorIndex;
+    }
+
+    _applyPresentation() {
+        const presentation = this._presentation;
+        if (!presentation) {
+            this._blurController?.setState(false, false, 30);
+            return;
+        }
+        this._blurController?.setState(
+            presentation.config.pauseEffect.kind === PauseEffectKind.BLUR,
+            presentation.dynamicConfig.pauseEffect.active,
+            presentation.config.pauseEffect.blur.radius);
     }
 
     on_destroy() {
@@ -185,6 +244,8 @@ class LiveWallpaper extends St.Widget {
         }
         this._sourceActor = null;
         this._sourceDestroyId = 0;
+        this._blurController?.destroy();
+        this._blurController = null;
         if (this._cloneActor && this._cloneDestroyId) {
             try { this._cloneActor.disconnect(this._cloneDestroyId); } catch (_e) {}
             this._cloneDestroyId = 0;

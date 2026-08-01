@@ -73,8 +73,11 @@ configure_file(
 set(GENERATED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/generated")
 set(GENERATED_H   "${GENERATED_DIR}/ww_proto.h")
 set(GENERATED_C   "${GENERATED_DIR}/ww_proto.c")
+set(GENERATED_TYPES_H
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/waywallen_display_protocol_types.h")
 
-if(NOT EXISTS "${GENERATED_H}" OR NOT EXISTS "${GENERATED_C}")
+if(NOT EXISTS "${GENERATED_H}" OR NOT EXISTS "${GENERATED_C}"
+   OR NOT EXISTS "${GENERATED_TYPES_H}")
     message(FATAL_ERROR
         "Pre-generated protocol bindings missing under ${GENERATED_DIR}. "
         "Run with -DWAYWALLEN_DISPLAY_REGEN_PROTO=ON from a checkout that "
@@ -122,8 +125,9 @@ if(WAYWALLEN_DISPLAY_REGEN_PROTO)
         COMMAND ${WAYPROTO_GEN}
             --in ${PROTOCOL_XML}
             --out-c-header ${GENERATED_H}
+            --out-c-types-header ${GENERATED_TYPES_H}
             --out-c-source ${GENERATED_C}
-        BYPRODUCTS ${GENERATED_H} ${GENERATED_C}
+        BYPRODUCTS ${GENERATED_H} ${GENERATED_TYPES_H} ${GENERATED_C}
         DEPENDS ${PROTOCOL_XML}
         COMMENT "Regenerating waywallen-display-v1 C bindings"
         VERBATIM)
@@ -447,6 +451,7 @@ install(TARGETS waywallen_display waywallen_display_static
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
 install(FILES
     include/waywallen_display.h
+    include/waywallen_display_protocol_types.h
     "${WAYWALLEN_DISPLAY_GENERATED_INCLUDE_DIR}/waywallen_display_version.h"
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 

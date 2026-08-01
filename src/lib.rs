@@ -19,6 +19,7 @@ use core::ffi::{c_char, c_int, c_void};
 
 include!(concat!(env!("OUT_DIR"), "/version.rs"));
 pub const WAYWALLEN_DISPLAY_PROTOCOL_VERSION: u32 = 8;
+pub const WAYWALLEN_PRESENTATION_CAP_BLUR: u32 = 1 << 0;
 
 // -----------------------------------------------------------------------------
 // Return codes
@@ -159,6 +160,61 @@ pub struct waywallen_frame_t {
     pub buffer_generation: u64,
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum waywallen_pause_effect_kind_t {
+    #[default]
+    WAYWALLEN_PAUSE_EFFECT_KIND_NONE = 0,
+    WAYWALLEN_PAUSE_EFFECT_KIND_BLUR = 1,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default)]
+pub struct waywallen_blur_effect_config_t {
+    pub radius: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default)]
+pub struct waywallen_pause_effect_config_t {
+    pub kind: waywallen_pause_effect_kind_t,
+    pub blur: waywallen_blur_effect_config_t,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default)]
+pub struct waywallen_pause_effect_dynamic_config_t {
+    pub active: bool,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default)]
+pub struct waywallen_presentation_capabilities_t {
+    pub flags: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default)]
+pub struct waywallen_presentation_config_t {
+    pub generation: u64,
+    pub pause_effect: waywallen_pause_effect_config_t,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default)]
+pub struct waywallen_presentation_dynamic_config_t {
+    pub generation: u64,
+    pub config_generation: u64,
+    pub pause_effect: waywallen_pause_effect_dynamic_config_t,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default)]
+pub struct waywallen_presentation_snapshot_t {
+    pub config: waywallen_presentation_config_t,
+    pub dynamic_config: waywallen_presentation_dynamic_config_t,
+}
+
 // -----------------------------------------------------------------------------
 // Callback table
 // -----------------------------------------------------------------------------
@@ -174,6 +230,18 @@ pub struct waywallen_display_callbacks_t {
         Option<unsafe extern "C" fn(user_data: *mut c_void, config: *const waywallen_config_t)>,
     pub on_frame_ready:
         Option<unsafe extern "C" fn(user_data: *mut c_void, frame: *const waywallen_frame_t)>,
+    pub on_presentation_config: Option<
+        unsafe extern "C" fn(
+            user_data: *mut c_void,
+            presentation: *const waywallen_presentation_snapshot_t,
+        ),
+    >,
+    pub on_presentation_dynamic_config: Option<
+        unsafe extern "C" fn(
+            user_data: *mut c_void,
+            dynamic_config: *const waywallen_presentation_dynamic_config_t,
+        ),
+    >,
     pub on_disconnected: Option<
         unsafe extern "C" fn(user_data: *mut c_void, err_code: c_int, message: *const c_char),
     >,
@@ -249,6 +317,10 @@ extern "C" {
         d: *mut waywallen_display_t,
         major: u32,
         minor: u32,
+    ) -> c_int;
+    pub fn waywallen_display_set_presentation_caps(
+        d: *mut waywallen_display_t,
+        flags: u32,
     ) -> c_int;
 
     pub fn waywallen_display_begin_connect(
@@ -331,6 +403,10 @@ extern "C" {
     pub fn waywallen_display_conn_state(d: *mut waywallen_display_t) -> waywallen_conn_state_t;
     pub fn waywallen_display_stream_state(d: *mut waywallen_display_t) -> waywallen_stream_state_t;
     pub fn waywallen_display_get_display_id(d: *mut waywallen_display_t) -> u64;
+    pub fn waywallen_display_get_presentation_snapshot(
+        d: *mut waywallen_display_t,
+        out_presentation: *mut waywallen_presentation_snapshot_t,
+    ) -> c_int;
 
     pub fn waywallen_display_create_gl_texture(
         d: *mut waywallen_display_t,

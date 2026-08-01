@@ -14,6 +14,7 @@
 
 import QtQuick
 import Waywallen.Display
+import "components" as Example
 
 Window {
     id: root
@@ -25,12 +26,10 @@ Window {
     // via `report_state` on waywallen_ipc_v2).
     color: wallpaper.clearColor
 
-    WaywallenDisplay {
+    Example.WaywallenSurface {
         id: wallpaper
         anchors.fill: parent
         displayName: "qml-minimal-long-long-long-long-long-long"
-        displayWidth: root.width
-        displayHeight: root.height
     }
 
     Rectangle {
@@ -66,6 +65,10 @@ Window {
                       + "  stream: " + streamText(wallpaper.streamState)
                 s += "\nframes: " + wallpaper.framesReceived
                 s += "\nclear:  " + wallpaper.clearColor.toString()
+                s += "\neffect: kind=" + wallpaper.pauseEffectKind
+                      + " active=" + wallpaper.pauseEffectActive
+                      + " radius=" + wallpaper.blurRadius
+                      + " loaded=" + wallpaper.blurLoaded
                 if (wallpaper.lastDisconnectReason !== WaywallenDisplay.None) {
                     s += "\nreason: " + reasonText(wallpaper.lastDisconnectReason)
                     if (wallpaper.lastDisconnectMessage.length > 0)

@@ -9,6 +9,7 @@
 import QtQuick
 import QtQuick.Layouts
 import Waywallen.Display
+import "components" as Example
 
 Window {
     id: root
@@ -27,12 +28,10 @@ Window {
             Layout.fillWidth: true
             Layout.fillHeight: true
 
-            WaywallenDisplay {
+            Example.WaywallenSurface {
                 id: left
                 anchors.fill: parent
                 displayName: "qml-left"
-                displayWidth: parent.width
-                displayHeight: parent.height
             }
 
             DiagBox {
@@ -46,12 +45,10 @@ Window {
             Layout.fillWidth: true
             Layout.fillHeight: true
 
-            WaywallenDisplay {
+            Example.WaywallenSurface {
                 id: right
                 anchors.fill: parent
                 displayName: "qml-right"
-                displayWidth: parent.width
-                displayHeight: parent.height
             }
 
             DiagBox {

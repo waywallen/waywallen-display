@@ -11,6 +11,8 @@ import Gettext from 'gettext';
 import cairo from 'cairo';
 import system from 'system';
 
+import {encodeControlFrame} from '../controlCodec.js';
+
 // GLib.unix_fd_source_new / Gio.UnixInputStream moved to the GLibUnix /
 // GioUnix namespaces in gjs 1.86+.
 let GLibUnix = null;
@@ -123,6 +125,8 @@ class MonitorRenderer {
         this._paintable = null;
 
         this._destroyed = false;
+        this._presentation = null;
+        this._presentationReady = false;
     }
 
     build(app) {
@@ -136,13 +140,7 @@ class MonitorRenderer {
         // position must be this monitor's origin: windowManager pins the
         // window there, else every monitor's window collapses onto (0,0) and
         // get_monitor() stops being unique for per-monitor matching.
-        const titleHint = JSON.stringify({
-            keepMinimized: true,
-            keepAtBottom: true,
-            keepPosition: true,
-            position: [geom.x, geom.y],
-        });
-        this._window.set_title(`@${APP_ID}!${titleHint}|${this._index}`);
+        this._updateWindowTitle();
 
         // Pin the size: a minimized Wayland window gets no configure, so
         // without an explicit request Gtk.Picture measures height as Infinity.
@@ -212,6 +210,11 @@ class MonitorRenderer {
                 this._texW ?? '?', this._texH ?? '?', (this._fourcc ?? 0).toString(16), this._backend ?? '?'),
             _('fps %s  frames %d').format(fps.toFixed(1), frames),
             _('winstate 0x%s (%s)').format(f.toString(16), ws),
+            `pause-effect cfg=${this._presentation?.config.generation ?? 0} ` +
+            `dyn=${this._presentation?.dynamicConfig.generation ?? 0} ` +
+            `kind=${this._presentation?.config.pauseEffect.kind ?? 0} ` +
+            `active=${this._presentation?.dynamicConfig.pauseEffect.active ?? false} ` +
+            `radius=${this._presentation?.config.pauseEffect.blur.radius ?? 30}`,
         ].join('\n'));
     }
 
@@ -245,6 +248,8 @@ class MonitorRenderer {
         const d = Waywallen.Display.new();
         if (!d.bind_dmabuf_relay())
             throw new Error('bind_dmabuf_relay failed');
+        if (!d.set_presentation_capabilities(Waywallen.PresentationCapability.BLUR))
+            throw new Error('set_presentation_capabilities failed');
         this._display = d;
 
         d.connect('textures-ready',
@@ -271,6 +276,14 @@ class MonitorRenderer {
                                             transform, cr, cg, cb, ca));
         d.connect('frame-ready',
             (_o, idx, seq, fd) => this._onFrameReady(idx, seq, fd));
+        d.connect('presentation-config',
+            (_o, configGeneration, dynamicGeneration, kind, radius, active) =>
+                this._onPresentationConfig(
+                    configGeneration, dynamicGeneration, kind, radius, active));
+        d.connect('presentation-dynamic-config',
+            (_o, dynamicGeneration, configGeneration, active) =>
+                this._onPresentationDynamicConfig(
+                    dynamicGeneration, configGeneration, active));
         d.connect('disconnected',
             (_o, code, msg) => this._onDisconnected(code, msg));
 
@@ -354,6 +367,82 @@ class MonitorRenderer {
             Waywallen.Display.close_fd(fd);
         this._frames = (this._frames ?? 0) + 1;
         this._paintable?.refresh();
+    }
+
+    _controlGeometry() {
+        const geometry = this._monitor.get_geometry();
+        return {
+            x: geometry.x,
+            y: geometry.y,
+            width: geometry.width,
+            height: geometry.height,
+        };
+    }
+
+    _writeControl(frame) {
+        print(encodeControlFrame({geometry: this._controlGeometry(), ...frame}).trimEnd());
+    }
+
+    _onPresentationConfig(configGeneration, dynamicGeneration, kind, radius, active) {
+        if (configGeneration === 0) {
+            this._presentation = null;
+            this._presentationReady = false;
+            this._updateWindowTitle();
+            this._writeControl({type: 'reset'});
+            return;
+        }
+        this._presentation = {
+            config: {
+                generation: configGeneration,
+                pauseEffect: {kind, blur: {radius}},
+            },
+            dynamicConfig: {
+                generation: dynamicGeneration,
+                configGeneration,
+                pauseEffect: {active},
+            },
+        };
+        const type = this._presentationReady ? 'presentation-config' : 'connection';
+        this._writeControl({type, presentation: this._presentation});
+        if (this._diagLabel)
+            this._updateDiag();
+    }
+
+    _onPresentationDynamicConfig(dynamicGeneration, configGeneration, active) {
+        if (!this._presentation ||
+            configGeneration !== this._presentation.config.generation)
+            return;
+        const dynamicConfig = {
+            generation: dynamicGeneration,
+            configGeneration,
+            pauseEffect: {active},
+        };
+        this._presentation.dynamicConfig = dynamicConfig;
+        this._writeControl({type: 'presentation-dynamic-config', dynamicConfig});
+        if (this._diagLabel)
+            this._updateDiag();
+    }
+
+    confirmPresentation(configGeneration) {
+        if (!this._presentation ||
+            configGeneration !== this._presentation.config.generation)
+            return;
+        this._presentationReady = true;
+        this._updateWindowTitle();
+    }
+
+    _updateWindowTitle() {
+        if (!this._window)
+            return;
+        const geometry = this._monitor.get_geometry();
+        const hint = JSON.stringify({
+            keepMinimized: true,
+            keepAtBottom: true,
+            keepPosition: true,
+            position: [geometry.x, geometry.y],
+            presentationReady: this._presentationReady,
+        });
+        this._window.set_title(`@${APP_ID}!${hint}|${this._index}`);
     }
 
     monitorGeom() {
@@ -442,7 +531,8 @@ let renderers = [];
 //   M gx gy ts                 motion
 //   B gx gy code pressed ts    button
 //   A gx gy dx dy ts           axis
-//   W gx gy flags              window-state (autopause)
+//   W gx gy flags              window-state
+//   R gx gy config_generation  presentation snapshot accepted by Shell
 function dispatchInput(line) {
     const f = line.split(' ');
     const gx = parseFloat(f[1]);
@@ -466,6 +556,7 @@ function dispatchInput(line) {
     case 'A': r.sendPointerAxis(lx, ly, parseFloat(f[3]) || 0,
                                 parseFloat(f[4]) || 0, parseInt(f[5]) || 0); break;
     case 'W': r.sendWindowState(parseInt(f[3]) || 0); break;
+    case 'R': r.confirmPresentation(parseInt(f[3]) || 0); break;
     }
 }
 

@@ -3,6 +3,8 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import * as Config from 'resource:///org/gnome/shell/misc/config.js';
 
+import {decodeControlFrame} from './controlCodec.js';
+
 const shellMajor = parseInt(Config.PACKAGE_VERSION.split('.')[0]);
 
 // GNOME 49 dropped Meta.is_wayland_compositor(); fall back to WAYLAND_DISPLAY.
@@ -18,7 +20,7 @@ export class LaunchSubprocess {
         this._flags = flags
             | Gio.SubprocessFlags.STDIN_PIPE
             | Gio.SubprocessFlags.STDOUT_PIPE
-            | Gio.SubprocessFlags.STDERR_MERGE;
+            | Gio.SubprocessFlags.STDERR_PIPE;
         this.cancellable = new Gio.Cancellable();
         this._launcher = new Gio.SubprocessLauncher({flags: this._flags});
 
@@ -27,6 +29,11 @@ export class LaunchSubprocess {
 
         this.subprocess = null;
         this.running = false;
+        this._controlHandler = null;
+    }
+
+    setControlHandler(handler) {
+        this._controlHandler = handler;
     }
 
     spawnv(argv) {
@@ -49,11 +56,15 @@ export class LaunchSubprocess {
         if (this.subprocess) {
             this._stdoutStream = Gio.DataInputStream.new(
                 this.subprocess.get_stdout_pipe());
+            this._stderrStream = Gio.DataInputStream.new(
+                this.subprocess.get_stderr_pipe());
             this._stdinStream = this.subprocess.get_stdin_pipe();
-            this._readOutput();
+            this._readControlOutput();
+            this._readErrorOutput();
             this.subprocess.wait_async(this.cancellable, () => {
                 this.running = false;
                 this._stdoutStream = null;
+                this._stderrStream = null;
                 this._stdinStream = null;
                 this.cancellable = null;
             });
@@ -62,7 +73,7 @@ export class LaunchSubprocess {
         return this.subprocess;
     }
 
-    // Write one line to the renderer's stdin (pointer events). Best-effort:
+    // Write one control line to the renderer's stdin. Best-effort:
     // drops silently if the pipe is gone or busy.
     writeStdin(line) {
         if (!this._stdinStream)
@@ -97,20 +108,48 @@ export class LaunchSubprocess {
         this._launcher.setenv(name, value, true);
     }
 
-    _readOutput() {
+    _readControlOutput() {
         if (!this._stdoutStream)
             return;
         this._stdoutStream.read_line_async(GLib.PRIORITY_DEFAULT,
             this.cancellable, (stream, res) => {
                 try {
                     const [line, len] = stream.read_line_finish_utf8(res);
+                    if (line === null) {
+                        this._stdoutStream = null;
+                        return;
+                    }
+                    if (len) {
+                        const frame = decodeControlFrame(line);
+                        this._controlHandler?.(frame);
+                    }
+                } catch (e) {
+                    if (e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
+                        return;
+                    logError(e, '[waywallen] invalid renderer control frame');
+                }
+                this._readControlOutput();
+            });
+    }
+
+    _readErrorOutput() {
+        if (!this._stderrStream)
+            return;
+        this._stderrStream.read_line_async(GLib.PRIORITY_DEFAULT,
+            this.cancellable, (stream, res) => {
+                try {
+                    const [line, len] = stream.read_line_finish_utf8(res);
+                    if (line === null) {
+                        this._stderrStream = null;
+                        return;
+                    }
                     if (len)
                         log(`[ww-renderer] ${line}`);
                 } catch (e) {
-                    if (e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
+                    if (e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
                         return;
                 }
-                this._readOutput();
+                this._readErrorOutput();
             });
     }
 
