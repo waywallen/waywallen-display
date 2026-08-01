@@ -1,0 +1,4 @@
+javascript:extension/prefs.js
+javascript:renderer/renderer.js
+gsettings:extension/schemas/org.gnome.shell.extensions.waywallen.gschema.xml
+metadata:po/metadata.js

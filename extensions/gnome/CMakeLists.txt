@@ -9,6 +9,7 @@
 set(WW_GNOME_UUID "org.waywallen.gnome@waywallen.io")
 # EGO requires the org.gnome.shell.extensions.* base for both id and path.
 set(WW_GNOME_SCHEMA_ID "org.gnome.shell.extensions.waywallen")
+set(WW_GNOME_GETTEXT_DOMAIN "waywallen-gnome")
 
 # GNOME extension `version`: a monotonic integer the Shell / EGO compare on
 # (semver doesn't fit here). Bump by 1 every released extension change,
@@ -20,6 +21,32 @@ configure_file(
     ${CMAKE_CURRENT_SOURCE_DIR}/extension/metadata.json.in
     ${CMAKE_CURRENT_BINARY_DIR}/metadata.json
     @ONLY)
+
+find_program(MSGFMT_EXECUTABLE msgfmt REQUIRED)
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/po/LINGUAS" _ww_gnome_languages
+    REGEX "^[A-Za-z_@.-]+$")
+set(_ww_gnome_mo_files "")
+foreach(_lang IN LISTS _ww_gnome_languages)
+    set(_po "${CMAKE_CURRENT_SOURCE_DIR}/po/${_lang}.po")
+    set(_mo "${CMAKE_CURRENT_BINARY_DIR}/locale/${_lang}/LC_MESSAGES/${WW_GNOME_GETTEXT_DOMAIN}.mo")
+    add_custom_command(
+        OUTPUT "${_mo}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/locale/${_lang}/LC_MESSAGES"
+        COMMAND ${MSGFMT_EXECUTABLE} --check --check-format -o "${_mo}" "${_po}"
+        DEPENDS "${_po}"
+        COMMENT "Compiling ${WW_GNOME_GETTEXT_DOMAIN} ${_lang} translation"
+        VERBATIM)
+    list(APPEND _ww_gnome_mo_files "${_mo}")
+    install(FILES "${_mo}"
+        DESTINATION "locale/${_lang}/LC_MESSAGES"
+        COMPONENT gnome_extension
+        EXCLUDE_FROM_ALL)
+    install(FILES "${_mo}"
+        DESTINATION "${CMAKE_INSTALL_DATADIR}/gnome-shell/extensions/${WW_GNOME_UUID}/locale/${_lang}/LC_MESSAGES")
+    install(FILES "${_mo}"
+        DESTINATION "${CMAKE_INSTALL_LOCALEDIR}/${_lang}/LC_MESSAGES")
+endforeach()
+add_custom_target(waywallen-gnome-translations ALL DEPENDS ${_ww_gnome_mo_files})
 
 # --- Component install (cpack zip) ----------------------------------------
 

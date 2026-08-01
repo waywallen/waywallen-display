@@ -1479,19 +1479,52 @@ fn present_shadow(binding: &OutputBinding) -> Result<()> {
 /// Run the layer-shell display backend. Connects to the Wayland compositor
 /// and the daemon's UDS display socket, registers each output as a display.
 /// Blocks until the compositor disconnects or an unrecoverable error occurs.
+const GETTEXT_DOMAIN: &str = "waywallen-layer-shell";
+
+fn init_gettext() {
+    gettextrs::setlocale(gettextrs::LocaleCategory::LcAll, "");
+
+    let locale_dir = std::env::var_os("WAYWALLEN_LOCALEDIR")
+        .map(PathBuf::from)
+        .or_else(|| {
+            let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+            let sibling = exe_dir.join("share/locale");
+            if sibling.is_dir() {
+                return Some(sibling);
+            }
+            let prefix = exe_dir.parent()?.join("share/locale");
+            prefix.is_dir().then_some(prefix)
+        });
+    if let Some(dir) = locale_dir {
+        if let Err(e) = gettextrs::bindtextdomain(GETTEXT_DOMAIN, dir) {
+            log::debug!("bindtextdomain failed: {e}");
+        }
+    }
+    if let Err(e) = gettextrs::bind_textdomain_codeset(GETTEXT_DOMAIN, "UTF-8") {
+        log::debug!("bind_textdomain_codeset failed: {e}");
+    }
+    if let Err(e) = gettextrs::textdomain(GETTEXT_DOMAIN) {
+        log::debug!("textdomain failed: {e}");
+    }
+}
+
 fn usage() -> ! {
     eprintln!(
-        "usage: waywallen-layer-shell [--socket PATH] [--name STR]\n\
-         \n\
-         Environment:\n\
-           WAYWALLEN_SOCKET   fallback UDS path when --socket is omitted\n\
-           WAYLAND_DISPLAY    required — picks the compositor to attach to"
+        "{}",
+        gettextrs::gettext(
+            "usage: waywallen-layer-shell [--socket PATH] [--name STR]\n\
+             \n\
+             Environment:\n\
+               WAYWALLEN_SOCKET   fallback UDS path when --socket is omitted\n\
+               WAYLAND_DISPLAY    required — picks the compositor to attach to"
+        )
     );
     std::process::exit(2);
 }
 
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    init_gettext();
 
     let mut socket: Option<PathBuf> = None;
     let mut name_prefix = String::from("output");
@@ -1501,19 +1534,19 @@ fn main() -> Result<()> {
             "--socket" => {
                 socket = it.next().map(PathBuf::from);
                 if socket.is_none() {
-                    eprintln!("--socket requires a value");
+                    eprintln!("{}", gettextrs::gettext("--socket requires a value"));
                     usage();
                 }
             }
             "--name" => {
                 name_prefix = it.next().unwrap_or_else(|| {
-                    eprintln!("--name requires a value");
+                    eprintln!("{}", gettextrs::gettext("--name requires a value"));
                     usage();
                 });
             }
             "-h" | "--help" => usage(),
             other => {
-                eprintln!("unknown argument: {other}");
+                eprintln!("{}: {other}", gettextrs::gettext("unknown argument"));
                 usage();
             }
         }
@@ -1526,8 +1559,11 @@ fn main() -> Result<()> {
 }
 
 fn run(socket: PathBuf, name_prefix: String) -> Result<()> {
-    let conn = Connection::connect_to_env()
-        .context("connect to WAYLAND_DISPLAY — are you running under a Wayland compositor?")?;
+    let conn = Connection::connect_to_env().with_context(|| {
+        gettextrs::gettext(
+            "connect to WAYLAND_DISPLAY — are you running under a Wayland compositor?",
+        )
+    })?;
     let (globals, mut queue) = registry_queue_init::<App>(&conn).context("registry init")?;
     let qh: QueueHandle<App> = queue.handle();
 
@@ -1621,19 +1657,22 @@ fn run(socket: PathBuf, name_prefix: String) -> Result<()> {
     }
 
     if app.compositor.is_none() {
-        bail!("compositor does not expose wl_compositor");
+        bail!(gettextrs::gettext(
+            "compositor does not expose wl_compositor"
+        ));
     }
     if app.layer_shell.is_none() {
-        bail!(
-            "compositor does not expose zwlr_layer_shell_v1 — \
-             try a different compositor (Hyprland/Sway/KWin/new Mutter)"
-        );
+        bail!(gettextrs::gettext(
+            "compositor does not expose zwlr_layer_shell_v1 — try a different compositor (Hyprland/Sway/KWin/new Mutter)"
+        ));
     }
     if app.dmabuf.is_none() {
-        bail!("compositor does not expose zwp_linux_dmabuf_v1");
+        bail!(gettextrs::gettext(
+            "compositor does not expose zwp_linux_dmabuf_v1"
+        ));
     }
     if app.outputs.is_empty() {
-        bail!("no wl_output available");
+        bail!(gettextrs::gettext("no wl_output available"));
     }
     log::info!(
         "bound globals: compositor + layer_shell + dmabuf:v{} + viewporter:{} + \

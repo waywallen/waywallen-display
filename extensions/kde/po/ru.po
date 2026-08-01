@@ -1,0 +1,231 @@
+# Russian translation for waywallen-display.
+# Copyright (C) 2026 Artem Baleevskih
+# This file is distributed under the same license as waywallen-display.
+# Artem Baleevskih <catsemaofficial@gmail.com>, 2026.
+msgid ""
+msgstr ""
+"Project-Id-Version: plasma_wallpaper_org.waywallen.kde 0.2.9\n"
+"Report-Msgid-Bugs-To: https://github.com/waywallen/waywallen-display/issues\n"
+"POT-Creation-Date: 1970-01-01 00:00+0000\n"
+"PO-Revision-Date: 2026-07-29 00:00+0300\n"
+"Last-Translator: Artem Baleevskih <catsemaofficial@gmail.com>\n"
+"Language-Team: Russian\n"
+"Language: ru\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=3; plural=(n%10==1 && n%100!=11 ? 0 : n%10>=2 && n%10<=4 && (n%100<10 || n%100>=20) ? 1 : 2);\n"
+
+#: extensions/kde/package/contents/ui/config.qml:27
+msgid "Failed to create QML component for ImportTest.qml"
+msgstr "Не удалось создать компонент QML для ImportTest.qml"
+
+#: extensions/kde/package/contents/ui/config.qml:62
+msgid "Display name:"
+msgstr "Название экрана:"
+
+#: extensions/kde/package/contents/ui/config.qml:63
+msgid "Auto-generated per screen"
+msgstr "Создаётся автоматически для каждого экрана"
+
+#: extensions/kde/package/contents/ui/config.qml:69
+msgid "Show diagnostics overlay"
+msgstr "Показывать диагностическую информацию"
+
+#: extensions/kde/package/contents/ui/config.qml:75
+msgid "Forward mouse events to wallpaper"
+msgstr "Передавать события мыши обоям"
+
+#: extensions/kde/package/contents/ui/config.qml:81
+msgid "Accent color from wallpaper"
+msgstr "Использовать цветовой акцент из обоев"
+
+#: extensions/kde/package/contents/ui/config.qml:87
+msgid "Project:"
+msgstr "Проект:"
+
+#: extensions/kde/package/contents/ui/config.qml:94
+msgid "Version:"
+msgstr "Версия:"
+
+#: extensions/kde/package/contents/ui/config.qml:107
+msgid "After upgrading the plugin, restart plasmashell to pick up the new QML module:<br/><code>systemctl --user restart plasma-plasmashell.service</code>"
+msgstr "После обновления модуля перезапустите plasmashell, чтобы загрузить новый модуль QML:<br/><code>systemctl --user restart plasma-plasmashell.service</code>"
+
+#: extensions/kde/package/contents/ui/config.qml:117
+msgid ""
+"On X11 sessions (e.g. Steam Deck), plasmashell needs the EGL XCB backend to import the wallpaper's DMA-BUFs. Create <code>~/.config/systemd/user/plasma-plasmashell.service.d/override.conf</code> with:<br/><pre>[Service]\n"
+"Environment=QT_XCB_GL_INTEGRATION=xcb_egl</pre>then run <code>systemctl --user daemon-reload</code> and restart plasmashell."
+msgstr ""
+"В сеансах X11 (например, на Steam Deck) plasmashell требуется механизм EGL XCB для импорта DMA-BUF обоев. Создайте файл <code>~/.config/systemd/user/plasma-plasmashell.service.d/override.conf</code> со следующим содержимым:<br/><pre>[Service]\n"
+"Environment=QT_XCB_GL_INTEGRATION=xcb_egl</pre>Затем выполните <code>systemctl --user daemon-reload</code> и перезапустите plasmashell."
+
+#: extensions/kde/package/contents/ui/config.qml:134
+msgid "<b>Failed to load the display module.</b><br/>Please report at <a href=\"https://github.com/waywallen/waywallen-display/issues\">github.com/waywallen/waywallen-display/issues</a>"
+msgstr "<b>Не удалось загрузить модуль отображения.</b><br/>Сообщите о проблеме на странице <a href=\"https://github.com/waywallen/waywallen-display/issues\">github.com/waywallen/waywallen-display/issues</a>"
+
+#: extensions/kde/package/contents/ui/main.qml:124
+msgid "waywallen-display module failed to load"
+msgstr "Не удалось загрузить модуль waywallen-display"
+
+#: extensions/kde/package/contents/ui/main.qml:131
+msgid "Install or update waywallen-display:"
+msgstr "Установите или обновите waywallen-display:"
+
+#: extensions/kde/package/contents/ui/main.qml:164
+msgid "name:"
+msgstr "Название:"
+
+#: extensions/kde/package/contents/ui/main.qml:165
+msgid "id:"
+msgstr "id:"
+
+#: extensions/kde/package/contents/ui/main.qml:166
+msgid "inst:"
+msgstr "экз.:"
+
+#: extensions/kde/package/contents/ui/main.qml:167
+msgid "screen:"
+msgstr "Экран:"
+
+#: extensions/kde/package/contents/ui/main.qml:168
+msgid "geom:"
+msgstr "геом.:"
+
+#: extensions/kde/package/contents/ui/main.qml:170
+msgid "avail:"
+msgstr "Доступная область:"
+
+#: extensions/kde/package/contents/ui/main.qml:174
+msgid "orient:"
+msgstr "Ориентация:"
+
+#: extensions/kde/package/contents/ui/main.qml:175
+msgid "conn:"
+msgstr "подкл.:"
+
+#: extensions/kde/package/contents/ui/main.qml:176
+msgid "stream:"
+msgstr "Поток:"
+
+#: extensions/kde/package/contents/ui/main.qml:177
+msgid "frames:"
+msgstr "Кадры:"
+
+#: extensions/kde/package/contents/ui/main.qml:178
+msgid "clear:"
+msgstr "фон:"
+
+#: extensions/kde/package/contents/ui/main.qml:179
+msgid "windows:"
+msgstr "Окна:"
+
+#: extensions/kde/package/contents/ui/main.qml:181
+msgid "reason:"
+msgstr "Причина:"
+
+#: extensions/kde/package/contents/ui/main.qml:183
+msgid "msg:"
+msgstr "сообщ.:"
+
+#: extensions/kde/package/contents/ui/main.qml:202
+msgid "(untitled)"
+msgstr "(без названия)"
+
+#: extensions/kde/package/contents/ui/main.qml:212
+msgid "nonmin"
+msgstr "не свёрнуто"
+
+#: extensions/kde/package/contents/ui/main.qml:213
+#: extensions/kde/package/contents/ui/main.qml:266
+msgid "active"
+msgstr "активно"
+
+#: extensions/kde/package/contents/ui/main.qml:214
+msgid "max"
+msgstr "развёрнуто"
+
+#: extensions/kde/package/contents/ui/main.qml:215
+msgid "full"
+msgstr "полный экран"
+
+#: extensions/kde/package/contents/ui/main.qml:232
+msgid "version unsupported"
+msgstr "неподдерживаемая версия"
+
+#: extensions/kde/package/contents/ui/main.qml:233
+msgid "protocol mismatch"
+msgstr "несовместимый протокол"
+
+#: extensions/kde/package/contents/ui/main.qml:234
+msgid "daemon error"
+msgstr "ошибка службы"
+
+#: extensions/kde/package/contents/ui/main.qml:235
+msgid "handshake failed"
+msgstr "не удалось установить соединение"
+
+#: extensions/kde/package/contents/ui/main.qml:236
+msgid "socket io"
+msgstr "ошибка ввода-вывода сокета"
+
+#: extensions/kde/package/contents/ui/main.qml:237
+msgid "protocol error"
+msgstr "ошибка протокола"
+
+#: extensions/kde/package/contents/ui/main.qml:238
+msgid "daemon gone"
+msgstr "служба недоступна"
+
+#: extensions/kde/package/contents/ui/main.qml:240
+#: extensions/kde/package/contents/ui/main.qml:259
+#: extensions/kde/package/contents/ui/main.qml:268
+msgid "unknown"
+msgstr "неизвестно"
+
+#: extensions/kde/package/contents/ui/main.qml:253
+msgid "disconnected"
+msgstr "отключено"
+
+#: extensions/kde/package/contents/ui/main.qml:254
+msgid "connecting…"
+msgstr "подключение…"
+
+#: extensions/kde/package/contents/ui/main.qml:255
+msgid "handshaking…"
+msgstr "установка соединения…"
+
+#: extensions/kde/package/contents/ui/main.qml:256
+msgid "connected"
+msgstr "подключено"
+
+#: extensions/kde/package/contents/ui/main.qml:257
+msgid "error"
+msgstr "ошибка"
+
+#: extensions/kde/package/contents/ui/main.qml:265
+msgid "inactive"
+msgstr "неактивно"
+
+#: extensions/kde/package/contents/ui/main.qml:273
+msgid "primary"
+msgstr "основная"
+
+#: extensions/kde/package/contents/ui/main.qml:274
+msgid "portrait"
+msgstr "книжная"
+
+#: extensions/kde/package/contents/ui/main.qml:275
+msgid "landscape"
+msgstr "альбомная"
+
+#: extensions/kde/package/contents/ui/main.qml:276
+msgid "portrait (inv)"
+msgstr "книжная"
+
+#: extensions/kde/package/contents/ui/main.qml:277
+msgid "landscape (inv)"
+msgstr "альбомная"
+
+#~ msgid "Technical details"
+#~ msgstr "Технические сведения"

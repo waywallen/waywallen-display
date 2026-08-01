@@ -1,0 +1,54 @@
+#!/bin/sh
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+repo_root=$(CDPATH= cd -- "$script_dir/../.." && pwd)
+po_dir="$script_dir/po"
+domain=waywallen-gnome
+
+for tool in xgettext msgcat msgmerge msgfmt msginit; do
+    command -v "$tool" >/dev/null 2>&1 || {
+        printf 'error: required gettext tool not found: %s\n' "$tool" >&2
+        exit 1
+    }
+done
+
+mkdir -p "$po_dir"
+tmp_dir=$(mktemp -d "$po_dir/.extract.XXXXXX")
+trap 'rm -rf "$tmp_dir" "$po_dir"/*.po.tmp' EXIT HUP INT TERM
+
+cd "$repo_root"
+manifest="$po_dir/POTFILES.in"
+for kind in javascript gsettings metadata; do
+    awk -F: -v kind="$kind" '$1 == kind { print "extensions/gnome/" $2 }' \
+        "$manifest" > "$tmp_dir/$kind.files"
+    test -s "$tmp_dir/$kind.files" || {
+        printf 'error: no %s sources listed in %s\n' "$kind" "$manifest" >&2
+        exit 1
+    }
+done
+xgettext --language=JavaScript --keyword=_ --from-code=UTF-8 --no-git \
+    --sort-by-file --no-wrap --output="$tmp_dir/js.pot" \
+    --files-from="$tmp_dir/javascript.files"
+xgettext --language=GSettings --from-code=UTF-8 --no-git \
+    --sort-by-file --no-wrap --output="$tmp_dir/schema.pot" \
+    --files-from="$tmp_dir/gsettings.files"
+xgettext --language=JavaScript --keyword=N_ --from-code=UTF-8 --no-git \
+    --sort-by-file --no-wrap --output="$tmp_dir/metadata.pot" \
+    --files-from="$tmp_dir/metadata.files"
+msgcat --use-first --sort-by-file --no-wrap --output="$po_dir/$domain.pot" \
+    "$tmp_dir/js.pot" "$tmp_dir/schema.pot" "$tmp_dir/metadata.pot"
+sed 's/^"POT-Creation-Date:.*\\n"$/"POT-Creation-Date: 1970-01-01 00:00+0000\\n"/' \
+    "$po_dir/$domain.pot" > "$tmp_dir/normalized.pot"
+mv "$tmp_dir/normalized.pot" "$po_dir/$domain.pot"
+
+while IFS= read -r lang; do
+    case "$lang" in ''|'#'*) continue ;; esac
+    po="$po_dir/$lang.po"
+    if [ -f "$po" ]; then
+        msgmerge --update --backup=none --no-wrap "$po" "$po_dir/$domain.pot"
+    else
+        msginit --no-translator --locale="$lang" --input="$po_dir/$domain.pot" --output-file="$po"
+    fi
+    msgfmt --check --check-format -o /dev/null "$po"
+done < "$po_dir/LINGUAS"

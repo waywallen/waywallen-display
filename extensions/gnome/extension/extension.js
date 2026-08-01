@@ -154,6 +154,9 @@ export default class WaywallenExtension extends Extension {
             this._currentProc.prepend_env('GI_TYPELIB_PATH', bundleTypelib);
         if (GLib.file_test(bundleLib, GLib.FileTest.IS_DIR))
             this._currentProc.prepend_env('LD_LIBRARY_PATH', bundleLib);
+        const localeDir = GLib.build_filenamev([this.path, 'locale']);
+        if (GLib.file_test(localeDir, GLib.FileTest.IS_DIR))
+            this._currentProc.set_env('WAYWALLEN_LOCALEDIR', localeDir);
         this._currentProc.set_env('GTK_A11Y', 'none');
 
         this._currentProc.spawnv(argv);

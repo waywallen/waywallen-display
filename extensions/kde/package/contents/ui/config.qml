@@ -23,7 +23,8 @@ ColumnLayout {
     function _probeSurface() {
         const c = Qt.createComponent("ImportTest.qml", Component.PreferSynchronous, root);
         if (!c) {
-            root._probeError = "Failed to create QML component for ImportTest.qml";
+            root._probeError = i18nd("plasma_wallpaper_org.waywallen.kde",
+                                     "Failed to create QML component for ImportTest.qml");
             root._libVersion = "";
             return;
         }
@@ -103,8 +104,7 @@ ColumnLayout {
         visible: true
         type: Kirigami.MessageType.Information
         text: i18nd("plasma_wallpaper_org.waywallen.kde",
-                    "After upgrading the plugin, restart plasmashell to pick up the new QML module:<br/>" +
-                    "<code>systemctl --user restart plasma-plasmashell.service</code>")
+                    "After upgrading the plugin, restart plasmashell to pick up the new QML module:<br/><code>systemctl --user restart plasma-plasmashell.service</code>")
     }
 
     Kirigami.InlineMessage {
@@ -114,11 +114,7 @@ ColumnLayout {
         visible: Qt.platform.pluginName === "xcb"
         type: Kirigami.MessageType.Information
         text: i18nd("plasma_wallpaper_org.waywallen.kde",
-                    "On X11 sessions (e.g. Steam Deck), plasmashell needs the EGL XCB backend " +
-                    "to import the wallpaper's DMA-BUFs. Create " +
-                    "<code>~/.config/systemd/user/plasma-plasmashell.service.d/override.conf</code> with:<br/>" +
-                    "<pre>[Service]\nEnvironment=QT_XCB_GL_INTEGRATION=xcb_egl</pre>" +
-                    "then run <code>systemctl --user daemon-reload</code> and restart plasmashell.")
+                    "On X11 sessions (e.g. Steam Deck), plasmashell needs the EGL XCB backend to import the wallpaper's DMA-BUFs. Create <code>~/.config/systemd/user/plasma-plasmashell.service.d/override.conf</code> with:<br/><pre>[Service]\nEnvironment=QT_XCB_GL_INTEGRATION=xcb_egl</pre>then run <code>systemctl --user daemon-reload</code> and restart plasmashell.")
     }
 
     // Spacer pushes the error block down and keeps the form anchored to
@@ -135,9 +131,7 @@ ColumnLayout {
         visible: root._probeError.length > 0
         type: Kirigami.MessageType.Error
         text: i18nd("plasma_wallpaper_org.waywallen.kde",
-                    "<b>Failed to load the display module.</b><br/>" +
-                    "Please report at <a href=\"https://github.com/waywallen/waywallen-display/issues\">" +
-                    "github.com/waywallen/waywallen-display/issues</a>")
+                    "<b>Failed to load the display module.</b><br/>Please report at <a href=\"https://github.com/waywallen/waywallen-display/issues\">github.com/waywallen/waywallen-display/issues</a>")
         onLinkActivated: (link) => Qt.openUrlExternally(link)
     }
 

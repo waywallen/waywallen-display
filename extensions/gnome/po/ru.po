@@ -1,0 +1,188 @@
+# Russian translation for waywallen-display.
+# Copyright (C) 2026 Artem Baleevskih
+# This file is distributed under the same license as waywallen-display.
+# Artem Baleevskih <catsemaofficial@gmail.com>, 2026.
+msgid ""
+msgstr ""
+"Project-Id-Version: waywallen-gnome 0.2.9\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 1970-01-01 00:00+0000\n"
+"PO-Revision-Date: 2026-07-29 00:00+0300\n"
+"Last-Translator: Artem Baleevskih <catsemaofficial@gmail.com>\n"
+"Language-Team: Russian\n"
+"Language: ru\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=3; plural=(n%10==1 && n%100!=11 ? 0 : n%10>=2 && "
+"n%10<=4 && (n%100<10 || n%100>=20) ? 1 : 2);\n"
+
+#: extensions/gnome/extension/prefs.js:23
+msgid "Display"
+msgstr "Экран"
+
+#: extensions/gnome/extension/prefs.js:27
+msgid "Display name"
+msgstr "Название экрана"
+
+#: extensions/gnome/extension/prefs.js:35
+msgid "Instance id"
+msgstr "Идентификатор экземпляра"
+
+#: extensions/gnome/extension/prefs.js:36
+msgid "(not generated yet)"
+msgstr "Ещё не создан"
+
+#: extensions/gnome/extension/prefs.js:40
+msgid "Regenerate"
+msgstr "Создать заново"
+
+#: extensions/gnome/extension/prefs.js:52
+msgid "Overview"
+msgstr "Обзор"
+
+#: extensions/gnome/extension/prefs.js:56
+msgid "Blur overview background"
+msgstr "Размывать фон режима обзора"
+
+#: extensions/gnome/extension/prefs.js:57
+msgid "Frosted-glass blur over the overview wallpaper."
+msgstr "Применять эффект матового стекла к обоям в режиме обзора."
+
+#: extensions/gnome/extension/prefs.js:64
+msgid "Overview blur strength"
+msgstr "Сила размытия фона обзора"
+
+#: extensions/gnome/extension/prefs.js:65
+msgid "Blur radius in pixels (higher is blurrier)."
+msgstr ""
+"Радиус размытия в пикселях (чем больше значение, тем сильнее размытие)."
+
+#: extensions/gnome/extension/prefs.js:84
+msgid "Pairs well with Blur my Shell"
+msgstr "Хорошо сочетается с Blur my Shell"
+
+#: extensions/gnome/extension/prefs.js:85
+msgid ""
+"For the full frosted-glass look, install Blur my Shell — it also blurs the "
+"panel, dash and application windows, and coexists with this extension."
+msgstr ""
+"Для полноценного эффекта матового стекла установите Blur my Shell. Оно также "
+"размывает панель, панель запуска и окна приложений и работает вместе с этим "
+"расширением."
+
+#: extensions/gnome/extension/prefs.js:96
+msgid "Advanced"
+msgstr "Дополнительно"
+
+#: extensions/gnome/extension/prefs.js:100
+msgid "Show diagnostics overlay"
+msgstr "Показывать диагностическую информацию"
+
+#: extensions/gnome/extension/prefs.js:101
+msgid "Overlay resolution / fps / window-state on the wallpaper (dev only)."
+msgstr ""
+"Показывать состояние подключения, разрешение и состояние окон поверх обоев"
+
+#: extensions/gnome/extension/schemas/org.gnome.shell.extensions.waywallen.gschema.xml:7
+msgid "Stable per-display UUID"
+msgstr "Постоянный UUID экрана"
+
+#: extensions/gnome/extension/schemas/org.gnome.shell.extensions.waywallen.gschema.xml:8
+msgid ""
+"UUID v4 generated on first enable and persisted forever. Used as the per-"
+"display settings key on the daemon side; survives renames, GPU swaps, and DE "
+"restarts."
+msgstr ""
+"UUID версии 4 создаётся при первом включении и сохраняется постоянно. "
+"Фоновая служба использует его как ключ настроек экрана; он не меняется при "
+"переименовании, замене видеокарты и перезапуске среды рабочего стола."
+
+#: extensions/gnome/extension/schemas/org.gnome.shell.extensions.waywallen.gschema.xml:17
+msgid "Human-readable display name reported to the daemon"
+msgstr "Понятное название экрана, передаваемое фоновой службе"
+
+#: extensions/gnome/extension/schemas/org.gnome.shell.extensions.waywallen.gschema.xml:22
+msgid "Overlay connection / resolution / window-state on the wallpaper"
+msgstr ""
+"Показывать состояние подключения, разрешение и состояние окон поверх обоев"
+
+#: extensions/gnome/extension/schemas/org.gnome.shell.extensions.waywallen.gschema.xml:27
+msgid "Blur the overview background"
+msgstr "Размывать фон режима обзора"
+
+#: extensions/gnome/extension/schemas/org.gnome.shell.extensions.waywallen.gschema.xml:28
+msgid ""
+"Apply a gaussian blur to the overview background wallpaper, like Blur my "
+"Shell does for the static wallpaper. Pairs well with Blur my Shell (the two "
+"are z-ordered to coexist), but does not require it."
+msgstr ""
+"Применять размытие по Гауссу к фоновым обоям режима обзора, как Blur my "
+"Shell делает со статическими обоями. Хорошо сочетается с Blur my Shell, но "
+"не требует его установки."
+
+#: extensions/gnome/extension/schemas/org.gnome.shell.extensions.waywallen.gschema.xml:38
+msgid "Overview background blur radius"
+msgstr "Радиус размытия фона обзора"
+
+#: extensions/gnome/extension/schemas/org.gnome.shell.extensions.waywallen.gschema.xml:39
+msgid ""
+"Gaussian blur radius (in pixels) for the overview background. Higher is "
+"blurrier. 0 effectively disables the blur even when it is on."
+msgstr ""
+"Радиус размытия по Гауссу в пикселях для фона режима обзора. Чем больше "
+"значение, тем сильнее размытие. Значение 0 фактически отключает размытие."
+
+#: extensions/gnome/po/metadata.js:2
+msgid "Wallpaper plugin for the waywallen daemon."
+msgstr "Модуль живых обоев для фоновой службы waywallen."
+
+#: extensions/gnome/renderer/renderer.js:205
+msgid "active"
+msgstr "активно"
+
+#: extensions/gnome/renderer/renderer.js:205
+msgid "win"
+msgstr "окно"
+
+#: extensions/gnome/renderer/renderer.js:206
+msgid "full"
+msgstr "полный экран"
+
+#: extensions/gnome/renderer/renderer.js:206
+msgid "max"
+msgstr "развёрнуто"
+
+#: extensions/gnome/renderer/renderer.js:206
+msgid "none"
+msgstr "нет"
+
+#: extensions/gnome/renderer/renderer.js:208
+#, javascript-format
+msgid "mon %d  %s"
+msgstr "мон. %d  %s"
+
+#: extensions/gnome/renderer/renderer.js:209
+#, javascript-format
+msgid "id %s"
+msgstr "id %s"
+
+#: extensions/gnome/renderer/renderer.js:210
+#, javascript-format
+msgid "disp %dx%d scale=%s"
+msgstr "Экран: %dx%d, масштаб %s"
+
+#: extensions/gnome/renderer/renderer.js:211
+#, javascript-format
+msgid "tex %dx%d fourcc=0x%s backend=%s"
+msgstr "Текстура: %dx%d, FourCC 0x%s, бэкенд %s"
+
+#: extensions/gnome/renderer/renderer.js:213
+#, javascript-format
+msgid "fps %s  frames %d"
+msgstr "FPS: %s; кадров: %d"
+
+#: extensions/gnome/renderer/renderer.js:214
+#, javascript-format
+msgid "winstate 0x%s (%s)"
+msgstr "Состояние окон: 0x%s (%s)"

@@ -1,5 +1,7 @@
 # waywallen-display
 
+<a href="README.md">English README</a> · <a href="README.RU.md">Русский README</a>
+
 `waywallen` 壁纸守护进程的桌面集成层 —— 让 KDE Plasma、GNOME Shell 等  
 Linux 桌面环境把 `waywallen` 的壁纸输出当作普通 surface 显示，通过 DMA-BUF  
 零拷贝共享 GPU 资源。
@@ -26,7 +28,7 @@ Linux 桌面环境把 `waywallen` 的壁纸输出当作普通 surface 显示，�
 从最新 release 下载 `waywallen-kde-<版本>-<架构>-embed.zip`，然后：
 
 ```sh
-kpackagetool6 --type Plasma/Wallpaper -i waywallen-kde-<版本>-<架构>.zip
+kpackagetool6 --type Plasma/Wallpaper -i waywallen-kde-<版本>-<架构>-embed.zip
 # -u 升级，-r 卸载
 ```
 
@@ -34,6 +36,23 @@ kpackagetool6 --type Plasma/Wallpaper -i waywallen-kde-<版本>-<架构>.zip
 > KDE Plasma 用户安装/升级 QML 插件后需要重启 shell 才会被识别：
 >
 > ```sh
+> systemctl --user restart plasma-plasmashell.service
+> ```
+
+> [!TIP]
+> 在 X11 会话（例如 Steam Deck）中，plasmashell 需要 EGL XCB 后端来导入壁纸的
+> DMA-BUF。创建 systemd 用户配置
+> `~/.config/systemd/user/plasma-plasmashell.service.d/override.conf`：
+>
+> ```ini
+> [Service]
+> Environment=QT_XCB_GL_INTEGRATION=xcb_egl
+> ```
+>
+> 然后重新加载配置并重启：
+>
+> ```sh
+> systemctl --user daemon-reload
 > systemctl --user restart plasma-plasmashell.service
 > ```
 
@@ -57,8 +76,11 @@ Niri），从最新 release 下载
 
 ```sh
 tar -xzf waywallen-layer-shell-<版本>-<架构>.tar.gz
-install -Dm755 waywallen-layer-shell ~/.local/bin/waywallen-layer-shell
+install -Dm755 waywallen-layer-shell-<版本>-<架构>/waywallen-layer-shell ~/.local/bin/waywallen-layer-shell
+cp -r waywallen-layer-shell-<版本>-<架构>/share ~/.local/
 ```
+
+`share` 目录包含翻译文件。若需要本地化的命令行输出，请在移动二进制文件时一并保留。
 
 ```sh
 waywallen-layer-shell

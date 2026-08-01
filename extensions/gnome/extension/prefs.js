@@ -2,11 +2,13 @@
 // user is likely to want to tweak by hand; the rest stays in gsettings.
 
 import Adw from 'gi://Adw';
+import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import Gtk from 'gi://Gtk';
-import {ExtensionPreferences} from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
-
-const Gio = imports.gi.Gio;
+import {
+    ExtensionPreferences,
+    gettext as _,
+} from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
 export default class WaywallenPrefs extends ExtensionPreferences {
     fillPreferencesWindow(window) {
@@ -18,11 +20,11 @@ export default class WaywallenPrefs extends ExtensionPreferences {
         });
         window.add(page);
 
-        const group = new Adw.PreferencesGroup({title: 'Display'});
+        const group = new Adw.PreferencesGroup({title: _('Display')});
         page.add(group);
 
         // Optional display name override passed to the daemon.
-        const nameRow = new Adw.EntryRow({title: 'Display name'});
+        const nameRow = new Adw.EntryRow({title: _('Display name')});
         nameRow.set_text(settings.get_string('display-name'));
         nameRow.connect('apply', () =>
             settings.set_string('display-name', nameRow.get_text()));
@@ -30,12 +32,12 @@ export default class WaywallenPrefs extends ExtensionPreferences {
 
         // Instance id — surface as read-only with a regenerate button.
         const idRow = new Adw.ActionRow({
-            title: 'Instance id',
-            subtitle: settings.get_string('instance-id') || '(not generated yet)',
+            title: _('Instance id'),
+            subtitle: settings.get_string('instance-id') || _('(not generated yet)'),
         });
         const regen = new Gtk.Button({
             valign: Gtk.Align.CENTER,
-            label: 'Regenerate',
+            label: _('Regenerate'),
         });
         regen.connect('clicked', () => {
             settings.set_string('instance-id', generateUuidV4());
@@ -47,20 +49,20 @@ export default class WaywallenPrefs extends ExtensionPreferences {
         // --- Overview ---
         // The live wallpaper in the Activities overview: sharp behind the
         // workspace previews, optionally blurred like Blur my Shell.
-        const ovGroup = new Adw.PreferencesGroup({title: 'Overview'});
+        const ovGroup = new Adw.PreferencesGroup({title: _('Overview')});
         page.add(ovGroup);
 
         const blurRow = new Adw.SwitchRow({
-            title: 'Blur overview background',
-            subtitle: 'Frosted-glass blur over the overview wallpaper.',
+            title: _('Blur overview background'),
+            subtitle: _('Frosted-glass blur over the overview wallpaper.'),
         });
         settings.bind('overview-blur', blurRow, 'active',
             Gio.SettingsBindFlags.DEFAULT);
         ovGroup.add(blurRow);
 
         const strengthRow = new Adw.SpinRow({
-            title: 'Overview blur strength',
-            subtitle: 'Blur radius in pixels (higher is blurrier).',
+            title: _('Overview blur strength'),
+            subtitle: _('Blur radius in pixels (higher is blurrier).'),
             adjustment: new Gtk.Adjustment({
                 lower: 0, upper: 100,
                 step_increment: 1, page_increment: 5, value: 30,
@@ -79,8 +81,8 @@ export default class WaywallenPrefs extends ExtensionPreferences {
         if (!blurMyShellInstalled()) {
             const bmsRow = new Adw.ActionRow({
                 icon_name: 'dialog-information-symbolic',
-                title: 'Pairs well with Blur my Shell',
-                subtitle: 'For the full frosted-glass look, install Blur my Shell — it also blurs the panel, dash and application windows, and coexists with this extension.',
+                title: _('Pairs well with Blur my Shell'),
+                subtitle: _('For the full frosted-glass look, install Blur my Shell — it also blurs the panel, dash and application windows, and coexists with this extension.'),
             });
             bmsRow.add_suffix(new Gtk.LinkButton({
                 label: 'extensions.gnome.org',
@@ -91,12 +93,12 @@ export default class WaywallenPrefs extends ExtensionPreferences {
         }
 
         // --- Advanced ---
-        const advGroup = new Adw.PreferencesGroup({title: 'Advanced'});
+        const advGroup = new Adw.PreferencesGroup({title: _('Advanced')});
         page.add(advGroup);
 
         const diagRow = new Adw.SwitchRow({
-            title: 'Show diagnostics overlay',
-            subtitle: 'Overlay resolution / fps / window-state on the wallpaper (dev only).',
+            title: _('Show diagnostics overlay'),
+            subtitle: _('Overlay resolution / fps / window-state on the wallpaper (dev only).'),
         });
         settings.bind('show-diagnostics', diagRow, 'active',
             Gio.SettingsBindFlags.DEFAULT);
