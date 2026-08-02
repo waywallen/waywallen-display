@@ -3,47 +3,174 @@
 #define WAYWALLEN_DISPLAY_PROTOCOL_TYPES_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
-#ifndef WAYWALLEN_PROTOCOL_NAMED_TYPES_DEFINED
-#define WAYWALLEN_PROTOCOL_NAMED_TYPES_DEFINED
+#ifndef WAYWALLEN_PROTOCOL_VALUE_TYPES_DEFINED
+#    define WAYWALLEN_PROTOCOL_VALUE_TYPES_DEFINED
 
-typedef enum waywallen_pause_effect_kind {
+/* --- Shared primitive value types --- */
+
+typedef struct ww_rect {
+    float x;
+    float y;
+    float w;
+    float h;
+} ww_rect_t;
+
+typedef struct ww_array_u32 {
+    uint32_t  count;
+    uint32_t* data; /* heap-allocated by decoder; NULL if count==0 */
+} ww_array_u32_t;
+
+typedef struct ww_array_u64 {
+    uint32_t  count;
+    uint64_t* data;
+} ww_array_u64_t;
+
+typedef struct ww_array_i32 {
+    uint32_t count;
+    int32_t* data;
+} ww_array_i32_t;
+
+typedef struct ww_array_i64 {
+    uint32_t count;
+    int64_t* data;
+} ww_array_i64_t;
+
+typedef struct ww_array_f32 {
+    uint32_t count;
+    float*   data;
+} ww_array_f32_t;
+
+typedef struct ww_array_f64 {
+    uint32_t count;
+    double*  data;
+} ww_array_f64_t;
+
+typedef struct ww_array_string {
+    uint32_t count;
+    char**   data; /* each entry NUL-terminated, heap-allocated */
+} ww_array_string_t;
+
+typedef struct ww_kv {
+    char* key;
+    char* value;
+} ww_kv_t;
+
+typedef struct ww_kv_list {
+    uint32_t count;
+    ww_kv_t* data;
+} ww_kv_list_t;
+
+#endif /* WAYWALLEN_PROTOCOL_VALUE_TYPES_DEFINED */
+
+#ifndef WAYWALLEN_PROTOCOL_NAMED_TYPES_DEFINED
+#    define WAYWALLEN_PROTOCOL_NAMED_TYPES_DEFINED
+
+typedef enum waywallen_pause_effect_kind
+{
     WAYWALLEN_PAUSE_EFFECT_KIND_NONE = 0,
     WAYWALLEN_PAUSE_EFFECT_KIND_BLUR = 1,
 } waywallen_pause_effect_kind_t;
+
+typedef enum waywallen_buffer_import_failure_kind
+{
+    WAYWALLEN_BUFFER_IMPORT_FAILURE_KIND_UNSUPPORTED        = 0,
+    WAYWALLEN_BUFFER_IMPORT_FAILURE_KIND_RESOURCE_EXHAUSTED = 1,
+    WAYWALLEN_BUFFER_IMPORT_FAILURE_KIND_BACKEND_FAILURE    = 2,
+} waywallen_buffer_import_failure_kind_t;
+
+typedef enum waywallen_pointer_button_state
+{
+    WAYWALLEN_POINTER_BUTTON_STATE_RELEASED = 0,
+    WAYWALLEN_POINTER_BUTTON_STATE_PRESSED  = 1,
+} waywallen_pointer_button_state_t;
+
+typedef enum waywallen_pointer_axis_source
+{
+    WAYWALLEN_POINTER_AXIS_SOURCE_WHEEL      = 0,
+    WAYWALLEN_POINTER_AXIS_SOURCE_FINGER     = 1,
+    WAYWALLEN_POINTER_AXIS_SOURCE_CONTINUOUS = 2,
+} waywallen_pointer_axis_source_t;
+
+typedef enum waywallen_display_error_code
+{
+    WAYWALLEN_DISPLAY_ERROR_CODE_PROTOCOL_VIOLATION  = 1,
+    WAYWALLEN_DISPLAY_ERROR_CODE_VERSION_UNSUPPORTED = 2,
+    WAYWALLEN_DISPLAY_ERROR_CODE_NEGOTIATION_FAILED  = 3,
+    WAYWALLEN_DISPLAY_ERROR_CODE_INTERNAL            = 4,
+} waywallen_display_error_code_t;
 
 typedef struct waywallen_blur_effect_config {
     uint32_t radius;
 } waywallen_blur_effect_config_t;
 
+typedef struct waywallen_rgba_color {
+    float r;
+    float g;
+    float b;
+    float a;
+} waywallen_rgba_color_t;
+
+typedef struct waywallen_composition_config {
+    uint64_t               generation;
+    uint64_t               buffer_generation;
+    ww_rect_t              source_rect;
+    ww_rect_t              dest_rect;
+    uint32_t               transform;
+    waywallen_rgba_color_t clear_color;
+} waywallen_composition_config_t;
+
+typedef struct waywallen_consumer_capabilities {
+    ww_array_u32_t fourccs;
+    ww_array_u32_t mod_counts;
+    ww_array_u64_t modifiers;
+    ww_array_u32_t plane_counts;
+    ww_array_u32_t device_uuid;
+    ww_array_u32_t driver_uuid;
+    uint32_t       drm_render_major;
+    uint32_t       drm_render_minor;
+    uint32_t       mem_hints;
+    uint32_t       sync_caps;
+    uint32_t       color_caps;
+    uint32_t       extent_max_w;
+    uint32_t       extent_max_h;
+} waywallen_consumer_capabilities_t;
+
+typedef struct waywallen_display_metrics {
+    uint32_t width;
+    uint32_t height;
+    uint32_t refresh_mhz;
+} waywallen_display_metrics_t;
+
 typedef struct waywallen_pause_effect_config {
-    waywallen_pause_effect_kind_t kind;
+    waywallen_pause_effect_kind_t  kind;
     waywallen_blur_effect_config_t blur;
 } waywallen_pause_effect_config_t;
 
-typedef struct waywallen_pause_effect_dynamic_config {
+typedef struct waywallen_pause_effect_state {
     bool active;
-} waywallen_pause_effect_dynamic_config_t;
+} waywallen_pause_effect_state_t;
 
 typedef struct waywallen_presentation_capabilities {
     uint32_t flags;
 } waywallen_presentation_capabilities_t;
 
 typedef struct waywallen_presentation_config {
-    uint64_t generation;
+    uint64_t                        generation;
     waywallen_pause_effect_config_t pause_effect;
 } waywallen_presentation_config_t;
 
-typedef struct waywallen_presentation_dynamic_config {
-    uint64_t generation;
-    uint64_t config_generation;
-    waywallen_pause_effect_dynamic_config_t pause_effect;
-} waywallen_presentation_dynamic_config_t;
+typedef struct waywallen_presentation_state {
+    uint64_t                       generation;
+    uint64_t                       config_generation;
+    waywallen_pause_effect_state_t pause_effect;
+} waywallen_presentation_state_t;
 
 typedef struct waywallen_presentation_snapshot {
     waywallen_presentation_config_t config;
-    waywallen_presentation_dynamic_config_t dynamic_config;
+    waywallen_presentation_state_t  state;
 } waywallen_presentation_snapshot_t;
 
 #endif /* WAYWALLEN_PROTOCOL_NAMED_TYPES_DEFINED */

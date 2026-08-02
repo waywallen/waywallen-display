@@ -43,8 +43,24 @@ struct run_state {
     int                  disconnected;
 };
 
-static void on_textures_ready(void* ud, const waywallen_textures_t* t) {
+static void log_composition(const waywallen_composition_config_t* c) {
+    fprintf(stderr,
+            "[cb] composition: source=(%.0f,%.0f,%.0f,%.0f) "
+            "dest=(%.0f,%.0f,%.0f,%.0f) xform=%u\n",
+            (double)c->source_rect.x,
+            (double)c->source_rect.y,
+            (double)c->source_rect.w,
+            (double)c->source_rect.h,
+            (double)c->dest_rect.x,
+            (double)c->dest_rect.y,
+            (double)c->dest_rect.w,
+            (double)c->dest_rect.h,
+            c->transform);
+}
+
+static void on_binding_ready(void* ud, const waywallen_binding_t* binding) {
     (void)ud;
+    const waywallen_textures_t* t = &binding->textures;
     fprintf(
         stderr,
         "[cb] textures_ready: count=%u tex=%ux%u fourcc=0x%08x mod=0x%016lx planes=%u backend=%d\n",
@@ -55,6 +71,7 @@ static void on_textures_ready(void* ud, const waywallen_textures_t* t) {
         (unsigned long)t->modifier,
         t->planes_per_buffer,
         (int)t->backend);
+    log_composition(&binding->config);
 }
 
 static void on_textures_releasing(void* ud, const waywallen_textures_t* t) {
@@ -62,19 +79,9 @@ static void on_textures_releasing(void* ud, const waywallen_textures_t* t) {
     fprintf(stderr, "[cb] textures_releasing: count=%u\n", t->count);
 }
 
-static void on_config(void* ud, const waywallen_config_t* c) {
+static void on_composition_config(void* ud, const waywallen_composition_config_t* c) {
     (void)ud;
-    fprintf(stderr,
-            "[cb] config: source=(%.0f,%.0f,%.0f,%.0f) dest=(%.0f,%.0f,%.0f,%.0f) xform=%u\n",
-            (double)c->source_rect.x,
-            (double)c->source_rect.y,
-            (double)c->source_rect.w,
-            (double)c->source_rect.h,
-            (double)c->dest_rect.x,
-            (double)c->dest_rect.y,
-            (double)c->dest_rect.w,
-            (double)c->dest_rect.h,
-            c->transform);
+    log_composition(c);
 }
 
 static void on_frame_ready(void* ud, const waywallen_frame_t* f) {
@@ -89,7 +96,7 @@ static void on_frame_ready(void* ud, const waywallen_frame_t* f) {
     // immediately. The helper closes the fd.
     if (f->release_syncobj_fd >= 0) {
         if (waywallen_display_signal_release_syncobj(f->release_syncobj_fd) == WAYWALLEN_OK) {
-            (void)waywallen_display_frame_armed(rs->display, f->buffer_generation, f->seq);
+            (void)waywallen_display_frame_release_armed(rs->display, f->buffer_generation, f->seq);
         }
     }
 }
@@ -176,9 +183,9 @@ int main(int argc, char** argv) {
     };
 
     waywallen_display_callbacks_t cb = {
-        .on_textures_ready     = on_textures_ready,
+        .on_binding_ready      = on_binding_ready,
         .on_textures_releasing = on_textures_releasing,
-        .on_config             = on_config,
+        .on_composition_config = on_composition_config,
         .on_frame_ready        = on_frame_ready,
         .on_disconnected       = on_disconnected,
         .user_data             = &rs,
@@ -197,8 +204,10 @@ int main(int argc, char** argv) {
 
     /* Event-loop-friendly handshake. For a one-shot CLI a single
      * blocking `waywallen_display_connect()` call would do the same. */
-    int rc = waywallen_display_begin_connect(
-        d, a.socket_path, a.name, NULL, a.width, a.height, a.refresh_mhz);
+    const waywallen_display_metrics_t metrics = { .width       = a.width,
+                                                  .height      = a.height,
+                                                  .refresh_mhz = a.refresh_mhz };
+    int rc = waywallen_display_begin_connect(d, a.socket_path, a.name, NULL, &metrics);
     if (rc != WAYWALLEN_OK) {
         fprintf(stderr, "begin_connect failed: %d\n", rc);
         waywallen_display_shutdown(d);

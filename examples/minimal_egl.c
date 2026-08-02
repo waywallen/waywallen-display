@@ -47,9 +47,23 @@ struct state {
     int                  textures_valid;
 };
 
-static void on_textures_ready(void* ud, const waywallen_textures_t* t) {
-    struct state* s   = (struct state*)ud;
-    s->textures_valid = (t->backend == WAYWALLEN_BACKEND_EGL && t->gl_textures != NULL);
+static void log_composition(const waywallen_composition_config_t* c) {
+    fprintf(stderr,
+            "[egl] composition: src=(%.0f,%.0f,%.0f,%.0f) dst=(%.0f,%.0f,%.0f,%.0f)\n",
+            (double)c->source_rect.x,
+            (double)c->source_rect.y,
+            (double)c->source_rect.w,
+            (double)c->source_rect.h,
+            (double)c->dest_rect.x,
+            (double)c->dest_rect.y,
+            (double)c->dest_rect.w,
+            (double)c->dest_rect.h);
+}
+
+static void on_binding_ready(void* ud, const waywallen_binding_t* binding) {
+    struct state*               s = (struct state*)ud;
+    const waywallen_textures_t* t = &binding->textures;
+    s->textures_valid             = (t->backend == WAYWALLEN_BACKEND_EGL && t->gl_textures != NULL);
     fprintf(stderr,
             "[egl] textures_ready: count=%u %ux%u backend=%d gl_textures=%s\n",
             t->count,
@@ -62,6 +76,7 @@ static void on_textures_ready(void* ud, const waywallen_textures_t* t) {
             fprintf(stderr, "  tex[%u] = GL name %u\n", i, t->gl_textures[i]);
         }
     }
+    log_composition(&binding->config);
 }
 
 static void on_textures_releasing(void* ud, const waywallen_textures_t* t) {
@@ -70,18 +85,9 @@ static void on_textures_releasing(void* ud, const waywallen_textures_t* t) {
     fprintf(stderr, "[egl] textures_releasing: count=%u\n", t->count);
 }
 
-static void on_config(void* ud, const waywallen_config_t* c) {
+static void on_composition_config(void* ud, const waywallen_composition_config_t* c) {
     (void)ud;
-    fprintf(stderr,
-            "[egl] config: src=(%.0f,%.0f,%.0f,%.0f) dst=(%.0f,%.0f,%.0f,%.0f)\n",
-            (double)c->source_rect.x,
-            (double)c->source_rect.y,
-            (double)c->source_rect.w,
-            (double)c->source_rect.h,
-            (double)c->dest_rect.x,
-            (double)c->dest_rect.y,
-            (double)c->dest_rect.w,
-            (double)c->dest_rect.h);
+    log_composition(c);
 }
 
 static void on_frame_ready(void* ud, const waywallen_frame_t* f) {
@@ -99,7 +105,7 @@ static void on_frame_ready(void* ud, const waywallen_frame_t* f) {
     // paths.
     if (f->release_syncobj_fd >= 0) {
         if (waywallen_display_signal_release_syncobj(f->release_syncobj_fd) == WAYWALLEN_OK) {
-            (void)waywallen_display_frame_armed(s->display, f->buffer_generation, f->seq);
+            (void)waywallen_display_frame_release_armed(s->display, f->buffer_generation, f->seq);
         }
     }
 }
@@ -205,9 +211,9 @@ int main(int argc, char** argv) {
         .textures_valid = 0,
     };
     waywallen_display_callbacks_t cb = {
-        .on_textures_ready     = on_textures_ready,
+        .on_binding_ready      = on_binding_ready,
         .on_textures_releasing = on_textures_releasing,
-        .on_config             = on_config,
+        .on_composition_config = on_composition_config,
         .on_frame_ready        = on_frame_ready,
         .on_disconnected       = on_disconnected,
         .user_data             = &st,
@@ -235,7 +241,10 @@ int main(int argc, char** argv) {
     /* Async handshake — same shape as a GUI host using QSocketNotifier:
      * begin_connect kicks things off non-blocking, advance_handshake is
      * driven by poll readiness until DONE. */
-    rc = waywallen_display_begin_connect(d, socket_path, name, NULL, 640, 480, 60000);
+    const waywallen_display_metrics_t metrics = { .width       = 640,
+                                                  .height      = 480,
+                                                  .refresh_mhz = 60000 };
+    rc = waywallen_display_begin_connect(d, socket_path, name, NULL, &metrics);
     if (rc != WAYWALLEN_OK) {
         fprintf(stderr, "begin_connect failed: %d\n", rc);
         waywallen_display_shutdown(d);

@@ -27,11 +27,10 @@ struct _WwShadowPaintable {
     guint64  offsets[4];
     gboolean have_shadow;
 
-    /* Layout from WwDisplay::config (set_config). have_config false until
-     * the first config arrives — then snapshot stretches full shadow. */
-    gboolean have_config;
+    /* Composition is absent until the first binding arrives. */
+    gboolean have_composition;
     float    src[4];    /* x, y, w, h in texture px */
-    float    dst[4];    /* x, y, w, h in pre-rotation display px */
+    float    dst[4];    /* x, y, w, h in display surface px */
     guint    transform; /* wl_output.transform 0-7 */
     float    clear[4];  /* letterbox RGBA */
 };
@@ -142,7 +141,7 @@ static void snapshot_vfunc(GdkPaintable* paintable, GdkSnapshot* snapshot, doubl
 
     if (! self->tex) return;
 
-    if (! self->have_config) {
+    if (! self->have_composition) {
         graphene_rect_t rect;
         graphene_rect_init(&rect, 0.0f, 0.0f, (float)width, (float)height);
         gtk_snapshot_append_texture(s, self->tex, &rect);
@@ -199,7 +198,7 @@ static void ww_shadow_paintable_iface_init(GdkPaintableInterface* iface) {
 static void ww_shadow_paintable_init(WwShadowPaintable* self) {
     self->fd = -1;
     /* Default letterbox / pre-content background: opaque black. The
-     * daemon overrides via set_config; this is what shows before any
+     * daemon overrides via composition config; this is what shows before any
      * content and behind a partial-coverage fill mode. */
     self->clear[3] = 1.0f;
 }
@@ -268,24 +267,25 @@ void ww_shadow_paintable_refresh(WwShadowPaintable* self) {
     gdk_paintable_invalidate_contents(GDK_PAINTABLE(self));
 }
 
-void ww_shadow_paintable_set_config(WwShadowPaintable* self, double sx, double sy, double sw,
-                                    double sh, double dx, double dy, double dw, double dh,
-                                    guint transform, double cr, double cg, double cb, double ca) {
+void ww_shadow_paintable_set_composition(WwShadowPaintable* self, double sx, double sy, double sw,
+                                         double sh, double dx, double dy, double dw, double dh,
+                                         guint transform, double cr, double cg, double cb,
+                                         double ca) {
     g_return_if_fail(WW_IS_SHADOW_PAINTABLE(self));
-    self->src[0]      = (float)sx;
-    self->src[1]      = (float)sy;
-    self->src[2]      = (float)sw;
-    self->src[3]      = (float)sh;
-    self->dst[0]      = (float)dx;
-    self->dst[1]      = (float)dy;
-    self->dst[2]      = (float)dw;
-    self->dst[3]      = (float)dh;
-    self->transform   = transform;
-    self->clear[0]    = (float)cr;
-    self->clear[1]    = (float)cg;
-    self->clear[2]    = (float)cb;
-    self->clear[3]    = (float)ca;
-    self->have_config = TRUE;
+    self->src[0]           = (float)sx;
+    self->src[1]           = (float)sy;
+    self->src[2]           = (float)sw;
+    self->src[3]           = (float)sh;
+    self->dst[0]           = (float)dx;
+    self->dst[1]           = (float)dy;
+    self->dst[2]           = (float)dw;
+    self->dst[3]           = (float)dh;
+    self->transform        = transform;
+    self->clear[0]         = (float)cr;
+    self->clear[1]         = (float)cg;
+    self->clear[2]         = (float)cb;
+    self->clear[3]         = (float)ca;
+    self->have_composition = TRUE;
     gdk_paintable_invalidate_contents(GDK_PAINTABLE(self));
 }
 

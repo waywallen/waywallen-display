@@ -211,9 +211,9 @@ class MonitorRenderer {
             _('fps %s  frames %d').format(fps.toFixed(1), frames),
             _('winstate 0x%s (%s)').format(f.toString(16), ws),
             `pause-effect cfg=${this._presentation?.config.generation ?? 0} ` +
-            `dyn=${this._presentation?.dynamicConfig.generation ?? 0} ` +
+            `dyn=${this._presentation?.state.generation ?? 0} ` +
             `kind=${this._presentation?.config.pauseEffect.kind ?? 0} ` +
-            `active=${this._presentation?.dynamicConfig.pauseEffect.active ?? false} ` +
+            `active=${this._presentation?.state.pauseEffect.active ?? false} ` +
             `radius=${this._presentation?.config.pauseEffect.blur.radius ?? 30}`,
         ].join('\n'));
     }
@@ -248,13 +248,15 @@ class MonitorRenderer {
         const d = Waywallen.Display.new();
         if (!d.bind_dmabuf_relay())
             throw new Error('bind_dmabuf_relay failed');
-        if (!d.set_presentation_capabilities(Waywallen.PresentationCapability.BLUR))
+        if (!d.set_presentation_capabilities(Waywallen.PresentationCapability.PAUSE_BLUR))
             throw new Error('set_presentation_capabilities failed');
         this._display = d;
 
-        d.connect('textures-ready',
-            (_o, count, w, h, fourcc, modifier, backend) =>
-                this._onTexturesReady(count, w, h, fourcc, modifier, backend));
+        d.connect('binding-ready',
+            (_o, count, w, h, fourcc, modifier, backend,
+                sx, sy, sw, sh, dx, dy, dw, dh, transform, cr, cg, cb, ca) =>
+                this._onBindingReady(count, w, h, fourcc, modifier, backend,
+                    sx, sy, sw, sh, dx, dy, dw, dh, transform, cr, cg, cb, ca));
         // Register physical pixels (logical geometry × scale) so the producer
         // renders at native resolution, not the logical (half-res on HiDPI).
         const geom = this._monitor.get_geometry();
@@ -266,28 +268,25 @@ class MonitorRenderer {
         this._ph = ph;
 
         d.connect('textures-releasing', () => this._onTexturesReleasing());
-        d.connect('config',
+        d.connect('composition-config',
             (_o, sx, sy, sw, sh, dx, dy, dw, dh, transform, cr, cg, cb, ca) =>
-                // dest is physical display px → divide by scale for the
-                // logical widget; source stays in texture px.
-                this._paintable?.set_config(sx, sy, sw, sh,
-                                            dx / scale, dy / scale,
-                                            dw / scale, dh / scale,
-                                            transform, cr, cg, cb, ca));
+                this._applyComposition(
+                    sx, sy, sw, sh, dx, dy, dw, dh, transform, cr, cg, cb, ca));
         d.connect('frame-ready',
             (_o, idx, seq, fd) => this._onFrameReady(idx, seq, fd));
-        d.connect('presentation-config',
-            (_o, configGeneration, dynamicGeneration, kind, radius, active) =>
-                this._onPresentationConfig(
-                    configGeneration, dynamicGeneration, kind, radius, active));
-        d.connect('presentation-dynamic-config',
-            (_o, dynamicGeneration, configGeneration, active) =>
-                this._onPresentationDynamicConfig(
-                    dynamicGeneration, configGeneration, active));
+        d.connect('presentation-snapshot',
+            (_o, configGeneration, stateGeneration, kind, radius, active) =>
+                this._onPresentationSnapshot(
+                    configGeneration, stateGeneration, kind, radius, active));
+        d.connect('presentation-state',
+            (_o, stateGeneration, configGeneration, active) =>
+                this._onPresentationState(
+                    stateGeneration, configGeneration, active));
         d.connect('disconnected',
             (_o, code, msg) => this._onDisconnected(code, msg));
 
         const refreshMhz = this._monitor.get_refresh_rate() || 60000;
+        d.set_window_state(this._winFlags ?? 0);
         if (!d.begin_connect(this._opts.socketPath,
                              this._displayName,
                              this._instanceId,
@@ -338,7 +337,8 @@ class MonitorRenderer {
         return GLib.SOURCE_CONTINUE;
     }
 
-    _onTexturesReady(count, w, h, fourcc, _modifier, backend) {
+    _onBindingReady(count, w, h, fourcc, _modifier, backend,
+        sx, sy, sw, sh, dx, dy, dw, dh, transform, cr, cg, cb, ca) {
         const [ok, sfd, nPlanes, strides, offsets, smod] =
             this._display.get_shadow_export();
         if (!ok) {
@@ -355,6 +355,17 @@ class MonitorRenderer {
         logIndexed(this._index,
             `bound shadow ${w}x${h} fourcc=0x${fourcc.toString(16)} ` +
             `count=${count} backend=${backend}`);
+        this._applyComposition(
+            sx, sy, sw, sh, dx, dy, dw, dh, transform, cr, cg, cb, ca);
+    }
+
+    _applyComposition(sx, sy, sw, sh, dx, dy, dw, dh, transform, cr, cg, cb, ca) {
+        const scale = this._scale || 1;
+        // Dest is physical display pixels; GTK widgets use logical pixels.
+        this._paintable?.set_composition(sx, sy, sw, sh,
+                                         dx / scale, dy / scale,
+                                         dw / scale, dh / scale,
+                                         transform, cr, cg, cb, ca);
     }
 
     _onTexturesReleasing() {
@@ -383,7 +394,7 @@ class MonitorRenderer {
         print(encodeControlFrame({geometry: this._controlGeometry(), ...frame}).trimEnd());
     }
 
-    _onPresentationConfig(configGeneration, dynamicGeneration, kind, radius, active) {
+    _onPresentationSnapshot(configGeneration, stateGeneration, kind, radius, active) {
         if (configGeneration === 0) {
             this._presentation = null;
             this._presentationReady = false;
@@ -396,29 +407,29 @@ class MonitorRenderer {
                 generation: configGeneration,
                 pauseEffect: {kind, blur: {radius}},
             },
-            dynamicConfig: {
-                generation: dynamicGeneration,
+            state: {
+                generation: stateGeneration,
                 configGeneration,
                 pauseEffect: {active},
             },
         };
-        const type = this._presentationReady ? 'presentation-config' : 'connection';
+        const type = this._presentationReady ? 'presentation-snapshot' : 'connection';
         this._writeControl({type, presentation: this._presentation});
         if (this._diagLabel)
             this._updateDiag();
     }
 
-    _onPresentationDynamicConfig(dynamicGeneration, configGeneration, active) {
+    _onPresentationState(stateGeneration, configGeneration, active) {
         if (!this._presentation ||
             configGeneration !== this._presentation.config.generation)
             return;
-        const dynamicConfig = {
-            generation: dynamicGeneration,
+        const state = {
+            generation: stateGeneration,
             configGeneration,
             pauseEffect: {active},
         };
-        this._presentation.dynamicConfig = dynamicConfig;
-        this._writeControl({type: 'presentation-dynamic-config', dynamicConfig});
+        this._presentation.state = state;
+        this._writeControl({type: 'presentation-state', state});
         if (this._diagLabel)
             this._updateDiag();
     }

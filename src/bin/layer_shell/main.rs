@@ -78,7 +78,7 @@ pub struct OutputBinding {
     display: Mutex<Option<DisplayPtr>>,
     frame_pending: AtomicBool,
     registered: AtomicBool,
-    last_pushed_size: Mutex<Option<(u32, u32)>>,
+    last_pushed_metrics: Mutex<Option<(u32, u32, u32)>>,
     layer_buffer: Mutex<Option<LayerBuffer>>,
     config: Mutex<FrameConfig>,
     window_flags: AtomicU32,
@@ -623,9 +623,9 @@ fn send_pointer_button(
         return;
     }
     let button_state = if state_u32 == 1 {
-        sys::WAYWALLEN_BUTTON_PRESSED
+        sys::WAYWALLEN_POINTER_BUTTON_STATE_PRESSED
     } else {
-        sys::WAYWALLEN_BUTTON_RELEASED
+        sys::WAYWALLEN_POINTER_BUTTON_STATE_RELEASED
     };
     let rc = binding.with_display(|d| unsafe {
         sys::waywallen_display_send_pointer_button(d, x, y, button, button_state, timestamp_us, 0)
@@ -661,9 +661,9 @@ fn send_pointer_axis(
         return;
     }
     let source = match source {
-        1 => sys::WAYWALLEN_AXIS_FINGER,
-        2 => sys::WAYWALLEN_AXIS_CONTINUOUS,
-        _ => sys::WAYWALLEN_AXIS_WHEEL,
+        1 => sys::WAYWALLEN_POINTER_AXIS_SOURCE_FINGER,
+        2 => sys::WAYWALLEN_POINTER_AXIS_SOURCE_CONTINUOUS,
+        _ => sys::WAYWALLEN_POINTER_AXIS_SOURCE_WHEEL,
     };
     let rc = binding.with_display(|d| unsafe {
         sys::waywallen_display_send_pointer_axis(d, x, y, delta_x, delta_y, source, timestamp_us, 0)
@@ -767,6 +767,13 @@ impl Dispatch<WlOutput, u32> for App {
                         entry.refresh_mhz = refresh_mhz;
                         if let Some(binding) = entry.binding.as_ref() {
                             binding.refresh_mhz.store(refresh_mhz, Ordering::SeqCst);
+                            if let Some(physical) = *binding.configured_size.lock().unwrap() {
+                                if let Err(e) = push_resize_if_registered(binding, physical) {
+                                    log::warn!(
+                                        "output {output_name}: push display metrics failed: {e}"
+                                    );
+                                }
+                            }
                         }
                         log::info!(
                             "output {output_name}: wl_output.mode current refresh={refresh_mhz}mHz"
@@ -912,7 +919,7 @@ impl Dispatch<WpFractionalScaleV1, u32> for App {
             );
             let arc_binding = binding.clone();
             if let Err(e) = push_resize_if_registered(&arc_binding, physical) {
-                log::warn!("output {output_name}: push update_display failed: {e}");
+                log::warn!("output {output_name}: push display metrics failed: {e}");
             }
         }
     }
@@ -986,7 +993,7 @@ impl Dispatch<ZwlrLayerSurfaceV1, u32> for App {
                         display: Mutex::new(None),
                         frame_pending: AtomicBool::new(false),
                         registered: AtomicBool::new(false),
-                        last_pushed_size: Mutex::new(None),
+                        last_pushed_metrics: Mutex::new(None),
                         layer_buffer: Mutex::new(None),
                         config: Mutex::new(FrameConfig::default()),
                         window_flags: AtomicU32::new(0),
@@ -1025,7 +1032,7 @@ impl Dispatch<ZwlrLayerSurfaceV1, u32> for App {
                 }
                 let arc_binding = binding.clone();
                 if let Err(e) = push_resize_if_registered(&arc_binding, physical) {
-                    log::warn!("output {output_name}: push update_display failed: {e}");
+                    log::warn!("output {output_name}: push display metrics failed: {e}");
                 }
                 state.maybe_spawn_worker(output_name);
             }
@@ -1115,7 +1122,7 @@ fn uds_worker_loop(sock: PathBuf, binding: Arc<OutputBinding>) {
         let res = run_uds_session(&sock, &binding);
         let lived = started.elapsed();
         binding.registered.store(false, Ordering::SeqCst);
-        binding.last_pushed_size.lock().unwrap().take();
+        binding.last_pushed_metrics.lock().unwrap().take();
         binding.layer_buffer.lock().unwrap().take();
         binding.display.lock().unwrap().take();
         match res {
@@ -1148,26 +1155,33 @@ fn push_resize_if_registered(binding: &Arc<OutputBinding>, physical: (u32, u32))
         return Ok(());
     }
     {
-        let last = binding.last_pushed_size.lock().unwrap();
-        if *last == Some(physical) {
+        let refresh_mhz = binding.refresh_mhz.load(Ordering::SeqCst);
+        let last = binding.last_pushed_metrics.lock().unwrap();
+        if *last == Some((physical.0, physical.1, refresh_mhz)) {
             return Ok(());
         }
     }
-    let rc = binding
-        .with_display(|d| unsafe { sys::waywallen_display_update_size(d, physical.0, physical.1) });
+    let refresh_mhz = binding.refresh_mhz.load(Ordering::SeqCst);
+    let metrics = sys::waywallen_display_metrics_t {
+        width: physical.0,
+        height: physical.1,
+        refresh_mhz,
+    };
+    let rc = binding.with_display(|d| unsafe { sys::waywallen_display_set_metrics(d, &metrics) });
     if let Some(rc) = rc {
         if rc < 0 {
-            return Err(anyhow!("waywallen_display_update_size: {rc}"));
+            return Err(anyhow!("waywallen_display_set_metrics: {rc}"));
         }
     } else {
         return Ok(());
     }
-    *binding.last_pushed_size.lock().unwrap() = Some(physical);
+    *binding.last_pushed_metrics.lock().unwrap() = Some((physical.0, physical.1, refresh_mhz));
     log::info!(
-        "[{}] pushed update_display {}x{}",
+        "[{}] pushed display metrics {}x{}@{}mHz",
         binding.display_name,
         physical.0,
-        physical.1
+        physical.1,
+        refresh_mhz
     );
     Ok(())
 }
@@ -1183,12 +1197,12 @@ fn run_uds_session(sock: &Path, binding: &Arc<OutputBinding>) -> Result<()> {
     let socket_path = CString::new(sock.as_os_str().as_encoded_bytes()).context("socket path")?;
 
     let callbacks = sys::waywallen_display_callbacks_t {
-        on_textures_ready: Some(on_textures_ready),
+        on_binding_ready: Some(on_binding_ready),
         on_textures_releasing: Some(on_textures_releasing),
-        on_config: Some(on_config),
+        on_composition_config: Some(on_composition_config),
         on_frame_ready: Some(on_frame_ready),
-        on_presentation_config: None,
-        on_presentation_dynamic_config: None,
+        on_presentation_snapshot: None,
+        on_presentation_state: None,
         on_disconnected: Some(on_disconnected),
         user_data: Arc::as_ptr(binding) as *mut c_void,
     };
@@ -1206,21 +1220,30 @@ fn run_uds_session(sock: &Path, binding: &Arc<OutputBinding>) -> Result<()> {
         if rc < 0 {
             bail!("waywallen_display_bind_dmabuf_relay failed: {rc}");
         }
+        let flags = binding.window_flags.load(Ordering::SeqCst);
+        let rc = unsafe { sys::waywallen_display_set_window_state(display, flags) };
+        if rc < 0 {
+            bail!("waywallen_display_set_window_state failed: {rc}");
+        }
+        let refresh_mhz = binding.refresh_mhz.load(Ordering::SeqCst);
+        let metrics = sys::waywallen_display_metrics_t {
+            width,
+            height,
+            refresh_mhz,
+        };
         let rc = unsafe {
             sys::waywallen_display_connect(
                 display,
                 socket_path.as_ptr(),
                 display_name.as_ptr(),
                 instance_id.as_ptr(),
-                width,
-                height,
-                binding.refresh_mhz.load(Ordering::SeqCst),
+                &metrics,
             )
         };
         if rc < 0 {
             bail!("waywallen_display_connect failed: {rc}");
         }
-        *binding.last_pushed_size.lock().unwrap() = Some((width, height));
+        *binding.last_pushed_metrics.lock().unwrap() = Some((width, height, refresh_mhz));
         binding.registered.store(true, Ordering::SeqCst);
 
         let display_id = unsafe { sys::waywallen_display_get_display_id(display) };
@@ -1236,13 +1259,6 @@ fn run_uds_session(sock: &Path, binding: &Arc<OutputBinding>) -> Result<()> {
                 push_resize_if_registered(binding, latest)?;
             }
         }
-        let flags = binding.window_flags.load(Ordering::SeqCst);
-        if flags != 0 {
-            unsafe {
-                sys::waywallen_display_set_window_state(display, flags);
-            }
-        }
-
         dispatch_display_loop(display, binding)
     })();
 
@@ -1298,18 +1314,19 @@ fn dispatch_display_loop(
     }
 }
 
-unsafe extern "C" fn on_textures_ready(
+unsafe extern "C" fn on_binding_ready(
     user_data: *mut c_void,
-    t: *const sys::waywallen_textures_t,
+    raw_binding: *const sys::waywallen_binding_t,
 ) {
     let binding = binding_from_user_data(user_data);
-    if t.is_null() {
+    if raw_binding.is_null() {
         return;
     }
-    let t = &*t;
+    let ready = &*raw_binding;
+    let t = &ready.textures;
     if t.backend != sys::WAYWALLEN_BACKEND_DMABUF_RELAY || t.shadow_dmabuf_fd < 0 {
         log::warn!(
-            "[{}] textures_ready without dmabuf relay shadow fd",
+            "[{}] binding_ready without dmabuf relay shadow fd",
             binding.display_name
         );
         return;
@@ -1330,6 +1347,7 @@ unsafe extern "C" fn on_textures_ready(
             binding.display_name
         ),
     }
+    apply_composition_config(binding, &ready.config);
 }
 
 unsafe extern "C" fn on_textures_releasing(
@@ -1340,12 +1358,7 @@ unsafe extern "C" fn on_textures_releasing(
     binding.layer_buffer.lock().unwrap().take();
 }
 
-unsafe extern "C" fn on_config(user_data: *mut c_void, c: *const sys::waywallen_config_t) {
-    let binding = binding_from_user_data(user_data);
-    if c.is_null() {
-        return;
-    }
-    let c = &*c;
+fn apply_composition_config(binding: &OutputBinding, c: &sys::waywallen_composition_config_t) {
     let mut cfg = binding.config.lock().unwrap();
     cfg.source = Some((
         c.source_rect.x,
@@ -1359,6 +1372,17 @@ unsafe extern "C" fn on_config(user_data: *mut c_void, c: *const sys::waywallen_
     }
 }
 
+unsafe extern "C" fn on_composition_config(
+    user_data: *mut c_void,
+    c: *const sys::waywallen_composition_config_t,
+) {
+    let binding = binding_from_user_data(user_data);
+    if c.is_null() {
+        return;
+    }
+    apply_composition_config(binding, &*c);
+}
+
 unsafe extern "C" fn on_frame_ready(user_data: *mut c_void, f: *const sys::waywallen_frame_t) {
     let binding = binding_from_user_data(user_data);
     if f.is_null() {
@@ -1366,7 +1390,20 @@ unsafe extern "C" fn on_frame_ready(user_data: *mut c_void, f: *const sys::waywa
     }
     let f = &*f;
     if f.release_syncobj_fd >= 0 {
-        let _ = sys::waywallen_display_signal_release_syncobj(f.release_syncobj_fd);
+        if sys::waywallen_display_signal_release_syncobj(f.release_syncobj_fd) == sys::WAYWALLEN_OK
+        {
+            let rc = binding.with_display(|display| {
+                sys::waywallen_display_frame_release_armed(display, f.buffer_generation, f.seq)
+            });
+            if let Some(rc) = rc {
+                if rc < 0 {
+                    log::warn!(
+                        "[{}] frame_release_armed failed: {rc}",
+                        binding.display_name
+                    );
+                }
+            }
+        }
     }
     if let Err(e) = present_shadow(binding) {
         log::warn!(

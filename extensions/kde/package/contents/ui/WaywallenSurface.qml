@@ -24,7 +24,7 @@ Item {
     readonly property alias blurRadius: display.blurRadius
     readonly property alias pauseEffectActive: display.pauseEffectActive
     readonly property alias presentationConfigGeneration: display.presentationConfigGeneration
-    readonly property alias presentationDynamicGeneration: display.presentationDynamicGeneration
+    readonly property alias presentationStateGeneration: display.presentationStateGeneration
     readonly property bool blurLoaded: blurLoader.status === Loader.Ready
 
     signal firstFrameSeen()
@@ -40,7 +40,7 @@ Item {
         displayHeight: displayHeightBinding
         mouseForwardEnabled: mouseForwardBinding
         windowStateFlags: windowStateFlagsBinding
-        presentationCapabilities: WW.WaywallenDisplay.BlurCapability
+        presentationCapabilities: WW.WaywallenDisplay.PauseBlurCapability
 
         onFramesReceivedChanged: if (framesReceived === 1) root.firstFrameSeen()
         onContentRevisionChanged: root.contentSourceChanged()

@@ -244,6 +244,15 @@ static uint32_t qtButtonToLinuxCode(Qt::MouseButton b) {
     }
 }
 
+static uint32_t qtModifiers(Qt::KeyboardModifiers modifiers) {
+    uint32_t flags = 0;
+    if (modifiers.testFlag(Qt::ShiftModifier)) flags |= WAYWALLEN_POINTER_MOD_SHIFT;
+    if (modifiers.testFlag(Qt::ControlModifier)) flags |= WAYWALLEN_POINTER_MOD_CTRL;
+    if (modifiers.testFlag(Qt::AltModifier)) flags |= WAYWALLEN_POINTER_MOD_ALT;
+    if (modifiers.testFlag(Qt::MetaModifier)) flags |= WAYWALLEN_POINTER_MOD_SUPER;
+    return flags;
+}
+
 // ---------------------------------------------------------------------------
 // C library log → Qt log category bridge
 // ---------------------------------------------------------------------------
@@ -261,14 +270,38 @@ static void qtLogBridge(waywallen_log_level_t level, const char* msg, void*) {
 // C callback trampolines
 // ---------------------------------------------------------------------------
 
-void WaywallenDisplay::c_on_textures_ready(void* ud, const waywallen_textures_t* t) {
-    auto* self           = static_cast<WaywallenDisplay*>(ud);
+static PresentationState::Config
+toConfigSnapshot(const waywallen_composition_config_t& composition) {
+    PresentationState::Config config;
+    config.valid            = true;
+    config.bufferGeneration = composition.buffer_generation;
+    config.configGeneration = composition.generation;
+    config.sourceRect       = QRectF(static_cast<qreal>(composition.source_rect.x),
+                                     static_cast<qreal>(composition.source_rect.y),
+                                     static_cast<qreal>(composition.source_rect.w),
+                                     static_cast<qreal>(composition.source_rect.h));
+    config.destRect         = QRectF(static_cast<qreal>(composition.dest_rect.x),
+                                     static_cast<qreal>(composition.dest_rect.y),
+                                     static_cast<qreal>(composition.dest_rect.w),
+                                     static_cast<qreal>(composition.dest_rect.h));
+    config.clearColor       = QColor::fromRgbF(static_cast<qreal>(composition.clear_color.r),
+                                               static_cast<qreal>(composition.clear_color.g),
+                                               static_cast<qreal>(composition.clear_color.b),
+                                               static_cast<qreal>(composition.clear_color.a));
+    config.transform        = composition.transform;
+    return config;
+}
+
+void WaywallenDisplay::c_on_binding_ready(void* ud, const waywallen_binding_t* binding) {
+    auto*       self     = static_cast<WaywallenDisplay*>(ud);
+    const auto* t        = &binding->textures;
+    const auto  config   = toConfigSnapshot(binding->config);
     self->m_textureCount = t->count;
     bool imported        = false;
 
     if (t->backend == WAYWALLEN_BACKEND_EGL && t->egl_images) {
         qCInfo(lcWD,
-               "textures ready: EGL, count=%u, size=%ux%u, fourcc=0x%x",
+               "binding ready: EGL, count=%u, size=%ux%u, fourcc=0x%x",
                t->count,
                t->tex_width,
                t->tex_height,
@@ -279,7 +312,7 @@ void WaywallenDisplay::c_on_textures_ready(void* ud, const waywallen_textures_t*
         imported = true;
     } else if (t->backend == WAYWALLEN_BACKEND_VULKAN && t->vk_images) {
         qCInfo(lcWD,
-               "textures ready: Vulkan, count=%u, size=%ux%u, fourcc=0x%x",
+               "binding ready: Vulkan, count=%u, size=%ux%u, fourcc=0x%x",
                t->count,
                t->tex_width,
                t->tex_height,
@@ -290,7 +323,7 @@ void WaywallenDisplay::c_on_textures_ready(void* ud, const waywallen_textures_t*
             self->m_vkImages[static_cast<int>(i)] = t->vk_images[i];
         imported = true;
     } else {
-        qCWarning(lcWD, "textures ready: backend=%d but no handles", t->backend);
+        qCWarning(lcWD, "binding ready: backend=%d but no handles", t->backend);
         self->m_eglImagesValid = false;
         self->m_vkImagesValid  = false;
     }
@@ -301,6 +334,14 @@ void WaywallenDisplay::c_on_textures_ready(void* ud, const waywallen_textures_t*
                                                 static_cast<int>(t->tex_height),
                                                 t->fourcc,
                                                 imported);
+        const auto result = self->m_presentationState.applyConfig(config);
+        if (imported && result == PresentationState::ConfigResult::Rejected) {
+            qCCritical(lcWD,
+                       "atomic binding rejected composition=%llu buffer=%llu",
+                       qulonglong(binding->config.generation),
+                       qulonglong(binding->config.buffer_generation));
+            return;
+        }
     }
     self->setStreamState(Active);
 }
@@ -347,25 +388,10 @@ void WaywallenDisplay::c_on_textures_releasing(void* ud, const waywallen_texture
     self->update();
 }
 
-void WaywallenDisplay::c_on_config(void* ud, const waywallen_config_t* c) {
-    auto*          self = static_cast<WaywallenDisplay*>(ud);
-    ConfigSnapshot config;
-    config.valid            = true;
-    config.bufferGeneration = c->buffer_generation;
-    config.configGeneration = c->config_generation;
-    config.sourceRect       = QRectF(static_cast<qreal>(c->source_rect.x),
-                                     static_cast<qreal>(c->source_rect.y),
-                                     static_cast<qreal>(c->source_rect.w),
-                                     static_cast<qreal>(c->source_rect.h));
-    config.destRect         = QRectF(static_cast<qreal>(c->dest_rect.x),
-                                     static_cast<qreal>(c->dest_rect.y),
-                                     static_cast<qreal>(c->dest_rect.w),
-                                     static_cast<qreal>(c->dest_rect.h));
-    config.clearColor       = QColor::fromRgbF(static_cast<qreal>(c->clear_color[0]),
-                                               static_cast<qreal>(c->clear_color[1]),
-                                               static_cast<qreal>(c->clear_color[2]),
-                                               static_cast<qreal>(c->clear_color[3]));
-    config.transform        = c->transform;
+void WaywallenDisplay::c_on_composition_config(void*                                 ud,
+                                               const waywallen_composition_config_t* composition) {
+    auto*      self   = static_cast<WaywallenDisplay*>(ud);
+    const auto config = toConfigSnapshot(*composition);
 
     bool updatesPresented = false;
     {
@@ -373,9 +399,9 @@ void WaywallenDisplay::c_on_config(void* ud, const waywallen_config_t* c) {
         const auto   result = self->m_presentationState.applyConfig(config);
         if (result == PresentationState::ConfigResult::Rejected) {
             qCWarning(lcWD,
-                      "config generation=%llu targets unexpected buffer generation=%llu",
-                      qulonglong(c->config_generation),
-                      qulonglong(c->buffer_generation));
+                      "composition generation=%llu targets unexpected buffer generation=%llu",
+                      qulonglong(composition->generation),
+                      qulonglong(composition->buffer_generation));
             return;
         }
         updatesPresented = result == PresentationState::ConfigResult::PresentedUpdated;
@@ -465,16 +491,16 @@ void WaywallenDisplay::c_on_frame_ready(void* ud, const waywallen_frame_t* f) {
     self->update();
 }
 
-void WaywallenDisplay::c_on_presentation_config(
+void WaywallenDisplay::c_on_presentation_snapshot(
     void* ud, const waywallen_presentation_snapshot_t* presentation) {
     auto* self = static_cast<WaywallenDisplay*>(ud);
     self->applyPresentationSnapshot(*presentation);
 }
 
-void WaywallenDisplay::c_on_presentation_dynamic_config(
-    void* ud, const waywallen_presentation_dynamic_config_t* config) {
+void WaywallenDisplay::c_on_presentation_state(void*                                 ud,
+                                               const waywallen_presentation_state_t* state) {
     auto* self = static_cast<WaywallenDisplay*>(ud);
-    self->applyPresentationDynamicConfig(*config);
+    self->applyPresentationState(*state);
 }
 
 void WaywallenDisplay::c_on_disconnected(void* ud, int err, const char* msg) {
@@ -629,48 +655,47 @@ void WaywallenDisplay::applyPresentationSnapshot(
     const bool changed =
         m_pauseEffectKind != kind ||
         m_blurRadius != static_cast<int>(presentation.config.pause_effect.blur.radius) ||
-        m_pauseEffectActive != presentation.dynamic_config.pause_effect.active ||
+        m_pauseEffectActive != presentation.state.pause_effect.active ||
         m_presentationConfigGeneration != presentation.config.generation ||
-        m_presentationDynamicGeneration != presentation.dynamic_config.generation;
+        m_presentationStateGeneration != presentation.state.generation;
     m_pauseEffectKind              = kind;
     m_blurRadius                   = static_cast<int>(presentation.config.pause_effect.blur.radius);
-    m_pauseEffectActive            = presentation.dynamic_config.pause_effect.active;
+    m_pauseEffectActive            = presentation.state.pause_effect.active;
     m_presentationConfigGeneration = presentation.config.generation;
-    m_presentationDynamicGeneration = presentation.dynamic_config.generation;
+    m_presentationStateGeneration  = presentation.state.generation;
     qCInfo(lcWD,
-           "presentation config: config=%llu dynamic=%llu pause-effect kind=%d active=%d "
+           "presentation snapshot: config=%llu state=%llu pause-effect kind=%d active=%d "
            "radius=%d",
            m_presentationConfigGeneration,
-           m_presentationDynamicGeneration,
+           m_presentationStateGeneration,
            int(m_pauseEffectKind),
            m_pauseEffectActive,
            m_blurRadius);
     if (changed) emit presentationChanged();
 }
 
-void WaywallenDisplay::applyPresentationDynamicConfig(
-    const waywallen_presentation_dynamic_config_t& config) {
-    const bool changed              = m_pauseEffectActive != config.pause_effect.active ||
-                                      m_presentationDynamicGeneration != config.generation;
-    m_pauseEffectActive             = config.pause_effect.active;
-    m_presentationDynamicGeneration = config.generation;
+void WaywallenDisplay::applyPresentationState(const waywallen_presentation_state_t& state) {
+    const bool changed            = m_pauseEffectActive != state.pause_effect.active ||
+                                    m_presentationStateGeneration != state.generation;
+    m_pauseEffectActive           = state.pause_effect.active;
+    m_presentationStateGeneration = state.generation;
     qCDebug(lcWD,
-            "presentation dynamic config: config=%llu dynamic=%llu pause-effect active=%d",
-            qulonglong(config.config_generation),
-            qulonglong(config.generation),
-            config.pause_effect.active);
+            "presentation state: config=%llu state=%llu pause-effect active=%d",
+            qulonglong(state.config_generation),
+            qulonglong(state.generation),
+            state.pause_effect.active);
     if (changed) emit presentationChanged();
 }
 
 void WaywallenDisplay::resetPresentation() {
-    const bool changed              = m_pauseEffectKind != NonePauseEffect || m_pauseEffectActive ||
-                                      m_blurRadius != 30 || m_presentationConfigGeneration != 0 ||
-                                      m_presentationDynamicGeneration != 0;
-    m_pauseEffectKind               = NonePauseEffect;
-    m_blurRadius                    = 30;
-    m_pauseEffectActive             = false;
-    m_presentationConfigGeneration  = 0;
-    m_presentationDynamicGeneration = 0;
+    const bool changed             = m_pauseEffectKind != NonePauseEffect || m_pauseEffectActive ||
+                                     m_blurRadius != 30 || m_presentationConfigGeneration != 0 ||
+                                     m_presentationStateGeneration != 0;
+    m_pauseEffectKind              = NonePauseEffect;
+    m_blurRadius                   = 30;
+    m_pauseEffectActive            = false;
+    m_presentationConfigGeneration = 0;
+    m_presentationStateGeneration  = 0;
     if (changed) emit presentationChanged();
 }
 
@@ -784,17 +809,29 @@ void WaywallenDisplay::pushSizeUpdate() {
         return;
     }
     if (m_displayWidth <= 0 || m_displayHeight <= 0) return;
-    if (m_lastPushedWidth == m_displayWidth && m_lastPushedHeight == m_displayHeight) {
+    const uint32_t refreshMhz = screenRefreshMhz();
+    if (m_lastPushedWidth == m_displayWidth && m_lastPushedHeight == m_displayHeight &&
+        m_lastPushedRefreshMhz == refreshMhz) {
         return;
     }
-    int rc = waywallen_display_update_size(
-        display, static_cast<uint32_t>(m_displayWidth), static_cast<uint32_t>(m_displayHeight));
+    const waywallen_display_metrics_t metrics {
+        static_cast<uint32_t>(m_displayWidth),
+        static_cast<uint32_t>(m_displayHeight),
+        refreshMhz,
+    };
+    int rc = waywallen_display_set_metrics(display, &metrics);
     if (rc != 0) {
-        qCWarning(lcWD, "update_size(%d, %d) failed: %d", m_displayWidth, m_displayHeight, rc);
+        qCWarning(lcWD,
+                  "set_metrics(%d, %d, %u) failed: %d",
+                  m_displayWidth,
+                  m_displayHeight,
+                  refreshMhz,
+                  rc);
         return;
     }
-    m_lastPushedWidth  = m_displayWidth;
-    m_lastPushedHeight = m_displayHeight;
+    m_lastPushedWidth      = m_displayWidth;
+    m_lastPushedHeight     = m_displayHeight;
+    m_lastPushedRefreshMhz = refreshMhz;
     armWriteNotifier();
 }
 
@@ -847,7 +884,8 @@ bool WaywallenDisplay::eventFilter(QObject* obj, QEvent* ev) {
         float px, py;
         if (! toSurface(me->scenePosition(), px, py)) return false;
         const uint64_t ts = uint64_t(me->timestamp()) * 1000ull;
-        (void)waywallen_display_send_pointer_motion(display, px, py, ts, 0);
+        (void)waywallen_display_send_pointer_motion(
+            display, px, py, ts, qtModifiers(me->modifiers()));
         break;
     }
     case QEvent::MouseButtonPress:
@@ -858,9 +896,11 @@ bool WaywallenDisplay::eventFilter(QObject* obj, QEvent* ev) {
         const uint32_t code = qtButtonToLinuxCode(me->button());
         if (code == 0) return false;
         const uint64_t ts    = uint64_t(me->timestamp()) * 1000ull;
-        const auto     state = (ev->type() == QEvent::MouseButtonPress) ? WAYWALLEN_BUTTON_PRESSED
-                                                                        : WAYWALLEN_BUTTON_RELEASED;
-        (void)waywallen_display_send_pointer_button(display, px, py, code, state, ts, 0);
+        const auto     state = (ev->type() == QEvent::MouseButtonPress)
+                                   ? WAYWALLEN_POINTER_BUTTON_STATE_PRESSED
+                                   : WAYWALLEN_POINTER_BUTTON_STATE_RELEASED;
+        (void)waywallen_display_send_pointer_button(
+            display, px, py, code, state, ts, qtModifiers(me->modifiers()));
         break;
     }
     case QEvent::Wheel: {
@@ -872,8 +912,14 @@ bool WaywallenDisplay::eventFilter(QObject* obj, QEvent* ev) {
         const float  dy    = float(angle.y()) / 120.0f;
         if (dx == 0.0f && dy == 0.0f) return false;
         const uint64_t ts = uint64_t(we->timestamp()) * 1000ull;
-        (void)waywallen_display_send_pointer_axis(
-            display, px, py, dx, dy, WAYWALLEN_AXIS_WHEEL, ts, 0);
+        (void)waywallen_display_send_pointer_axis(display,
+                                                  px,
+                                                  py,
+                                                  dx,
+                                                  dy,
+                                                  WAYWALLEN_POINTER_AXIS_SOURCE_WHEEL,
+                                                  ts,
+                                                  qtModifiers(we->modifiers()));
         break;
     }
     default: break;
@@ -905,7 +951,7 @@ void WaywallenDisplay::setWindowStateFlags(quint32 flags) {
     // Connected.
     const bool changed = m_windowStateFlags != flags;
     m_windowStateFlags = flags;
-    if (m_connState == Connected && displayHandle()) {
+    if (displayHandle()) {
         if (waywallen_display_set_window_state(displayHandle(), flags) == WAYWALLEN_OK) {
             m_windowStateFlagsDirty = false;
             armWriteNotifier();
@@ -1147,6 +1193,13 @@ void WaywallenDisplay::requestReconnect() {
 void WaywallenDisplay::onWindowReady() {
     if (! window()) return;
 
+    connect(window(),
+            &QQuickWindow::screenChanged,
+            this,
+            &WaywallenDisplay::onScreenChanged,
+            Qt::UniqueConnection);
+    onScreenChanged(window()->screen());
+
     if (m_mouseForwardEnabled) {
         // installEventFilter is idempotent on the same (target, filter)
         // pair; safe to call again if windowChanged refires.
@@ -1231,19 +1284,30 @@ void WaywallenDisplay::onWindowReady() {
     tryConnect();
 }
 
+void WaywallenDisplay::onScreenChanged(QScreen* screen) {
+    if (screen) {
+        connect(screen,
+                &QScreen::refreshRateChanged,
+                this,
+                &WaywallenDisplay::pushSizeUpdate,
+                Qt::UniqueConnection);
+    }
+    if (displayHandle()) m_updateSizeTimer.start();
+}
+
 void WaywallenDisplay::tryConnect() {
     if (displayHandle()) return;
     setConnState(Connecting);
 
     waywallen_display_callbacks_t cb {};
-    cb.on_textures_ready              = c_on_textures_ready;
-    cb.on_textures_releasing          = c_on_textures_releasing;
-    cb.on_config                      = c_on_config;
-    cb.on_frame_ready                 = c_on_frame_ready;
-    cb.on_presentation_config         = c_on_presentation_config;
-    cb.on_presentation_dynamic_config = c_on_presentation_dynamic_config;
-    cb.on_disconnected                = c_on_disconnected;
-    cb.user_data                      = this;
+    cb.on_binding_ready         = c_on_binding_ready;
+    cb.on_textures_releasing    = c_on_textures_releasing;
+    cb.on_composition_config    = c_on_composition_config;
+    cb.on_frame_ready           = c_on_frame_ready;
+    cb.on_presentation_snapshot = c_on_presentation_snapshot;
+    cb.on_presentation_state    = c_on_presentation_state;
+    cb.on_disconnected          = c_on_disconnected;
+    cb.user_data                = this;
 
     auto resources     = std::make_shared<RenderSessionResources>();
     resources->display = waywallen_display_new(&cb);
@@ -1270,6 +1334,16 @@ void WaywallenDisplay::tryConnect() {
         setConnState(Error);
         return;
     }
+    if (waywallen_display_set_window_state(display, m_windowStateFlags) != WAYWALLEN_OK) {
+        qCWarning(lcWD, "failed to set initial window state");
+        waywallen_display_free(display);
+        resources->display = nullptr;
+        QMutexLocker lock(&m_resourcesMutex);
+        if (m_renderResources == resources) m_renderResources.reset();
+        setConnState(Error);
+        return;
+    }
+    m_windowStateFlagsDirty = false;
 
     // cleanup() removed the event filter on the prior session's
     // teardown; reinstall it now so mouse events resume forwarding
@@ -1302,18 +1376,21 @@ void WaywallenDisplay::tryConnect() {
         qCWarning(lcWD, "no backend bound — textures will not be imported");
     }
 
-    const QByteArray sockPath   = m_socketPath.toUtf8();
-    const QByteArray name       = m_displayName.toUtf8();
-    const QByteArray instanceId = effectiveInstanceId().toUtf8();
-    const uint32_t   refreshMhz = screenRefreshMhz();
-    int              rc =
+    const QByteArray                  sockPath   = m_socketPath.toUtf8();
+    const QByteArray                  name       = m_displayName.toUtf8();
+    const QByteArray                  instanceId = effectiveInstanceId().toUtf8();
+    const uint32_t                    refreshMhz = screenRefreshMhz();
+    const waywallen_display_metrics_t metrics {
+        static_cast<uint32_t>(m_displayWidth),
+        static_cast<uint32_t>(m_displayHeight),
+        refreshMhz,
+    };
+    int rc =
         waywallen_display_begin_connect(display,
                                         sockPath.isEmpty() ? nullptr : sockPath.constData(),
                                         name.constData(),
                                         instanceId.isEmpty() ? nullptr : instanceId.constData(),
-                                        static_cast<uint32_t>(m_displayWidth),
-                                        static_cast<uint32_t>(m_displayHeight),
-                                        refreshMhz);
+                                        &metrics);
 
     if (rc != WAYWALLEN_OK) {
         qCWarning(lcWD, "begin_connect failed: %d (waiting for daemon DBus signal)", rc);
@@ -1328,8 +1405,9 @@ void WaywallenDisplay::tryConnect() {
     // begin_connect carries these dims to the daemon as part of
     // register_display, so seed the dedupe so a same-size resize
     // post-handshake is a no-op.
-    m_lastPushedWidth  = m_displayWidth;
-    m_lastPushedHeight = m_displayHeight;
+    m_lastPushedWidth      = m_displayWidth;
+    m_lastPushedHeight     = m_displayHeight;
+    m_lastPushedRefreshMhz = refreshMhz;
 
     int fd = waywallen_display_get_fd(display);
     if (fd < 0) {
@@ -1406,7 +1484,8 @@ void WaywallenDisplay::onHandshakeIO() {
         // Window may have resized while the handshake was in flight;
         // reconcile by pushing if the current dims drifted from what
         // begin_connect carried.
-        if (m_displayWidth != m_lastPushedWidth || m_displayHeight != m_lastPushedHeight) {
+        if (m_displayWidth != m_lastPushedWidth || m_displayHeight != m_lastPushedHeight ||
+            screenRefreshMhz() != m_lastPushedRefreshMhz) {
             m_updateSizeTimer.start();
         }
         return;
@@ -1427,7 +1506,7 @@ void WaywallenDisplay::onSocketReadable() {
     // do not require a GL context. GL textures are created lazily
     // in updatePaintNode on the render thread.
     waywallen_display_dispatch(display);
-    // dispatch may have queued an outgoing message (e.g. unbind_done
+    // dispatch may have queued an outgoing message (e.g. ack_unbind
     // from handle_unbind). Re-arm POLLOUT if anything stayed queued.
     armWriteNotifier();
 }
@@ -1453,14 +1532,14 @@ void WaywallenDisplay::reportFrameArmed(uint64_t generation, uint64_t seq) {
             if (! guard) return;
             auto* display = guard->displayHandle();
             if (! display) return;
-            const int rc = waywallen_display_frame_armed(display, generation, seq);
+            const int rc = waywallen_display_frame_release_armed(display, generation, seq);
             if (rc != WAYWALLEN_OK) {
                 qCWarning(lcWD,
-                          "frame_armed enqueue failed: generation=%llu seq=%llu rc=%d",
+                          "frame_release_armed enqueue failed: generation=%llu seq=%llu rc=%d",
                           qulonglong(generation),
                           qulonglong(seq),
                           rc);
-                guard->handleDisconnect(rc, "frame_armed enqueue failed");
+                guard->handleDisconnect(rc, "frame_release_armed enqueue failed");
                 return;
             }
             guard->armWriteNotifier();

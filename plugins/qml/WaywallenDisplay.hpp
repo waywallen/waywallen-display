@@ -25,11 +25,12 @@ struct waywallen_display;
 typedef struct waywallen_display waywallen_display_t;
 struct waywallen_textures;
 typedef struct waywallen_textures waywallen_textures_t;
-struct waywallen_config;
-typedef struct waywallen_config waywallen_config_t;
+struct waywallen_binding;
+typedef struct waywallen_binding waywallen_binding_t;
 struct waywallen_frame;
 typedef struct waywallen_frame waywallen_frame_t;
 class RenderSessionResources;
+class QScreen;
 
 class WaywallenDisplay : public QQuickItem {
     Q_OBJECT
@@ -51,7 +52,7 @@ class WaywallenDisplay : public QQuickItem {
     Q_PROPERTY(
         QString lastDisconnectMessage READ lastDisconnectMessage NOTIFY lastDisconnectChanged)
     // Read-only: the renderer publishes the clear color via the
-    // daemon's `set_config` event; consumers do NOT override it.
+    // daemon's composition config; consumers do NOT override it.
     Q_PROPERTY(QColor clearColor READ clearColor NOTIFY clearColorChanged)
     Q_PROPERTY(
         bool autoReconnect READ autoReconnect WRITE setAutoReconnect NOTIFY autoReconnectChanged)
@@ -69,7 +70,7 @@ class WaywallenDisplay : public QQuickItem {
     Q_PROPERTY(bool pauseEffectActive READ pauseEffectActive NOTIFY presentationChanged)
     Q_PROPERTY(qulonglong presentationConfigGeneration READ presentationConfigGeneration NOTIFY
                    presentationChanged)
-    Q_PROPERTY(qulonglong presentationDynamicGeneration READ presentationDynamicGeneration NOTIFY
+    Q_PROPERTY(qulonglong presentationStateGeneration READ presentationStateGeneration NOTIFY
                    presentationChanged)
 
 public:
@@ -114,7 +115,7 @@ public:
 
     enum PresentationCapability
     {
-        BlurCapability = 1u << 0,
+        PauseBlurCapability = 1u << 0,
     };
     Q_ENUM(PresentationCapability)
 
@@ -165,7 +166,7 @@ public:
     int             blurRadius() const { return m_blurRadius; }
     bool            pauseEffectActive() const { return m_pauseEffectActive; }
     qulonglong      presentationConfigGeneration() const { return m_presentationConfigGeneration; }
-    qulonglong presentationDynamicGeneration() const { return m_presentationDynamicGeneration; }
+    qulonglong      presentationStateGeneration() const { return m_presentationStateGeneration; }
 
     // Attempt to connect now. No-op when already Connected. Triggered
     // automatically by the DBus NameOwnerChanged / Daemon Ready signals
@@ -205,6 +206,7 @@ private slots:
     void onSocketWritable();
     void onHandshakeIO();
     void onWindowReady();
+    void onScreenChanged(QScreen* screen);
     void onDaemonNameOwnerChanged(const QString& name, const QString& oldOwner,
                                   const QString& newOwner);
     void onDaemonReadySignal();
@@ -223,7 +225,7 @@ private:
     void                                    flushPendingRelease();
     void                                    handleDisconnect(int errCode, const char* msg);
     void     applyPresentationSnapshot(const waywallen_presentation_snapshot_t& presentation);
-    void     applyPresentationDynamicConfig(const waywallen_presentation_dynamic_config_t& config);
+    void     applyPresentationState(const waywallen_presentation_state_t& state);
     void     resetPresentation();
     void     setConnState(ConnState s);
     void     setStreamState(StreamState s);
@@ -262,15 +264,13 @@ private:
     void setPresentedClearColor(const QColor& color);
 
     // C callback trampolines.
-    static void c_on_textures_ready(void* ud, const waywallen_textures_t* t);
+    static void c_on_binding_ready(void* ud, const waywallen_binding_t* binding);
     static void c_on_textures_releasing(void* ud, const waywallen_textures_t* t);
-    static void c_on_config(void* ud, const waywallen_config_t* c);
+    static void c_on_composition_config(void* ud, const waywallen_composition_config_t* config);
     static void c_on_frame_ready(void* ud, const waywallen_frame_t* f);
-    static void c_on_presentation_config(void*                                    ud,
-                                         const waywallen_presentation_snapshot_t* presentation);
-    static void
-    c_on_presentation_dynamic_config(void*                                          ud,
-                                     const waywallen_presentation_dynamic_config_t* config);
+    static void c_on_presentation_snapshot(void*                                    ud,
+                                           const waywallen_presentation_snapshot_t* presentation);
+    static void c_on_presentation_state(void* ud, const waywallen_presentation_state_t* state);
     static void c_on_disconnected(void* ud, int err, const char* msg);
 
     // Properties.
@@ -301,7 +301,7 @@ private:
     int             m_blurRadius { 30 };
     bool            m_pauseEffectActive { false };
     qulonglong      m_presentationConfigGeneration { 0 };
-    qulonglong      m_presentationDynamicGeneration { 0 };
+    qulonglong      m_presentationStateGeneration { 0 };
 
     mutable QMutex                          m_resourcesMutex;
     std::shared_ptr<RenderSessionResources> m_renderResources;
@@ -314,12 +314,11 @@ private:
     QPointer<QSocketNotifier> m_notifier;
     QPointer<QSocketNotifier> m_notifierWrite;
 
-    // Coalesces a flood of width/height changes during a window resize
-    // into a single `update_display` wire message. Last reported size is
-    // kept so we don't push duplicate updates.
-    QTimer m_updateSizeTimer;
-    int    m_lastPushedWidth { -1 };
-    int    m_lastPushedHeight { -1 };
+    // Coalesces display mode changes into one metrics snapshot.
+    QTimer   m_updateSizeTimer;
+    int      m_lastPushedWidth { -1 };
+    int      m_lastPushedHeight { -1 };
+    uint32_t m_lastPushedRefreshMhz { 0 };
 
     // Backend detected from Qt's scene graph.
     enum ActiveBackend

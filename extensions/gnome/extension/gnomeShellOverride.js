@@ -320,14 +320,14 @@ export class GnomeShellOverride {
             return true;
         }
 
-        if (frame.type === 'connection' || frame.type === 'presentation-config') {
+        if (frame.type === 'connection' || frame.type === 'presentation-snapshot') {
             const current = this._desktopPresentation.get(key);
-            if (frame.type === 'presentation-config' && !current)
+            if (frame.type === 'presentation-snapshot' && !current)
                 return false;
             if (current &&
                 (frame.presentation.config.generation <= current.config.generation ||
-                 frame.presentation.dynamicConfig.generation <=
-                    current.dynamicConfig.generation))
+                 frame.presentation.state.generation <=
+                    current.state.generation))
                 return false;
             this._desktopPresentation.set(key, frame.presentation);
             this._syncDesktopPresentation(key);
@@ -335,13 +335,13 @@ export class GnomeShellOverride {
         }
 
         const current = this._desktopPresentation.get(key);
-        const dynamic = frame.dynamicConfig;
-        if (!current || dynamic.configGeneration !== current.config.generation ||
-            dynamic.generation <= current.dynamicConfig.generation ||
+        const state = frame.state;
+        if (!current || state.configGeneration !== current.config.generation ||
+            state.generation <= current.state.generation ||
             (current.config.pauseEffect.kind === PauseEffectKind.NONE &&
-             dynamic.pauseEffect.active))
+             state.pauseEffect.active))
             return false;
-        current.dynamicConfig = dynamic;
+        current.state = state;
         this._syncDesktopPresentation(key);
         return true;
     }

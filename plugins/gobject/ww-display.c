@@ -8,7 +8,7 @@ struct _WwDisplay {
     GObject              parent_instance;
     waywallen_display_t* handle;
     gboolean             connected;
-    /* DMABUF_RELAY: snapshot of the most recent textures_ready's
+    /* DMABUF_RELAY: snapshot of the most recent binding's
      * shadow descriptor. Filled in the trampoline; consumers read via
      * ww_display_get_shadow_export. fd is lib-owned — wrapper dups on
      * the way out. */
@@ -22,19 +22,19 @@ struct _WwDisplay {
     guint             blur_radius;
     gboolean          pause_effect_active;
     guint64           presentation_config_generation;
-    guint64           presentation_dynamic_generation;
+    guint64           presentation_state_generation;
 };
 
 G_DEFINE_FINAL_TYPE(WwDisplay, ww_display, G_TYPE_OBJECT)
 
 enum
 {
-    SIGNAL_TEXTURES_READY,
+    SIGNAL_BINDING_READY,
     SIGNAL_TEXTURES_RELEASING,
-    SIGNAL_CONFIG,
+    SIGNAL_COMPOSITION_CONFIG,
     SIGNAL_FRAME_READY,
-    SIGNAL_PRESENTATION_CONFIG,
-    SIGNAL_PRESENTATION_DYNAMIC_CONFIG,
+    SIGNAL_PRESENTATION_SNAPSHOT,
+    SIGNAL_PRESENTATION_STATE,
     SIGNAL_DISCONNECTED,
     LAST_SIGNAL
 };
@@ -48,7 +48,7 @@ enum
     PROP_BLUR_RADIUS,
     PROP_PAUSE_EFFECT_ACTIVE,
     PROP_PRESENTATION_CONFIG_GENERATION,
-    PROP_PRESENTATION_DYNAMIC_GENERATION,
+    PROP_PRESENTATION_STATE_GENERATION,
     LAST_PROPERTY,
 };
 
@@ -60,12 +60,14 @@ static void notify_presentation(WwDisplay* self) {
     g_object_notify_by_pspec(G_OBJECT(self), properties[PROP_BLUR_RADIUS]);
     g_object_notify_by_pspec(G_OBJECT(self), properties[PROP_PAUSE_EFFECT_ACTIVE]);
     g_object_notify_by_pspec(G_OBJECT(self), properties[PROP_PRESENTATION_CONFIG_GENERATION]);
-    g_object_notify_by_pspec(G_OBJECT(self), properties[PROP_PRESENTATION_DYNAMIC_GENERATION]);
+    g_object_notify_by_pspec(G_OBJECT(self), properties[PROP_PRESENTATION_STATE_GENERATION]);
     g_object_thaw_notify(G_OBJECT(self));
 }
 
-static void on_textures_ready_cb(void* user_data, const waywallen_textures_t* t) {
-    WwDisplay* self = WW_DISPLAY(user_data);
+static void on_binding_ready_cb(void* user_data, const waywallen_binding_t* binding) {
+    WwDisplay*                            self = WW_DISPLAY(user_data);
+    const waywallen_textures_t*           t    = &binding->textures;
+    const waywallen_composition_config_t* c    = &binding->config;
     /* Snapshot the shadow descriptor while the textures_t is still
      * the lib's live copy. Always refresh — relay rebinds change the
      * shadow fd. */
@@ -81,14 +83,27 @@ static void on_textures_ready_cb(void* user_data, const waywallen_textures_t* t)
         self->shadow_valid = TRUE;
     }
     g_signal_emit(self,
-                  signals[SIGNAL_TEXTURES_READY],
+                  signals[SIGNAL_BINDING_READY],
                   0,
                   (guint)t->count,
                   (guint)t->tex_width,
                   (guint)t->tex_height,
                   (guint)t->fourcc,
                   (guint64)t->modifier,
-                  (gint)t->backend);
+                  (gint)t->backend,
+                  (gdouble)c->source_rect.x,
+                  (gdouble)c->source_rect.y,
+                  (gdouble)c->source_rect.w,
+                  (gdouble)c->source_rect.h,
+                  (gdouble)c->dest_rect.x,
+                  (gdouble)c->dest_rect.y,
+                  (gdouble)c->dest_rect.w,
+                  (gdouble)c->dest_rect.h,
+                  (guint)c->transform,
+                  (gdouble)c->clear_color.r,
+                  (gdouble)c->clear_color.g,
+                  (gdouble)c->clear_color.b,
+                  (gdouble)c->clear_color.a);
 }
 
 static void on_textures_releasing_cb(void* user_data, const waywallen_textures_t* t) {
@@ -100,14 +115,14 @@ static void on_textures_releasing_cb(void* user_data, const waywallen_textures_t
     g_signal_emit(self, signals[SIGNAL_TEXTURES_RELEASING], 0);
 }
 
-static void on_config_cb(void* user_data, const waywallen_config_t* c) {
+static void on_composition_config_cb(void* user_data, const waywallen_composition_config_t* c) {
     /* Forward source/dest rect, transform, and the renderer-published
-     * RGBA clear color the daemon supplied via set_config. Consumers
+     * RGBA clear color the daemon supplied. Consumers
      * MUST treat clear color as authoritative — it's owned by the
      * renderer and there's no display-side knob. */
     WwDisplay* self = WW_DISPLAY(user_data);
     g_signal_emit(self,
-                  signals[SIGNAL_CONFIG],
+                  signals[SIGNAL_COMPOSITION_CONFIG],
                   0,
                   (gdouble)c->source_rect.x,
                   (gdouble)c->source_rect.y,
@@ -118,10 +133,10 @@ static void on_config_cb(void* user_data, const waywallen_config_t* c) {
                   (gdouble)c->dest_rect.w,
                   (gdouble)c->dest_rect.h,
                   (guint)c->transform,
-                  (gdouble)c->clear_color[0],
-                  (gdouble)c->clear_color[1],
-                  (gdouble)c->clear_color[2],
-                  (gdouble)c->clear_color[3]);
+                  (gdouble)c->clear_color.r,
+                  (gdouble)c->clear_color.g,
+                  (gdouble)c->clear_color.b,
+                  (gdouble)c->clear_color.a);
 }
 
 static void on_frame_ready_cb(void* user_data, const waywallen_frame_t* f) {
@@ -137,38 +152,36 @@ static void on_frame_ready_cb(void* user_data, const waywallen_frame_t* f) {
     if (fd >= 0) close(fd);
 }
 
-static void on_presentation_config_cb(void*                                    user_data,
-                                      const waywallen_presentation_snapshot_t* presentation) {
+static void on_presentation_snapshot_cb(void*                                    user_data,
+                                        const waywallen_presentation_snapshot_t* presentation) {
     WwDisplay* self           = WW_DISPLAY(user_data);
     self->pause_effect_kind   = (WwPauseEffectKind)presentation->config.pause_effect.kind;
     self->blur_radius         = presentation->config.pause_effect.blur.radius;
-    self->pause_effect_active = presentation->dynamic_config.pause_effect.active;
-    self->presentation_config_generation  = presentation->config.generation;
-    self->presentation_dynamic_generation = presentation->dynamic_config.generation;
+    self->pause_effect_active = presentation->state.pause_effect.active;
+    self->presentation_config_generation = presentation->config.generation;
+    self->presentation_state_generation  = presentation->state.generation;
     notify_presentation(self);
     g_signal_emit(self,
-                  signals[SIGNAL_PRESENTATION_CONFIG],
+                  signals[SIGNAL_PRESENTATION_SNAPSHOT],
                   0,
                   self->presentation_config_generation,
-                  self->presentation_dynamic_generation,
+                  self->presentation_state_generation,
                   self->pause_effect_kind,
                   self->blur_radius,
                   self->pause_effect_active);
 }
 
-static void
-on_presentation_dynamic_config_cb(void*                                          user_data,
-                                  const waywallen_presentation_dynamic_config_t* config) {
-    WwDisplay* self                       = WW_DISPLAY(user_data);
-    self->pause_effect_active             = config->pause_effect.active;
-    self->presentation_dynamic_generation = config->generation;
+static void on_presentation_state_cb(void* user_data, const waywallen_presentation_state_t* state) {
+    WwDisplay* self                     = WW_DISPLAY(user_data);
+    self->pause_effect_active           = state->pause_effect.active;
+    self->presentation_state_generation = state->generation;
     notify_presentation(self);
     g_signal_emit(self,
-                  signals[SIGNAL_PRESENTATION_DYNAMIC_CONFIG],
+                  signals[SIGNAL_PRESENTATION_STATE],
                   0,
-                  config->generation,
-                  config->config_generation,
-                  config->pause_effect.active);
+                  state->generation,
+                  state->config_generation,
+                  state->pause_effect.active);
 }
 
 static void on_disconnected_cb(void* user_data, int err_code, const char* message) {
@@ -196,8 +209,8 @@ static void ww_display_get_property(GObject* object, guint property_id, GValue* 
     case PROP_PRESENTATION_CONFIG_GENERATION:
         g_value_set_uint64(value, self->presentation_config_generation);
         break;
-    case PROP_PRESENTATION_DYNAMIC_GENERATION:
-        g_value_set_uint64(value, self->presentation_dynamic_generation);
+    case PROP_PRESENTATION_STATE_GENERATION:
+        g_value_set_uint64(value, self->presentation_state_generation);
         break;
     default: G_OBJECT_WARN_INVALID_PROPERTY_ID(object, property_id, pspec); break;
     }
@@ -237,32 +250,45 @@ static void ww_display_class_init(WwDisplayClass* klass) {
                             G_MAXUINT64,
                             0,
                             G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
-    properties[PROP_PRESENTATION_DYNAMIC_GENERATION] =
-        g_param_spec_uint64("presentation-dynamic-generation",
-                            "Presentation dynamic generation",
-                            "Connection-local dynamic presentation generation",
+    properties[PROP_PRESENTATION_STATE_GENERATION] =
+        g_param_spec_uint64("presentation-state-generation",
+                            "Presentation state generation",
+                            "Connection-local runtime presentation state generation",
                             0,
                             G_MAXUINT64,
                             0,
                             G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
     g_object_class_install_properties(object_class, LAST_PROPERTY, properties);
 
-    /* (count, tex_width, tex_height, fourcc, modifier, backend) */
-    signals[SIGNAL_TEXTURES_READY] = g_signal_new("textures-ready",
-                                                  G_TYPE_FROM_CLASS(klass),
-                                                  G_SIGNAL_RUN_LAST,
-                                                  0,
-                                                  NULL,
-                                                  NULL,
-                                                  NULL,
-                                                  G_TYPE_NONE,
-                                                  6,
-                                                  G_TYPE_UINT,
-                                                  G_TYPE_UINT,
-                                                  G_TYPE_UINT,
-                                                  G_TYPE_UINT,
-                                                  G_TYPE_UINT64,
-                                                  G_TYPE_INT);
+    /* Texture metadata and its initial composition are one snapshot. */
+    signals[SIGNAL_BINDING_READY] = g_signal_new("binding-ready",
+                                                 G_TYPE_FROM_CLASS(klass),
+                                                 G_SIGNAL_RUN_LAST,
+                                                 0,
+                                                 NULL,
+                                                 NULL,
+                                                 NULL,
+                                                 G_TYPE_NONE,
+                                                 19,
+                                                 G_TYPE_UINT,
+                                                 G_TYPE_UINT,
+                                                 G_TYPE_UINT,
+                                                 G_TYPE_UINT,
+                                                 G_TYPE_UINT64,
+                                                 G_TYPE_INT,
+                                                 G_TYPE_DOUBLE,
+                                                 G_TYPE_DOUBLE,
+                                                 G_TYPE_DOUBLE,
+                                                 G_TYPE_DOUBLE,
+                                                 G_TYPE_DOUBLE,
+                                                 G_TYPE_DOUBLE,
+                                                 G_TYPE_DOUBLE,
+                                                 G_TYPE_DOUBLE,
+                                                 G_TYPE_UINT,
+                                                 G_TYPE_DOUBLE,
+                                                 G_TYPE_DOUBLE,
+                                                 G_TYPE_DOUBLE,
+                                                 G_TYPE_DOUBLE);
 
     signals[SIGNAL_TEXTURES_RELEASING] = g_signal_new("textures-releasing",
                                                       G_TYPE_FROM_CLASS(klass),
@@ -278,28 +304,28 @@ static void ww_display_class_init(WwDisplayClass* klass) {
      *  dst_x, dst_y, dst_w, dst_h,
      *  transform, clear_r, clear_g, clear_b, clear_a) — clear_* is
      * the renderer-published RGBA letterbox color. */
-    signals[SIGNAL_CONFIG] = g_signal_new("config",
-                                          G_TYPE_FROM_CLASS(klass),
-                                          G_SIGNAL_RUN_LAST,
-                                          0,
-                                          NULL,
-                                          NULL,
-                                          NULL,
-                                          G_TYPE_NONE,
-                                          13,
-                                          G_TYPE_DOUBLE,
-                                          G_TYPE_DOUBLE,
-                                          G_TYPE_DOUBLE,
-                                          G_TYPE_DOUBLE,
-                                          G_TYPE_DOUBLE,
-                                          G_TYPE_DOUBLE,
-                                          G_TYPE_DOUBLE,
-                                          G_TYPE_DOUBLE,
-                                          G_TYPE_UINT,
-                                          G_TYPE_DOUBLE,
-                                          G_TYPE_DOUBLE,
-                                          G_TYPE_DOUBLE,
-                                          G_TYPE_DOUBLE);
+    signals[SIGNAL_COMPOSITION_CONFIG] = g_signal_new("composition-config",
+                                                      G_TYPE_FROM_CLASS(klass),
+                                                      G_SIGNAL_RUN_LAST,
+                                                      0,
+                                                      NULL,
+                                                      NULL,
+                                                      NULL,
+                                                      G_TYPE_NONE,
+                                                      13,
+                                                      G_TYPE_DOUBLE,
+                                                      G_TYPE_DOUBLE,
+                                                      G_TYPE_DOUBLE,
+                                                      G_TYPE_DOUBLE,
+                                                      G_TYPE_DOUBLE,
+                                                      G_TYPE_DOUBLE,
+                                                      G_TYPE_DOUBLE,
+                                                      G_TYPE_DOUBLE,
+                                                      G_TYPE_UINT,
+                                                      G_TYPE_DOUBLE,
+                                                      G_TYPE_DOUBLE,
+                                                      G_TYPE_DOUBLE,
+                                                      G_TYPE_DOUBLE);
 
     /* (buffer_index, seq, release_syncobj_fd) */
     signals[SIGNAL_FRAME_READY] = g_signal_new("frame-ready",
@@ -315,35 +341,35 @@ static void ww_display_class_init(WwDisplayClass* klass) {
                                                G_TYPE_UINT64,
                                                G_TYPE_INT);
 
-    /* (config_generation, dynamic_generation, kind, radius, active) */
-    signals[SIGNAL_PRESENTATION_CONFIG] = g_signal_new("presentation-config",
-                                                       G_TYPE_FROM_CLASS(klass),
-                                                       G_SIGNAL_RUN_LAST,
-                                                       0,
-                                                       NULL,
-                                                       NULL,
-                                                       NULL,
-                                                       G_TYPE_NONE,
-                                                       5,
-                                                       G_TYPE_UINT64,
-                                                       G_TYPE_UINT64,
-                                                       G_TYPE_UINT,
-                                                       G_TYPE_UINT,
-                                                       G_TYPE_BOOLEAN);
+    /* (config_generation, state_generation, kind, radius, active) */
+    signals[SIGNAL_PRESENTATION_SNAPSHOT] = g_signal_new("presentation-snapshot",
+                                                         G_TYPE_FROM_CLASS(klass),
+                                                         G_SIGNAL_RUN_LAST,
+                                                         0,
+                                                         NULL,
+                                                         NULL,
+                                                         NULL,
+                                                         G_TYPE_NONE,
+                                                         5,
+                                                         G_TYPE_UINT64,
+                                                         G_TYPE_UINT64,
+                                                         G_TYPE_UINT,
+                                                         G_TYPE_UINT,
+                                                         G_TYPE_BOOLEAN);
 
-    /* (dynamic_generation, config_generation, active) */
-    signals[SIGNAL_PRESENTATION_DYNAMIC_CONFIG] = g_signal_new("presentation-dynamic-config",
-                                                               G_TYPE_FROM_CLASS(klass),
-                                                               G_SIGNAL_RUN_LAST,
-                                                               0,
-                                                               NULL,
-                                                               NULL,
-                                                               NULL,
-                                                               G_TYPE_NONE,
-                                                               3,
-                                                               G_TYPE_UINT64,
-                                                               G_TYPE_UINT64,
-                                                               G_TYPE_BOOLEAN);
+    /* (state_generation, config_generation, active) */
+    signals[SIGNAL_PRESENTATION_STATE] = g_signal_new("presentation-state",
+                                                      G_TYPE_FROM_CLASS(klass),
+                                                      G_SIGNAL_RUN_LAST,
+                                                      0,
+                                                      NULL,
+                                                      NULL,
+                                                      NULL,
+                                                      G_TYPE_NONE,
+                                                      3,
+                                                      G_TYPE_UINT64,
+                                                      G_TYPE_UINT64,
+                                                      G_TYPE_BOOLEAN);
 
     /* (err_code, message) */
     signals[SIGNAL_DISCONNECTED] = g_signal_new("disconnected",
@@ -361,14 +387,14 @@ static void ww_display_class_init(WwDisplayClass* klass) {
 
 static void ww_display_init(WwDisplay* self) {
     waywallen_display_callbacks_t cb = {
-        .on_textures_ready              = on_textures_ready_cb,
-        .on_textures_releasing          = on_textures_releasing_cb,
-        .on_config                      = on_config_cb,
-        .on_frame_ready                 = on_frame_ready_cb,
-        .on_presentation_config         = on_presentation_config_cb,
-        .on_presentation_dynamic_config = on_presentation_dynamic_config_cb,
-        .on_disconnected                = on_disconnected_cb,
-        .user_data                      = self,
+        .on_binding_ready         = on_binding_ready_cb,
+        .on_textures_releasing    = on_textures_releasing_cb,
+        .on_composition_config    = on_composition_config_cb,
+        .on_frame_ready           = on_frame_ready_cb,
+        .on_presentation_snapshot = on_presentation_snapshot_cb,
+        .on_presentation_state    = on_presentation_state_cb,
+        .on_disconnected          = on_disconnected_cb,
+        .user_data                = self,
     };
     self->handle            = waywallen_display_new(&cb);
     self->connected         = FALSE;
@@ -435,13 +461,13 @@ gboolean ww_display_begin_connect(WwDisplay* self, const gchar* socket_path,
     g_return_val_if_fail(WW_IS_DISPLAY(self), FALSE);
     g_return_val_if_fail(display_name != NULL, FALSE);
 
-    int rc = waywallen_display_begin_connect(self->handle,
-                                             socket_path,
-                                             display_name,
-                                             instance_id,
-                                             (uint32_t)width,
-                                             (uint32_t)height,
-                                             (uint32_t)refresh_mhz);
+    const waywallen_display_metrics_t metrics = {
+        .width       = (uint32_t)width,
+        .height      = (uint32_t)height,
+        .refresh_mhz = (uint32_t)refresh_mhz,
+    };
+    int rc = waywallen_display_begin_connect(
+        self->handle, socket_path, display_name, instance_id, &metrics);
     if (rc == WAYWALLEN_OK) {
         self->connected = TRUE;
         return TRUE;
@@ -469,10 +495,14 @@ gint ww_display_dispatch(WwDisplay* self) {
     return waywallen_display_dispatch(self->handle);
 }
 
-gboolean ww_display_update_size(WwDisplay* self, guint width, guint height) {
+gboolean ww_display_set_metrics(WwDisplay* self, guint width, guint height, guint refresh_mhz) {
     g_return_val_if_fail(WW_IS_DISPLAY(self), FALSE);
-    return waywallen_display_update_size(self->handle, (uint32_t)width, (uint32_t)height) ==
-           WAYWALLEN_OK;
+    const waywallen_display_metrics_t metrics = {
+        .width       = (uint32_t)width,
+        .height      = (uint32_t)height,
+        .refresh_mhz = (uint32_t)refresh_mhz,
+    };
+    return waywallen_display_set_metrics(self->handle, &metrics) == WAYWALLEN_OK;
 }
 
 void ww_display_close_fd(gint fd) {
@@ -493,8 +523,8 @@ void ww_display_send_pointer_button(WwDisplay* self, gdouble x, gdouble y, guint
                                                 (float)x,
                                                 (float)y,
                                                 button,
-                                                pressed ? WAYWALLEN_BUTTON_PRESSED
-                                                        : WAYWALLEN_BUTTON_RELEASED,
+                                                pressed ? WAYWALLEN_POINTER_BUTTON_STATE_PRESSED
+                                                        : WAYWALLEN_POINTER_BUTTON_STATE_RELEASED,
                                                 timestamp_us,
                                                 modifiers);
 }
@@ -507,7 +537,7 @@ void ww_display_send_pointer_axis(WwDisplay* self, gdouble x, gdouble y, gdouble
                                               (float)y,
                                               (float)dx,
                                               (float)dy,
-                                              WAYWALLEN_AXIS_WHEEL,
+                                              WAYWALLEN_POINTER_AXIS_SOURCE_WHEEL,
                                               timestamp_us,
                                               modifiers);
 }
@@ -523,15 +553,15 @@ void ww_display_disconnect(WwDisplay* self) {
     self->connected = FALSE;
     if (self->pause_effect_kind != WW_PAUSE_EFFECT_KIND_NONE || self->pause_effect_active ||
         self->blur_radius != 30 || self->presentation_config_generation != 0 ||
-        self->presentation_dynamic_generation != 0) {
-        self->pause_effect_kind               = WW_PAUSE_EFFECT_KIND_NONE;
-        self->blur_radius                     = 30;
-        self->pause_effect_active             = FALSE;
-        self->presentation_config_generation  = 0;
-        self->presentation_dynamic_generation = 0;
+        self->presentation_state_generation != 0) {
+        self->pause_effect_kind              = WW_PAUSE_EFFECT_KIND_NONE;
+        self->blur_radius                    = 30;
+        self->pause_effect_active            = FALSE;
+        self->presentation_config_generation = 0;
+        self->presentation_state_generation  = 0;
         notify_presentation(self);
         g_signal_emit(self,
-                      signals[SIGNAL_PRESENTATION_CONFIG],
+                      signals[SIGNAL_PRESENTATION_SNAPSHOT],
                       0,
                       0,
                       0,

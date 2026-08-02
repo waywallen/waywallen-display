@@ -18,7 +18,7 @@ WallpaperItem {
     }
 
     // Background is owned by the renderer (via the daemon's
-    // `set_config.clear_*`); the surface itself paints any letterbox
+    // the composition clear color); the surface itself paints any letterbox
     // bars. Show opaque black until the surface attaches so a slow
     // daemon doesn't flash the desktop wallpaper through.
     Rectangle {
@@ -177,7 +177,7 @@ WallpaperItem {
                     s += "\n" + i18nd("plasma_wallpaper_org.waywallen.kde", "frames:") + " " + d.framesReceived
                     s += "\n" + i18nd("plasma_wallpaper_org.waywallen.kde", "clear:") + "  " + d.clearColor.toString()
                     s += "\n  pause-effect: cfg=" + d.presentationConfigGeneration
-                          + " dyn=" + d.presentationDynamicGeneration
+                          + " dyn=" + d.presentationStateGeneration
                           + " kind=" + d.pauseEffectKind
                           + " active=" + d.pauseEffectActive
                           + " loaded=" + d.blurLoaded

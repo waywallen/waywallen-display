@@ -15,7 +15,7 @@
  *     emits -1 for the release fd. The integer remains in the signal ABI
  *     for compatibility with non-relay backends.
  *
- *   - Boxed types: `WwTexturesInfo`, `WwFrameInfo`, `WwConfigInfo` are
+ *   - Boxed types: texture, frame, and composition snapshots are
  *     not exposed — signal payloads are flat primitives. Adding boxed
  *     types is straightforward later if richer payloads are needed.
  */
@@ -52,7 +52,7 @@ typedef enum
 
 typedef enum
 {
-    WW_PRESENTATION_CAPABILITY_BLUR = 1u << 0,
+    WW_PRESENTATION_CAPABILITY_PAUSE_BLUR = 1u << 0,
 } WwPresentationCapability;
 
 typedef enum
@@ -117,7 +117,7 @@ gboolean ww_display_set_presentation_capabilities(WwDisplay* self, guint flags);
  *   today).
  *
  * Read the shadow DMA-BUF descriptor populated on the most recent
- * `textures-ready` for DMABUF_RELAY mode. The fd is dup'd before
+ * `binding-ready` for DMABUF_RELAY mode. The fd is dup'd before
  * return so callers can safely close after consuming.
  *
  * Returns: TRUE on success; FALSE if the current backend isn't
@@ -135,7 +135,7 @@ gboolean ww_display_get_shadow_export(WwDisplay* self, gint* out_fd, guint* out_
  * @instance_id: (nullable): stable UUID v4 for per-display settings
  * @width: initial display width in pixels
  * @height: initial display height in pixels
- * @refresh_mhz: refresh rate in millihertz (e.g. 60000 for 60 Hz)
+ * @refresh_mhz: refresh rate in millihertz (e.g. 60000 for 60 Hz), or 0 if unknown
  *
  * Kicks off the async handshake. Caller drives it by polling
  * ww_display_get_fd() and looping ww_display_advance_handshake().
@@ -178,19 +178,20 @@ gint ww_display_get_fd(WwDisplay* self);
  *
  * Drives the steady-state read path. Fires signals synchronously.
  *
- * Returns: number of frames dispatched (>= 0), or negative on failure.
+ * Returns: 0 on success, or a negative error code on failure.
  */
 gint ww_display_dispatch(WwDisplay* self);
 
 /**
- * ww_display_update_size:
+ * ww_display_set_metrics:
  * @self: a #WwDisplay
  * @width: new width in pixels
  * @height: new height in pixels
+ * @refresh_mhz: new refresh rate in millihertz, or 0 if unknown
  *
  * Returns: TRUE on success
  */
-gboolean ww_display_update_size(WwDisplay* self, guint width, guint height);
+gboolean ww_display_set_metrics(WwDisplay* self, guint width, guint height, guint refresh_mhz);
 
 /**
  * ww_display_close_fd:
@@ -207,7 +208,7 @@ void ww_display_close_fd(gint fd);
  * @self: a #WwDisplay
  * @x: @y: surface-local pixels (same space as the registered width/height)
  * @timestamp_us: monotonic microseconds, or 0 to let the daemon stamp
- * @modifiers: Linux modifier mask, or 0
+ * @modifiers: WAYWALLEN_POINTER_MOD_* mask, or 0
  *
  * Best-effort forward of a pointer motion to the daemon, which reverse-
  * projects it onto the renderer's texture via the active layout.
@@ -222,7 +223,7 @@ void ww_display_send_pointer_motion(WwDisplay* self, gdouble x, gdouble y, guint
  * @button: Linux input code (BTN_LEFT=0x110, BTN_RIGHT=0x111, …)
  * @pressed: TRUE on press, FALSE on release
  * @timestamp_us: monotonic microseconds, or 0
- * @modifiers: Linux modifier mask, or 0
+ * @modifiers: WAYWALLEN_POINTER_MOD_* mask, or 0
  */
 void ww_display_send_pointer_button(WwDisplay* self, gdouble x, gdouble y, guint button,
                                     gboolean pressed, guint64 timestamp_us, guint modifiers);
@@ -233,7 +234,7 @@ void ww_display_send_pointer_button(WwDisplay* self, gdouble x, gdouble y, guint
  * @x: @y: surface-local pixels
  * @dx: @dy: scroll deltas in logical notches (wheel)
  * @timestamp_us: monotonic microseconds, or 0
- * @modifiers: Linux modifier mask, or 0
+ * @modifiers: WAYWALLEN_POINTER_MOD_* mask, or 0
  */
 void ww_display_send_pointer_axis(WwDisplay* self, gdouble x, gdouble y, gdouble dx, gdouble dy,
                                   guint64 timestamp_us, guint modifiers);

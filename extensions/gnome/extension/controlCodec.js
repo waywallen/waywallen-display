@@ -1,7 +1,7 @@
 const FRAME_TYPES = new Set([
     'connection',
-    'presentation-config',
-    'presentation-dynamic-config',
+    'presentation-snapshot',
+    'presentation-state',
     'reset',
 ]);
 
@@ -21,11 +21,11 @@ function validateGeometry(geometry) {
         throw new Error('invalid monitor extent');
 }
 
-function validateDynamic(config) {
+function validateState(config) {
     if (!config || !validGeneration(config.generation) ||
         !validGeneration(config.configGeneration) ||
         typeof config.pauseEffect?.active !== 'boolean')
-        throw new Error('invalid presentation dynamic config');
+        throw new Error('invalid presentation state');
 }
 
 function validateSnapshot(snapshot) {
@@ -34,11 +34,11 @@ function validateSnapshot(snapshot) {
         !Number.isInteger(snapshot.config?.pauseEffect?.blur?.radius) ||
         snapshot.config.pauseEffect.blur.radius < 1 ||
         snapshot.config.pauseEffect.blur.radius > 64)
-        throw new Error('invalid presentation config');
-    validateDynamic(snapshot.dynamicConfig);
-    if (snapshot.dynamicConfig.configGeneration !== snapshot.config.generation ||
+        throw new Error('invalid presentation snapshot');
+    validateState(snapshot.state);
+    if (snapshot.state.configGeneration !== snapshot.config.generation ||
         (snapshot.config.pauseEffect.kind === PauseEffectKind.NONE &&
-         snapshot.dynamicConfig.pauseEffect.active))
+         snapshot.state.pauseEffect.active))
         throw new Error('inconsistent presentation snapshot');
 }
 
@@ -48,11 +48,11 @@ export function validateControlFrame(frame) {
     validateGeometry(frame.geometry);
     switch (frame.type) {
     case 'connection':
-    case 'presentation-config':
+    case 'presentation-snapshot':
         validateSnapshot(frame.presentation);
         break;
-    case 'presentation-dynamic-config':
-        validateDynamic(frame.dynamicConfig);
+    case 'presentation-state':
+        validateState(frame.state);
         break;
     case 'reset':
         break;

@@ -225,7 +225,7 @@ class LiveWallpaper extends St.Widget {
         }
         this._blurController?.setState(
             presentation.config.pauseEffect.kind === PauseEffectKind.BLUR,
-            presentation.dynamicConfig.pauseEffect.active,
+            presentation.state.pauseEffect.active,
             presentation.config.pauseEffect.blur.radius);
     }
 

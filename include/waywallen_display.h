@@ -51,13 +51,13 @@ extern "C" {
  * On-the-wire protocol version. Independent of the library API/ABI
  * version above — this number tracks the `<protocol version="...">`
  * attribute in waywallen_display_v1.xml and is sent verbatim in
- * `hello.client_protocol_version`. The daemon owns the supported
- * range and rejects out-of-range clients with `error{code=2}`.
+ * `hello.protocol_version`. The daemon accepts only the exact v8
+ * contract and rejects every other value with `error{code=2}`.
  */
 #define WAYWALLEN_DISPLAY_PROTOCOL_VERSION 8
 
 /* Presentation capabilities declared before connecting. */
-#define WAYWALLEN_PRESENTATION_CAP_BLUR (1u << 0)
+#define WAYWALLEN_PRESENTATION_CAP_PAUSE_BLUR (1u << 0)
 
 /*
  * Library version baked in at build time.
@@ -201,10 +201,6 @@ typedef struct waywallen_vk_ctx {
  * Callback payloads
  * ------------------------------------------------------------------------- */
 
-typedef struct waywallen_rect {
-    float x, y, w, h;
-} waywallen_rect_t;
-
 /* Texture set handed to the host after a successful bind_buffers.
  * Only one of the handle arrays (egl_images / gl_textures or
  * vk_images / vk_memories) is non-NULL, depending on which backend
@@ -250,16 +246,10 @@ typedef struct waywallen_textures {
     uint64_t buffer_generation;
 } waywallen_textures_t;
 
-typedef struct waywallen_config {
-    waywallen_rect_t source_rect;    /* in texture pixels */
-    waywallen_rect_t dest_rect;      /* in display pixels */
-    uint32_t         transform;      /* wl_output.transform bits */
-    float            clear_color[4]; /* RGBA straight alpha */
-    /* The library associates the wire config with its current buffer
-     * generation so hosts never need to infer that relationship. */
-    uint64_t buffer_generation;
-    uint64_t config_generation;
-} waywallen_config_t;
+typedef struct waywallen_binding {
+    waywallen_textures_t           textures;
+    waywallen_composition_config_t config;
+} waywallen_binding_t;
 
 typedef struct waywallen_frame {
     uint32_t buffer_index;
@@ -272,7 +262,8 @@ typedef struct waywallen_frame {
     /* Raw drm_syncobj fd (binary, unsignaled). Ownership transfers
      * to the host. Attach the consume submission's real sync_file via
      * waywallen_display_release_after_sync_file(), or signal it when
-     * no GPU work uses the frame, then call waywallen_display_frame_armed().
+     * no GPU work uses the frame, then call
+     * waywallen_display_frame_release_armed().
      * Closing an unresolved fd does not release the producer slot.
      * -1 means the library owns the release path for this backend. */
     int      release_syncobj_fd;
@@ -288,19 +279,18 @@ typedef struct waywallen_frame {
  * ------------------------------------------------------------------------- */
 
 typedef struct waywallen_display_callbacks {
-    void (*on_textures_ready)(void* user_data, const waywallen_textures_t* textures);
+    void (*on_binding_ready)(void* user_data, const waywallen_binding_t* binding);
     void (*on_textures_releasing)(void* user_data, const waywallen_textures_t* textures);
-    void (*on_config)(void* user_data, const waywallen_config_t* config);
+    void (*on_composition_config)(void* user_data, const waywallen_composition_config_t* config);
     void (*on_frame_ready)(void* user_data, const waywallen_frame_t* frame);
     /* A full snapshot replaces persistent and dynamic presentation
      * state atomically. The initial snapshot is installed during the
      * handshake before advance_handshake reports READY. */
-    void (*on_presentation_config)(void*                                    user_data,
-                                   const waywallen_presentation_snapshot_t* presentation);
-    /* A dynamic update is already validated against the current
+    void (*on_presentation_snapshot)(void*                                    user_data,
+                                     const waywallen_presentation_snapshot_t* presentation);
+    /* A state update is already validated against the current
      * persistent config generation when this callback runs. */
-    void (*on_presentation_dynamic_config)(
-        void* user_data, const waywallen_presentation_dynamic_config_t* dynamic_config);
+    void (*on_presentation_state)(void* user_data, const waywallen_presentation_state_t* state);
     void (*on_disconnected)(void* user_data, int err_code, const char* message);
     void* user_data;
 } waywallen_display_callbacks_t;
@@ -422,15 +412,16 @@ int waywallen_display_set_presentation_caps(waywallen_display_t* d, uint32_t fla
  * ------------------------------------------------------------------------- */
 
 /*
- * `instance_id` (added in protocol v4): a stable identifier persisted by
+ * `instance_id` is a stable identifier persisted by
  * the host (e.g. UUID4 stored in KDE/GNOME extension config) that
  * survives reconnects and DE restarts. Used by the daemon as the key
  * into per-display settings. Pass NULL or "" if the host has no stable
  * id; the daemon will fall back to indexing settings by display_name.
+ * metrics.refresh_mhz may be zero when the refresh rate is unknown.
  */
 int waywallen_display_begin_connect(waywallen_display_t* d, const char* socket_path,
                                     const char* display_name, const char* instance_id,
-                                    uint32_t width, uint32_t height, uint32_t refresh_mhz);
+                                    const waywallen_display_metrics_t* metrics);
 
 int waywallen_display_advance_handshake(waywallen_display_t* d);
 
@@ -450,10 +441,12 @@ waywallen_handshake_state_t waywallen_display_handshake_state(waywallen_display_
  * See `begin_connect` for the meaning of `instance_id`.
  */
 int waywallen_display_connect(waywallen_display_t* d, const char* socket_path,
-                              const char* display_name, const char* instance_id, uint32_t width,
-                              uint32_t height, uint32_t refresh_mhz);
+                              const char* display_name, const char* instance_id,
+                              const waywallen_display_metrics_t* metrics);
 
-int waywallen_display_update_size(waywallen_display_t* d, uint32_t width, uint32_t height);
+/* Replaces the current surface metrics. refresh_mhz may be zero when unknown. */
+int waywallen_display_set_metrics(waywallen_display_t*               d,
+                                  const waywallen_display_metrics_t* metrics);
 
 /*
  * `flags` bitmask passed to `waywallen_display_set_window_state`.
@@ -463,6 +456,9 @@ int waywallen_display_update_size(waywallen_display_t* d, uint32_t width, uint32
 #define WAYWALLEN_WIN_HAS_ACTIVE        (1u << 1)
 #define WAYWALLEN_WIN_HAS_MAXIMIZED     (1u << 2)
 #define WAYWALLEN_WIN_HAS_FULLSCREEN    (1u << 3)
+#define WAYWALLEN_WIN_STATE_MASK                                                                \
+    (WAYWALLEN_WIN_HAS_NON_MINIMIZED | WAYWALLEN_WIN_HAS_ACTIVE | WAYWALLEN_WIN_HAS_MAXIMIZED | \
+     WAYWALLEN_WIN_HAS_FULLSCREEN)
 
 /*
  * Report which kinds of windows currently cover this display. The
@@ -470,14 +466,12 @@ int waywallen_display_update_size(waywallen_display_t* d, uint32_t width, uint32
  * Pause/Play. Fire-and-forget — consumers MUST NOT debounce or
  * filter; the daemon owns all policy.
  *
- * Coalesced: if the outbox tail still holds an unsent prior
- * `window_state`, the new `flags` overwrite its body in place, so a
- * burst of rapid toggles never lands as a queue of stale snapshots.
+ * Latest-value state: an unsent prior value is replaced. Calls made
+ * before connect are cached and included atomically in register_display.
  *
- * Returns OK on enqueue, ERR_STATE if not yet Connected (caller
- * should retry after handshake completion). The library does not
- * itself remember the last value across reconnects — the host is
- * expected to re-send after a reconnect if it cares.
+ * Returns OK when cached or enqueued. The cached value survives
+ * reconnects on the same display handle. Unknown flag bits return
+ * ERR_INVAL.
  */
 int waywallen_display_set_window_state(waywallen_display_t* d, uint32_t flags);
 
@@ -489,10 +483,9 @@ int waywallen_display_get_fd(waywallen_display_t* d);
 
 /*
  * Outbox protocol — drives non-blocking POLLOUT for post-handshake
- * sends (update_size, pointer events, unbind_done, bye). The library
- * queues each outgoing request into an internal buffer and tries an
- * immediate non-blocking flush; whatever doesn't fit in the kernel
- * buffer stays queued. The host arms POLLOUT iff `wants_writable`
+ * sends. Lifecycle acknowledgements are reliable and take priority,
+ * button/axis input stays ordered, and metrics/window/motion snapshots
+ * replace older unsent values. The host arms POLLOUT iff `wants_writable`
  * returns true and calls `handle_writable` when the fd becomes
  * writable. During the handshake the lib's own state machine owns
  * POLLOUT (advance_handshake's NEED_WRITE return); `wants_writable`
@@ -545,38 +538,32 @@ int waywallen_display_release_after_sync_file(int release_syncobj_fd, int sync_f
  * pending GPU fence or is already signaled. Call only after the fence
  * attachment/signal operation succeeds. This acknowledges ownership;
  * completion still comes from the syncobj itself. */
-int waywallen_display_frame_armed(waywallen_display_t* d, uint64_t buffer_generation, uint64_t seq);
+int waywallen_display_frame_release_armed(waywallen_display_t* d, uint64_t buffer_generation,
+                                          uint64_t seq);
 
 /* -------------------------------------------------------------------------
  * Pointer event forwarding
  *
  * Forwards a pointer event to the daemon over the v1 `pointer_*`
- * requests (opcodes 8/9/10). Best-effort: pointer events are
- * soft-realtime and not retried — a non-fatal IO error returns
- * WAYWALLEN_ERR_IO and is silently swallowed so subsequent events
- * still try. All three return WAYWALLEN_ERR_STATE if the session is
- * not yet CONNECTED.
+ * requests (opcodes 8/9/10). Motion is latest-value state; button
+ * and axis requests remain ordered. All three return ERR_STATE if the
+ * session is not yet CONNECTED.
  *
  * Coordinates `x` / `y` are surface-local pixels in the same space as
  * `register_display.width`/`height` (post-DPR scaling).
  *
  * `timestamp_us` is monotonic microseconds; pass 0 if unavailable —
- * the daemon will stamp on receipt. `modifiers` is a Linux KEY_*
- * modifier mask (or 0 if the host can't track it).
+ * the daemon will stamp on receipt. `modifiers` uses the protocol bits
+ * below; adapters own toolkit-specific conversion.
  * ------------------------------------------------------------------------- */
 
-typedef enum waywallen_button_state
-{
-    WAYWALLEN_BUTTON_RELEASED = 0,
-    WAYWALLEN_BUTTON_PRESSED  = 1,
-} waywallen_button_state_t;
-
-typedef enum waywallen_axis_source
-{
-    WAYWALLEN_AXIS_WHEEL      = 0,
-    WAYWALLEN_AXIS_FINGER     = 1,
-    WAYWALLEN_AXIS_CONTINUOUS = 2,
-} waywallen_axis_source_t;
+#define WAYWALLEN_POINTER_MOD_SHIFT (1u << 0)
+#define WAYWALLEN_POINTER_MOD_CTRL  (1u << 1)
+#define WAYWALLEN_POINTER_MOD_ALT   (1u << 2)
+#define WAYWALLEN_POINTER_MOD_SUPER (1u << 3)
+#define WAYWALLEN_POINTER_MOD_MASK                                                          \
+    (WAYWALLEN_POINTER_MOD_SHIFT | WAYWALLEN_POINTER_MOD_CTRL | WAYWALLEN_POINTER_MOD_ALT | \
+     WAYWALLEN_POINTER_MOD_SUPER)
 
 int waywallen_display_send_pointer_motion(waywallen_display_t* d, float x, float y,
                                           uint64_t timestamp_us, uint32_t modifiers);
@@ -584,14 +571,14 @@ int waywallen_display_send_pointer_motion(waywallen_display_t* d, float x, float
 /* `button` is a Linux input event code: BTN_LEFT=0x110, BTN_RIGHT=0x111,
  * BTN_MIDDLE=0x112, BTN_SIDE=0x113, BTN_EXTRA=0x114. */
 int waywallen_display_send_pointer_button(waywallen_display_t* d, float x, float y, uint32_t button,
-                                          waywallen_button_state_t state, uint64_t timestamp_us,
-                                          uint32_t modifiers);
+                                          waywallen_pointer_button_state_t state,
+                                          uint64_t timestamp_us, uint32_t modifiers);
 
 /* Deltas are in logical notches (Qt's 120-per-notch / 120; Wayland's
  * wl_pointer.axis units / 10 for wheel). Diagonal scroll fits in one
  * call. */
 int waywallen_display_send_pointer_axis(waywallen_display_t* d, float x, float y, float delta_x,
-                                        float delta_y, waywallen_axis_source_t source,
+                                        float delta_y, waywallen_pointer_axis_source_t source,
                                         uint64_t timestamp_us, uint32_t modifiers);
 
 /* -------------------------------------------------------------------------
@@ -633,10 +620,9 @@ int waywallen_display_get_presentation_snapshot(
 typedef enum waywallen_disconnect_reason
 {
     WAYWALLEN_DISCONNECT_NONE = 0,
-    /* daemon `error.code == 2`: hello.client_protocol_version is
-     * outside the daemon's supported range. */
+    /* daemon `error.code == 2`: hello.protocol_version is not v8. */
     WAYWALLEN_DISCONNECT_VERSION_UNSUPPORTED = 1,
-    /* daemon `error.code == 1`: hello.protocol string mismatch. */
+    /* Retained as a host-facing category for older stored diagnostics. */
     WAYWALLEN_DISCONNECT_PROTOCOL_MISMATCH = 2,
     /* daemon sent an `error` event with an unrecognised code. */
     WAYWALLEN_DISCONNECT_DAEMON_ERROR = 3,
@@ -645,7 +631,7 @@ typedef enum waywallen_disconnect_reason
     WAYWALLEN_DISCONNECT_HANDSHAKE_FAILED = 4,
     /* connect / send / recv syscall failed. */
     WAYWALLEN_DISCONNECT_SOCKET_IO = 5,
-    /* post-handshake wire-format error (bind_buffers, set_config,
+    /* post-handshake wire-format error (bind_buffers, composition config,
      * frame_ready, unbind decode failure). */
     WAYWALLEN_DISCONNECT_PROTOCOL_ERROR = 6,
     /* clean EOF / ECONNRESET — the daemon closed the socket. */
@@ -662,7 +648,7 @@ const char* waywallen_display_last_disconnect_message(waywallen_display_t* d);
 /* -------------------------------------------------------------------------
  * EGL deferred GL texture creation
  *
- * When backend == EGL, `on_textures_ready` delivers EGLImageKHR handles
+ * When backend == EGL, `on_binding_ready` delivers EGLImageKHR handles
  * but no GL textures. The host calls these from a thread with a current
  * GL context (typically the render thread) to create / destroy the GL
  * texture objects.

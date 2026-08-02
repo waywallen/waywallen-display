@@ -32,7 +32,7 @@ Item {
         anchors.fill: parent
         displayWidth: root.width
         displayHeight: root.height
-        presentationCapabilities: WW.WaywallenDisplay.BlurCapability
+        presentationCapabilities: WW.WaywallenDisplay.PauseBlurCapability
     }
 
     Loader {

@@ -15,7 +15,10 @@ extern "C" {
 #define WW_PROTOCOL_NAME    "waywallen-display-v8"
 #define WW_PROTOCOL_VERSION 8
 
-/* --- Shared primitive types --- */
+#ifndef WAYWALLEN_PROTOCOL_VALUE_TYPES_DEFINED
+#define WAYWALLEN_PROTOCOL_VALUE_TYPES_DEFINED
+
+/* --- Shared primitive value types --- */
 
 typedef struct ww_rect {
     float x;
@@ -69,6 +72,8 @@ typedef struct ww_kv_list {
     ww_kv_t *data;
 } ww_kv_list_t;
 
+#endif /* WAYWALLEN_PROTOCOL_VALUE_TYPES_DEFINED */
+
 /* --- Codec buffer + return codes --- */
 
 typedef struct ww_buf {
@@ -97,100 +102,51 @@ typedef enum waywallen_pause_effect_kind {
     WAYWALLEN_PAUSE_EFFECT_KIND_BLUR = 1,
 } waywallen_pause_effect_kind_t;
 
+typedef enum waywallen_buffer_import_failure_kind {
+    WAYWALLEN_BUFFER_IMPORT_FAILURE_KIND_UNSUPPORTED = 0,
+    WAYWALLEN_BUFFER_IMPORT_FAILURE_KIND_RESOURCE_EXHAUSTED = 1,
+    WAYWALLEN_BUFFER_IMPORT_FAILURE_KIND_BACKEND_FAILURE = 2,
+} waywallen_buffer_import_failure_kind_t;
+
+typedef enum waywallen_pointer_button_state {
+    WAYWALLEN_POINTER_BUTTON_STATE_RELEASED = 0,
+    WAYWALLEN_POINTER_BUTTON_STATE_PRESSED = 1,
+} waywallen_pointer_button_state_t;
+
+typedef enum waywallen_pointer_axis_source {
+    WAYWALLEN_POINTER_AXIS_SOURCE_WHEEL = 0,
+    WAYWALLEN_POINTER_AXIS_SOURCE_FINGER = 1,
+    WAYWALLEN_POINTER_AXIS_SOURCE_CONTINUOUS = 2,
+} waywallen_pointer_axis_source_t;
+
+typedef enum waywallen_display_error_code {
+    WAYWALLEN_DISPLAY_ERROR_CODE_PROTOCOL_VIOLATION = 1,
+    WAYWALLEN_DISPLAY_ERROR_CODE_VERSION_UNSUPPORTED = 2,
+    WAYWALLEN_DISPLAY_ERROR_CODE_NEGOTIATION_FAILED = 3,
+    WAYWALLEN_DISPLAY_ERROR_CODE_INTERNAL = 4,
+} waywallen_display_error_code_t;
+
 typedef struct waywallen_blur_effect_config {
     uint32_t radius;
 } waywallen_blur_effect_config_t;
 
-typedef struct waywallen_pause_effect_config {
-    waywallen_pause_effect_kind_t kind;
-    waywallen_blur_effect_config_t blur;
-} waywallen_pause_effect_config_t;
+typedef struct waywallen_rgba_color {
+    float r;
+    float g;
+    float b;
+    float a;
+} waywallen_rgba_color_t;
 
-typedef struct waywallen_pause_effect_dynamic_config {
-    bool active;
-} waywallen_pause_effect_dynamic_config_t;
-
-typedef struct waywallen_presentation_capabilities {
-    uint32_t flags;
-} waywallen_presentation_capabilities_t;
-
-typedef struct waywallen_presentation_config {
+typedef struct waywallen_composition_config {
     uint64_t generation;
-    waywallen_pause_effect_config_t pause_effect;
-} waywallen_presentation_config_t;
+    uint64_t buffer_generation;
+    ww_rect_t source_rect;
+    ww_rect_t dest_rect;
+    uint32_t transform;
+    waywallen_rgba_color_t clear_color;
+} waywallen_composition_config_t;
 
-typedef struct waywallen_presentation_dynamic_config {
-    uint64_t generation;
-    uint64_t config_generation;
-    waywallen_pause_effect_dynamic_config_t pause_effect;
-} waywallen_presentation_dynamic_config_t;
-
-typedef struct waywallen_presentation_snapshot {
-    waywallen_presentation_config_t config;
-    waywallen_presentation_dynamic_config_t dynamic_config;
-} waywallen_presentation_snapshot_t;
-
-#endif /* WAYWALLEN_PROTOCOL_NAMED_TYPES_DEFINED */
-
-/* --- Opcodes --- */
-
-typedef enum ww_request_op {
-    WW_REQ_HELLO = 1,
-    WW_REQ_REGISTER_DISPLAY = 2,
-    WW_REQ_UPDATE_DISPLAY = 3,
-    WW_REQ_BYE = 5,
-    WW_REQ_CONSUMER_CAPS = 6,
-    WW_REQ_BIND_FAILED = 7,
-    WW_REQ_POINTER_MOTION = 8,
-    WW_REQ_POINTER_BUTTON = 9,
-    WW_REQ_POINTER_AXIS = 10,
-    WW_REQ_UNBIND_DONE = 11,
-    WW_REQ_WINDOW_STATE = 12,
-    WW_REQ_FRAME_ARMED = 13,
-} ww_request_op_t;
-
-typedef enum ww_event_op {
-    WW_EVT_WELCOME = 1,
-    WW_EVT_DISPLAY_ACCEPTED = 2,
-    WW_EVT_BIND_BUFFERS = 3,
-    WW_EVT_SET_CONFIG = 4,
-    WW_EVT_FRAME_READY = 5,
-    WW_EVT_UNBIND = 6,
-    WW_EVT_ERROR = 7,
-    WW_EVT_SET_PRESENTATION_CONFIG = 8,
-    WW_EVT_SET_PRESENTATION_DYNAMIC_CONFIG = 9,
-} ww_event_op_t;
-
-typedef struct ww_req_hello_t {
-    char *protocol;
-    char *client_name;
-    char *client_version;
-    uint32_t client_protocol_version;
-} ww_req_hello_t;
-
-typedef struct ww_req_register_display_t {
-    char *name;
-    char *instance_id;
-    uint32_t width;
-    uint32_t height;
-    uint32_t refresh_mhz;
-    uint32_t drm_render_major;
-    uint32_t drm_render_minor;
-    ww_kv_list_t properties;
-    waywallen_presentation_capabilities_t presentation_caps;
-} ww_req_register_display_t;
-
-typedef struct ww_req_update_display_t {
-    uint32_t width;
-    uint32_t height;
-    ww_kv_list_t properties;
-} ww_req_update_display_t;
-
-typedef struct ww_req_bye_t {
-    int _empty; /* C forbids empty structs */
-} ww_req_bye_t;
-
-typedef struct ww_req_consumer_caps_t {
+typedef struct waywallen_consumer_capabilities {
     ww_array_u32_t fourccs;
     ww_array_u32_t mod_counts;
     ww_array_u64_t modifiers;
@@ -204,14 +160,96 @@ typedef struct ww_req_consumer_caps_t {
     uint32_t color_caps;
     uint32_t extent_max_w;
     uint32_t extent_max_h;
-} ww_req_consumer_caps_t;
+} waywallen_consumer_capabilities_t;
 
-typedef struct ww_req_bind_failed_t {
-    uint32_t fourcc;
-    uint64_t modifier;
-    uint32_t reason;
+typedef struct waywallen_display_metrics {
+    uint32_t width;
+    uint32_t height;
+    uint32_t refresh_mhz;
+} waywallen_display_metrics_t;
+
+typedef struct waywallen_pause_effect_config {
+    waywallen_pause_effect_kind_t kind;
+    waywallen_blur_effect_config_t blur;
+} waywallen_pause_effect_config_t;
+
+typedef struct waywallen_pause_effect_state {
+    bool active;
+} waywallen_pause_effect_state_t;
+
+typedef struct waywallen_presentation_capabilities {
+    uint32_t flags;
+} waywallen_presentation_capabilities_t;
+
+typedef struct waywallen_presentation_config {
+    uint64_t generation;
+    waywallen_pause_effect_config_t pause_effect;
+} waywallen_presentation_config_t;
+
+typedef struct waywallen_presentation_state {
+    uint64_t generation;
+    uint64_t config_generation;
+    waywallen_pause_effect_state_t pause_effect;
+} waywallen_presentation_state_t;
+
+typedef struct waywallen_presentation_snapshot {
+    waywallen_presentation_config_t config;
+    waywallen_presentation_state_t state;
+} waywallen_presentation_snapshot_t;
+
+#endif /* WAYWALLEN_PROTOCOL_NAMED_TYPES_DEFINED */
+
+/* --- Opcodes --- */
+
+typedef enum ww_request_op {
+    WW_REQ_HELLO = 1,
+    WW_REQ_REGISTER_DISPLAY = 2,
+    WW_REQ_SET_DISPLAY_METRICS = 3,
+    WW_REQ_BUFFER_IMPORT_FAILED = 7,
+    WW_REQ_POINTER_MOTION = 8,
+    WW_REQ_POINTER_BUTTON = 9,
+    WW_REQ_POINTER_AXIS = 10,
+    WW_REQ_ACK_UNBIND = 11,
+    WW_REQ_SET_WINDOW_STATE = 12,
+    WW_REQ_FRAME_RELEASE_ARMED = 13,
+} ww_request_op_t;
+
+typedef enum ww_event_op {
+    WW_EVT_WELCOME = 1,
+    WW_EVT_DISPLAY_ACCEPTED = 2,
+    WW_EVT_BIND_BUFFERS = 3,
+    WW_EVT_SET_COMPOSITION_CONFIG = 4,
+    WW_EVT_FRAME_READY = 5,
+    WW_EVT_UNBIND = 6,
+    WW_EVT_ERROR = 7,
+    WW_EVT_SET_PRESENTATION_SNAPSHOT = 8,
+    WW_EVT_SET_PRESENTATION_STATE = 9,
+} ww_event_op_t;
+
+typedef struct ww_req_hello_t {
+    char *client_name;
+    char *client_version;
+    uint32_t protocol_version;
+} ww_req_hello_t;
+
+typedef struct ww_req_register_display_t {
+    char *name;
+    char *instance_id;
+    waywallen_display_metrics_t metrics;
+    waywallen_consumer_capabilities_t consumer_caps;
+    waywallen_presentation_capabilities_t presentation_caps;
+    uint32_t window_state_flags;
+} ww_req_register_display_t;
+
+typedef struct ww_req_set_display_metrics_t {
+    waywallen_display_metrics_t metrics;
+} ww_req_set_display_metrics_t;
+
+typedef struct ww_req_buffer_import_failed_t {
+    uint64_t buffer_generation;
+    waywallen_buffer_import_failure_kind_t kind;
     char *message;
-} ww_req_bind_failed_t;
+} ww_req_buffer_import_failed_t;
 
 typedef struct ww_req_pointer_motion_t {
     float x;
@@ -224,7 +262,7 @@ typedef struct ww_req_pointer_button_t {
     float x;
     float y;
     uint32_t button;
-    uint32_t state;
+    waywallen_pointer_button_state_t state;
     uint64_t timestamp_us;
     uint32_t modifiers;
 } ww_req_pointer_button_t;
@@ -234,27 +272,26 @@ typedef struct ww_req_pointer_axis_t {
     float y;
     float delta_x;
     float delta_y;
-    uint32_t source;
+    waywallen_pointer_axis_source_t source;
     uint64_t timestamp_us;
     uint32_t modifiers;
 } ww_req_pointer_axis_t;
 
-typedef struct ww_req_unbind_done_t {
+typedef struct ww_req_ack_unbind_t {
     uint64_t buffer_generation;
-} ww_req_unbind_done_t;
+} ww_req_ack_unbind_t;
 
-typedef struct ww_req_window_state_t {
+typedef struct ww_req_set_window_state_t {
     uint32_t flags;
-} ww_req_window_state_t;
+} ww_req_set_window_state_t;
 
-typedef struct ww_req_frame_armed_t {
+typedef struct ww_req_frame_release_armed_t {
     uint64_t buffer_generation;
     uint64_t seq;
-} ww_req_frame_armed_t;
+} ww_req_frame_release_armed_t;
 
 typedef struct ww_evt_welcome_t {
     char *server_version;
-    ww_array_string_t features;
 } ww_evt_welcome_t;
 
 typedef struct ww_evt_display_accepted_t {
@@ -273,18 +310,12 @@ typedef struct ww_evt_bind_buffers_t {
     ww_array_u32_t stride;
     ww_array_u32_t plane_offset;
     ww_array_u64_t size;
+    waywallen_composition_config_t initial_config;
 } ww_evt_bind_buffers_t;
 
-typedef struct ww_evt_set_config_t {
-    uint64_t config_generation;
-    ww_rect_t source_rect;
-    ww_rect_t dest_rect;
-    uint32_t transform;
-    float clear_r;
-    float clear_g;
-    float clear_b;
-    float clear_a;
-} ww_evt_set_config_t;
+typedef struct ww_evt_set_composition_config_t {
+    waywallen_composition_config_t config;
+} ww_evt_set_composition_config_t;
 
 typedef struct ww_evt_frame_ready_t {
     uint64_t buffer_generation;
@@ -297,17 +328,17 @@ typedef struct ww_evt_unbind_t {
 } ww_evt_unbind_t;
 
 typedef struct ww_evt_error_t {
-    uint32_t code;
+    waywallen_display_error_code_t code;
     char *message;
 } ww_evt_error_t;
 
-typedef struct ww_evt_set_presentation_config_t {
+typedef struct ww_evt_set_presentation_snapshot_t {
     waywallen_presentation_snapshot_t presentation;
-} ww_evt_set_presentation_config_t;
+} ww_evt_set_presentation_snapshot_t;
 
-typedef struct ww_evt_set_presentation_dynamic_config_t {
-    waywallen_presentation_dynamic_config_t dynamic_config;
-} ww_evt_set_presentation_dynamic_config_t;
+typedef struct ww_evt_set_presentation_state_t {
+    waywallen_presentation_state_t state;
+} ww_evt_set_presentation_state_t;
 
 /* --- Per-message functions ---
  * encode:        append wire body to `out` (header is the caller's job)
@@ -326,25 +357,15 @@ int  ww_req_register_display_decode(const uint8_t *buf, size_t len, ww_req_regis
 void ww_req_register_display_free(ww_req_register_display_t *m);
 uint32_t ww_req_register_display_expected_fds(const ww_req_register_display_t *m);
 
-int  ww_req_update_display_encode(const ww_req_update_display_t *m, ww_buf_t *out);
-int  ww_req_update_display_decode(const uint8_t *buf, size_t len, ww_req_update_display_t *out);
-void ww_req_update_display_free(ww_req_update_display_t *m);
-uint32_t ww_req_update_display_expected_fds(const ww_req_update_display_t *m);
+int  ww_req_set_display_metrics_encode(const ww_req_set_display_metrics_t *m, ww_buf_t *out);
+int  ww_req_set_display_metrics_decode(const uint8_t *buf, size_t len, ww_req_set_display_metrics_t *out);
+void ww_req_set_display_metrics_free(ww_req_set_display_metrics_t *m);
+uint32_t ww_req_set_display_metrics_expected_fds(const ww_req_set_display_metrics_t *m);
 
-int  ww_req_bye_encode(const ww_req_bye_t *m, ww_buf_t *out);
-int  ww_req_bye_decode(const uint8_t *buf, size_t len, ww_req_bye_t *out);
-void ww_req_bye_free(ww_req_bye_t *m);
-uint32_t ww_req_bye_expected_fds(const ww_req_bye_t *m);
-
-int  ww_req_consumer_caps_encode(const ww_req_consumer_caps_t *m, ww_buf_t *out);
-int  ww_req_consumer_caps_decode(const uint8_t *buf, size_t len, ww_req_consumer_caps_t *out);
-void ww_req_consumer_caps_free(ww_req_consumer_caps_t *m);
-uint32_t ww_req_consumer_caps_expected_fds(const ww_req_consumer_caps_t *m);
-
-int  ww_req_bind_failed_encode(const ww_req_bind_failed_t *m, ww_buf_t *out);
-int  ww_req_bind_failed_decode(const uint8_t *buf, size_t len, ww_req_bind_failed_t *out);
-void ww_req_bind_failed_free(ww_req_bind_failed_t *m);
-uint32_t ww_req_bind_failed_expected_fds(const ww_req_bind_failed_t *m);
+int  ww_req_buffer_import_failed_encode(const ww_req_buffer_import_failed_t *m, ww_buf_t *out);
+int  ww_req_buffer_import_failed_decode(const uint8_t *buf, size_t len, ww_req_buffer_import_failed_t *out);
+void ww_req_buffer_import_failed_free(ww_req_buffer_import_failed_t *m);
+uint32_t ww_req_buffer_import_failed_expected_fds(const ww_req_buffer_import_failed_t *m);
 
 int  ww_req_pointer_motion_encode(const ww_req_pointer_motion_t *m, ww_buf_t *out);
 int  ww_req_pointer_motion_decode(const uint8_t *buf, size_t len, ww_req_pointer_motion_t *out);
@@ -361,20 +382,20 @@ int  ww_req_pointer_axis_decode(const uint8_t *buf, size_t len, ww_req_pointer_a
 void ww_req_pointer_axis_free(ww_req_pointer_axis_t *m);
 uint32_t ww_req_pointer_axis_expected_fds(const ww_req_pointer_axis_t *m);
 
-int  ww_req_unbind_done_encode(const ww_req_unbind_done_t *m, ww_buf_t *out);
-int  ww_req_unbind_done_decode(const uint8_t *buf, size_t len, ww_req_unbind_done_t *out);
-void ww_req_unbind_done_free(ww_req_unbind_done_t *m);
-uint32_t ww_req_unbind_done_expected_fds(const ww_req_unbind_done_t *m);
+int  ww_req_ack_unbind_encode(const ww_req_ack_unbind_t *m, ww_buf_t *out);
+int  ww_req_ack_unbind_decode(const uint8_t *buf, size_t len, ww_req_ack_unbind_t *out);
+void ww_req_ack_unbind_free(ww_req_ack_unbind_t *m);
+uint32_t ww_req_ack_unbind_expected_fds(const ww_req_ack_unbind_t *m);
 
-int  ww_req_window_state_encode(const ww_req_window_state_t *m, ww_buf_t *out);
-int  ww_req_window_state_decode(const uint8_t *buf, size_t len, ww_req_window_state_t *out);
-void ww_req_window_state_free(ww_req_window_state_t *m);
-uint32_t ww_req_window_state_expected_fds(const ww_req_window_state_t *m);
+int  ww_req_set_window_state_encode(const ww_req_set_window_state_t *m, ww_buf_t *out);
+int  ww_req_set_window_state_decode(const uint8_t *buf, size_t len, ww_req_set_window_state_t *out);
+void ww_req_set_window_state_free(ww_req_set_window_state_t *m);
+uint32_t ww_req_set_window_state_expected_fds(const ww_req_set_window_state_t *m);
 
-int  ww_req_frame_armed_encode(const ww_req_frame_armed_t *m, ww_buf_t *out);
-int  ww_req_frame_armed_decode(const uint8_t *buf, size_t len, ww_req_frame_armed_t *out);
-void ww_req_frame_armed_free(ww_req_frame_armed_t *m);
-uint32_t ww_req_frame_armed_expected_fds(const ww_req_frame_armed_t *m);
+int  ww_req_frame_release_armed_encode(const ww_req_frame_release_armed_t *m, ww_buf_t *out);
+int  ww_req_frame_release_armed_decode(const uint8_t *buf, size_t len, ww_req_frame_release_armed_t *out);
+void ww_req_frame_release_armed_free(ww_req_frame_release_armed_t *m);
+uint32_t ww_req_frame_release_armed_expected_fds(const ww_req_frame_release_armed_t *m);
 
 int  ww_evt_welcome_encode(const ww_evt_welcome_t *m, ww_buf_t *out);
 int  ww_evt_welcome_decode(const uint8_t *buf, size_t len, ww_evt_welcome_t *out);
@@ -391,10 +412,10 @@ int  ww_evt_bind_buffers_decode(const uint8_t *buf, size_t len, ww_evt_bind_buff
 void ww_evt_bind_buffers_free(ww_evt_bind_buffers_t *m);
 uint32_t ww_evt_bind_buffers_expected_fds(const ww_evt_bind_buffers_t *m);
 
-int  ww_evt_set_config_encode(const ww_evt_set_config_t *m, ww_buf_t *out);
-int  ww_evt_set_config_decode(const uint8_t *buf, size_t len, ww_evt_set_config_t *out);
-void ww_evt_set_config_free(ww_evt_set_config_t *m);
-uint32_t ww_evt_set_config_expected_fds(const ww_evt_set_config_t *m);
+int  ww_evt_set_composition_config_encode(const ww_evt_set_composition_config_t *m, ww_buf_t *out);
+int  ww_evt_set_composition_config_decode(const uint8_t *buf, size_t len, ww_evt_set_composition_config_t *out);
+void ww_evt_set_composition_config_free(ww_evt_set_composition_config_t *m);
+uint32_t ww_evt_set_composition_config_expected_fds(const ww_evt_set_composition_config_t *m);
 
 int  ww_evt_frame_ready_encode(const ww_evt_frame_ready_t *m, ww_buf_t *out);
 int  ww_evt_frame_ready_decode(const uint8_t *buf, size_t len, ww_evt_frame_ready_t *out);
@@ -411,15 +432,15 @@ int  ww_evt_error_decode(const uint8_t *buf, size_t len, ww_evt_error_t *out);
 void ww_evt_error_free(ww_evt_error_t *m);
 uint32_t ww_evt_error_expected_fds(const ww_evt_error_t *m);
 
-int  ww_evt_set_presentation_config_encode(const ww_evt_set_presentation_config_t *m, ww_buf_t *out);
-int  ww_evt_set_presentation_config_decode(const uint8_t *buf, size_t len, ww_evt_set_presentation_config_t *out);
-void ww_evt_set_presentation_config_free(ww_evt_set_presentation_config_t *m);
-uint32_t ww_evt_set_presentation_config_expected_fds(const ww_evt_set_presentation_config_t *m);
+int  ww_evt_set_presentation_snapshot_encode(const ww_evt_set_presentation_snapshot_t *m, ww_buf_t *out);
+int  ww_evt_set_presentation_snapshot_decode(const uint8_t *buf, size_t len, ww_evt_set_presentation_snapshot_t *out);
+void ww_evt_set_presentation_snapshot_free(ww_evt_set_presentation_snapshot_t *m);
+uint32_t ww_evt_set_presentation_snapshot_expected_fds(const ww_evt_set_presentation_snapshot_t *m);
 
-int  ww_evt_set_presentation_dynamic_config_encode(const ww_evt_set_presentation_dynamic_config_t *m, ww_buf_t *out);
-int  ww_evt_set_presentation_dynamic_config_decode(const uint8_t *buf, size_t len, ww_evt_set_presentation_dynamic_config_t *out);
-void ww_evt_set_presentation_dynamic_config_free(ww_evt_set_presentation_dynamic_config_t *m);
-uint32_t ww_evt_set_presentation_dynamic_config_expected_fds(const ww_evt_set_presentation_dynamic_config_t *m);
+int  ww_evt_set_presentation_state_encode(const ww_evt_set_presentation_state_t *m, ww_buf_t *out);
+int  ww_evt_set_presentation_state_decode(const uint8_t *buf, size_t len, ww_evt_set_presentation_state_t *out);
+void ww_evt_set_presentation_state_free(ww_evt_set_presentation_state_t *m);
+uint32_t ww_evt_set_presentation_state_expected_fds(const ww_evt_set_presentation_state_t *m);
 
 /* --- Output buffer helpers --- */
 void ww_buf_init(ww_buf_t *b);
