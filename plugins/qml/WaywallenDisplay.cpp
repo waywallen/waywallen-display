@@ -1431,11 +1431,17 @@ void WaywallenDisplay::tryConnect() {
     connect(m_notifier, &QSocketNotifier::activated, this, &WaywallenDisplay::onHandshakeIO);
     connect(m_notifierWrite, &QSocketNotifier::activated, this, &WaywallenDisplay::onHandshakeIO);
 
-    // Initial arming: write is needed for either completing connect or
-    // sending hello; read is armed too in case the kernel completed
-    // connect already and a welcome arrives immediately.
-    m_notifier->setEnabled(true);
-    m_notifierWrite->setEnabled(true);
+    m_notifier->setEnabled(false);
+    m_notifierWrite->setEnabled(false);
+
+    const auto handshakeState = waywallen_display_handshake_state(display);
+    if (handshakeState == WAYWALLEN_HS_HELLO_PENDING) {
+        // A synchronously connected local socket already has a queued hello.
+        // Drive it now so startup does not depend on a later POLLOUT activation.
+        onHandshakeIO();
+    } else {
+        m_notifierWrite->setEnabled(true);
+    }
 }
 
 void WaywallenDisplay::onHandshakeIO() {
