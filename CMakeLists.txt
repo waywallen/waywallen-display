@@ -400,13 +400,26 @@ if(WAYWALLEN_DISPLAY_PLUGIN_QML)
 
     # KDE Plasma kpackage extension. The zip root must be
     # `org.waywallen.kde/{metadata.json,contents/...}` so it can be installed
-    # via `kpackagetool6 -i`. The matching install rule for the QML plugin's
-    # qmldir + .so lives in plugins/qml/CMakeLists.txt (where the relevant
-    # CMAKE_CURRENT_BINARY_DIR resolves correctly).
+    # via `kpackagetool6 -i`.
     install(DIRECTORY extensions/kde/package/
         DESTINATION org.waywallen.kde
         COMPONENT kde_extension
-        EXCLUDE_FROM_ALL)
+        EXCLUDE_FROM_ALL
+        PATTERN "Wrapper" EXCLUDE)
+
+    if(WAYWALLEN_DISPLAY_QML_URI MATCHES "Embed")
+        set(_ww_kde_wrapper_suffix "Embed")
+    else()
+        set(_ww_kde_wrapper_suffix "")
+    endif()
+    foreach(_ww_kde_wrapper IN ITEMS PluginDisplay PluginInfo)
+        install(FILES
+            "${CMAKE_CURRENT_SOURCE_DIR}/extensions/kde/package/contents/ui/Wrapper/${_ww_kde_wrapper}${_ww_kde_wrapper_suffix}.qml"
+            DESTINATION org.waywallen.kde/contents/ui/Plugin
+            RENAME "${_ww_kde_wrapper}.qml"
+            COMPONENT kde_extension
+            EXCLUDE_FROM_ALL)
+    endforeach()
 
     list(APPEND CPACK_COMPONENTS_ALL kde_extension)
     # An embed-flavored URI implies the kpackage bundles its own QML module

@@ -16,15 +16,13 @@ ColumnLayout {
     property string _probeError: ""
     property string _libVersion: ""
 
-    // Compile a tiny stub QML that imports the display module. The stub
-    // (ImportTest.qml) instantiates a PluginInfo from the QML module —
-    // creating it serves a dual purpose: it both proves the import is
-    // resolvable and exposes the libdisplay version to read here.
-    function _probeSurface() {
-        const c = Qt.createComponent("ImportTest.qml", Component.PreferSynchronous, root);
+    // Loading the packaged PluginInfo type verifies the selected display
+    // module and exposes the libdisplay version.
+    function _probeModule() {
+        const c = Qt.createComponent("Plugin/PluginInfo.qml", Component.PreferSynchronous, root);
         if (!c) {
             root._probeError = i18nd("plasma_wallpaper_org.waywallen.kde",
-                                     "Failed to create QML component for ImportTest.qml");
+                                     "Failed to create QML component for PluginInfo.qml");
             root._libVersion = "";
             return;
         }
@@ -50,7 +48,7 @@ ColumnLayout {
         }
     }
 
-    Component.onCompleted: root._probeSurface()
+    Component.onCompleted: root._probeModule()
 
     Kirigami.FormLayout {
         Layout.fillWidth: true

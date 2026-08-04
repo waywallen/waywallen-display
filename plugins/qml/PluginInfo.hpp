@@ -6,9 +6,7 @@
 
 #include <waywallen_display.h>
 
-// Lightweight info object surfacing libwaywallen_display build metadata to
-// QML. Instantiated by ImportTest{,Embed}.qml so config.qml can probe the
-// module and read the version off the created instance in one go.
+// Exposes libwaywallen_display build metadata to QML.
 class PluginInfo : public QObject {
     Q_OBJECT
     QML_ELEMENT

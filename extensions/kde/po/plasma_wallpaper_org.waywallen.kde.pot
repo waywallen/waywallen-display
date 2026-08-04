@@ -17,211 +17,211 @@ msgstr ""
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
 
-#: extensions/kde/package/contents/ui/config.qml:27
-msgid "Failed to create QML component for ImportTest.qml"
+#: extensions/kde/package/contents/ui/config.qml:25
+msgid "Failed to create QML component for PluginInfo.qml"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/config.qml:62
+#: extensions/kde/package/contents/ui/config.qml:60
 msgid "Display name:"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/config.qml:63
+#: extensions/kde/package/contents/ui/config.qml:61
 msgid "Auto-generated per screen"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/config.qml:69
+#: extensions/kde/package/contents/ui/config.qml:67
 msgid "Show diagnostics overlay"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/config.qml:75
+#: extensions/kde/package/contents/ui/config.qml:73
 msgid "Forward mouse events to wallpaper"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/config.qml:81
+#: extensions/kde/package/contents/ui/config.qml:79
 msgid "Accent color from wallpaper"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/config.qml:87
+#: extensions/kde/package/contents/ui/config.qml:85
 msgid "Project:"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/config.qml:94
+#: extensions/kde/package/contents/ui/config.qml:92
 msgid "Version:"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/config.qml:107
+#: extensions/kde/package/contents/ui/config.qml:105
 msgid "After upgrading the plugin, restart plasmashell to pick up the new QML module:<br/><code>systemctl --user restart plasma-plasmashell.service</code>"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/config.qml:117
+#: extensions/kde/package/contents/ui/config.qml:115
 msgid ""
 "On X11 sessions (e.g. Steam Deck), plasmashell needs the EGL XCB backend to import the wallpaper's DMA-BUFs. Create <code>~/.config/systemd/user/plasma-plasmashell.service.d/override.conf</code> with:<br/><pre>[Service]\n"
 "Environment=QT_XCB_GL_INTEGRATION=xcb_egl</pre>then run <code>systemctl --user daemon-reload</code> and restart plasmashell."
 msgstr ""
 
-#: extensions/kde/package/contents/ui/config.qml:134
+#: extensions/kde/package/contents/ui/config.qml:132
 msgid "<b>Failed to load the display module.</b><br/>Please report at <a href=\"https://github.com/waywallen/waywallen-display/issues\">github.com/waywallen/waywallen-display/issues</a>"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/main.qml:124
+#: extensions/kde/package/contents/ui/main.qml:125
 msgid "waywallen-display module failed to load"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/main.qml:131
+#: extensions/kde/package/contents/ui/main.qml:132
 msgid "Install or update waywallen-display:"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/main.qml:164
+#: extensions/kde/package/contents/ui/main.qml:167
 msgid "name:"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/main.qml:165
+#: extensions/kde/package/contents/ui/main.qml:168
 msgid "id:"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/main.qml:166
+#: extensions/kde/package/contents/ui/main.qml:169
 msgid "inst:"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/main.qml:167
+#: extensions/kde/package/contents/ui/main.qml:170
 msgid "screen:"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/main.qml:168
+#: extensions/kde/package/contents/ui/main.qml:171
 msgid "geom:"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/main.qml:170
+#: extensions/kde/package/contents/ui/main.qml:173
 msgid "avail:"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/main.qml:174
+#: extensions/kde/package/contents/ui/main.qml:177
 msgid "orient:"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/main.qml:175
+#: extensions/kde/package/contents/ui/main.qml:178
 msgid "conn:"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/main.qml:176
+#: extensions/kde/package/contents/ui/main.qml:179
 msgid "stream:"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/main.qml:177
+#: extensions/kde/package/contents/ui/main.qml:180
 msgid "frames:"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/main.qml:178
+#: extensions/kde/package/contents/ui/main.qml:181
 msgid "clear:"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/main.qml:179
+#: extensions/kde/package/contents/ui/main.qml:188
 msgid "windows:"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/main.qml:181
+#: extensions/kde/package/contents/ui/main.qml:190
 msgid "reason:"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/main.qml:183
+#: extensions/kde/package/contents/ui/main.qml:192
 msgid "msg:"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/main.qml:202
+#: extensions/kde/package/contents/ui/main.qml:211
 msgid "(untitled)"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/main.qml:212
+#: extensions/kde/package/contents/ui/main.qml:221
 msgid "nonmin"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/main.qml:213
-#: extensions/kde/package/contents/ui/main.qml:266
+#: extensions/kde/package/contents/ui/main.qml:222
+#: extensions/kde/package/contents/ui/main.qml:275
 msgid "active"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/main.qml:214
+#: extensions/kde/package/contents/ui/main.qml:223
 msgid "max"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/main.qml:215
+#: extensions/kde/package/contents/ui/main.qml:224
 msgid "full"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/main.qml:232
+#: extensions/kde/package/contents/ui/main.qml:241
 msgid "version unsupported"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/main.qml:233
+#: extensions/kde/package/contents/ui/main.qml:242
 msgid "protocol mismatch"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/main.qml:234
+#: extensions/kde/package/contents/ui/main.qml:243
 msgid "daemon error"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/main.qml:235
+#: extensions/kde/package/contents/ui/main.qml:244
 msgid "handshake failed"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/main.qml:236
+#: extensions/kde/package/contents/ui/main.qml:245
 msgid "socket io"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/main.qml:237
+#: extensions/kde/package/contents/ui/main.qml:246
 msgid "protocol error"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/main.qml:238
+#: extensions/kde/package/contents/ui/main.qml:247
 msgid "daemon gone"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/main.qml:240
-#: extensions/kde/package/contents/ui/main.qml:259
+#: extensions/kde/package/contents/ui/main.qml:249
 #: extensions/kde/package/contents/ui/main.qml:268
+#: extensions/kde/package/contents/ui/main.qml:277
 msgid "unknown"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/main.qml:253
+#: extensions/kde/package/contents/ui/main.qml:262
 msgid "disconnected"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/main.qml:254
+#: extensions/kde/package/contents/ui/main.qml:263
 msgid "connecting…"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/main.qml:255
+#: extensions/kde/package/contents/ui/main.qml:264
 msgid "handshaking…"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/main.qml:256
+#: extensions/kde/package/contents/ui/main.qml:265
 msgid "connected"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/main.qml:257
+#: extensions/kde/package/contents/ui/main.qml:266
 msgid "error"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/main.qml:265
+#: extensions/kde/package/contents/ui/main.qml:274
 msgid "inactive"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/main.qml:273
+#: extensions/kde/package/contents/ui/main.qml:282
 msgid "primary"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/main.qml:274
+#: extensions/kde/package/contents/ui/main.qml:283
 msgid "portrait"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/main.qml:275
+#: extensions/kde/package/contents/ui/main.qml:284
 msgid "landscape"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/main.qml:276
+#: extensions/kde/package/contents/ui/main.qml:285
 msgid "portrait (inv)"
 msgstr ""
 
-#: extensions/kde/package/contents/ui/main.qml:277
+#: extensions/kde/package/contents/ui/main.qml:286
 msgid "landscape (inv)"
 msgstr ""

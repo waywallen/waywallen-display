@@ -86,15 +86,16 @@ WallpaperItem {
         source: "WaywallenSurface.qml"
 
         onLoaded: {
-            item.displayNameBinding        = Qt.binding(() =>
+            const d = item.display;
+            d.displayName = Qt.binding(() =>
                 root.configuration.DisplayName.length > 0
                     ? root.configuration.DisplayName
                     : root.defaultDisplayName);
-            item.displayWidthBinding       = Qt.binding(() => Math.round(root.width  * Screen.devicePixelRatio));
-            item.displayHeightBinding      = Qt.binding(() => Math.round(root.height * Screen.devicePixelRatio));
-            item.mouseForwardBinding       = Qt.binding(() => root.configuration.MouseForward);
-            item.windowStateFlagsBinding   = Qt.binding(() => windowModel.flags);
-            item.contentSourceChanged.connect(root.scheduleAccentColorRefresh);
+            d.displayWidth = Qt.binding(() => Math.round(root.width * Screen.devicePixelRatio));
+            d.displayHeight = Qt.binding(() => Math.round(root.height * Screen.devicePixelRatio));
+            d.mouseForwardEnabled = Qt.binding(() => root.configuration.MouseForward);
+            d.windowStateFlags = Qt.binding(() => windowModel.flags);
+            d.contentRevisionChanged.connect(root.scheduleAccentColorRefresh);
         }
     }
 
@@ -151,7 +152,8 @@ WallpaperItem {
             color: Qt.rgba(0, 0, 0, 0.55)
             radius: 6
 
-            readonly property var display: surfaceLoader.item
+            readonly property var surface: surfaceLoader.item
+            readonly property var display: surface ? surface.display : null
 
             Text {
                 id: diagText
@@ -161,6 +163,7 @@ WallpaperItem {
                 font.family: "monospace"
                 text: {
                     const d = diagBox.display;
+                    if (!d) return ""
                     let s = i18nd("plasma_wallpaper_org.waywallen.kde", "name:") + "   " + d.displayName
                     s += "  " + i18nd("plasma_wallpaper_org.waywallen.kde", "id:") + " " + (d.displayId === 0 ? "—" : d.displayId)
                     s += "\n" + i18nd("plasma_wallpaper_org.waywallen.kde", "inst:") + "   " + (d.instanceId.length > 0 ? d.instanceId : "—")
@@ -180,7 +183,7 @@ WallpaperItem {
                           + " dyn=" + d.presentationStateGeneration
                           + " kind=" + d.pauseEffectKind
                           + " active=" + d.pauseEffectActive
-                          + " loaded=" + d.blurLoaded
+                          + " loaded=" + diagBox.surface.blurLoaded
                           + " radius=" + d.blurRadius
                     s += "\n" + i18nd("plasma_wallpaper_org.waywallen.kde", "windows:") + " " + windowsText()
                     if (d.lastDisconnectReason !== 0) {

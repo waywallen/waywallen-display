@@ -62,6 +62,19 @@ jobs:
           entries=$(unzip -Z1 "$archive")
           if [ '${{ matrix.name }}' = kde ]; then
             grep -qx 'org.waywallen.kde/contents/locale/ru/LC_MESSAGES/plasma_wallpaper_org.waywallen.kde.mo' <<<"$entries"
+            grep -qx 'org.waywallen.kde/contents/ui/Plugin/qmldir' <<<"$entries"
+            grep -qx 'org.waywallen.kde/contents/ui/Plugin/PluginDisplay.qml' <<<"$entries"
+            grep -qx 'org.waywallen.kde/contents/ui/Plugin/PluginInfo.qml' <<<"$entries"
+            grep -qx 'org.waywallen.kde/contents/ui/Plugin/WaywallenDisplayEmbed/qmldir' <<<"$entries"
+            display_wrapper=$(unzip -p "$archive" org.waywallen.kde/contents/ui/Plugin/PluginDisplay.qml)
+            info_wrapper=$(unzip -p "$archive" org.waywallen.kde/contents/ui/Plugin/PluginInfo.qml)
+            grep -q 'import "WaywallenDisplayEmbed" as WW' <<<"$display_wrapper"
+            grep -q 'WW.WaywallenDisplay {}' <<<"$display_wrapper"
+            grep -q 'WW.PluginInfo {}' <<<"$info_wrapper"
+            if grep -Eq '/(Wrapper|ImportTest|WaywallenSurfaceEmbed)' <<<"$entries"; then
+              echo 'KDE source wrapper found in runtime archive' >&2
+              exit 1
+            fi
           else
             grep -qx 'locale/ru/LC_MESSAGES/waywallen-gnome.mo' <<<"$entries"
           fi

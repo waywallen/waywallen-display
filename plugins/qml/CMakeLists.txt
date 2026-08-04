@@ -78,11 +78,11 @@ install(
     DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${_ww_qml_uri_path}/
     DESTINATION ${QML_INSTALL_DIR}/${_ww_qml_uri_path})
 
-# Embed the QML module into the KDE kpackage layout for the kde_extension
-# CPack component. EXCLUDE_FROM_ALL keeps a normal `cmake --install` to the
-# system prefix from also writing this kpackage-shaped path.
-install(
-    DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${_ww_qml_uri_path}/
-    DESTINATION org.waywallen.kde/contents/ui/WaywallenDisplayEmbed
-    COMPONENT kde_extension
-    EXCLUDE_FROM_ALL)
+# Embed builds keep the private module beside the stable KDE wrapper types.
+if(WAYWALLEN_DISPLAY_QML_URI MATCHES "Embed")
+    install(
+        DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${_ww_qml_uri_path}/
+        DESTINATION org.waywallen.kde/contents/ui/Plugin/WaywallenDisplayEmbed
+        COMPONENT kde_extension
+        EXCLUDE_FROM_ALL)
+endif()
