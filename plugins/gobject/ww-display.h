@@ -52,6 +52,7 @@ typedef enum
 
 typedef enum
 {
+    WW_PRESENTATION_CAPABILITY_NONE       = 0,
     WW_PRESENTATION_CAPABILITY_PAUSE_BLUR = 1u << 0,
 } WwPresentationCapability;
 

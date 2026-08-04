@@ -48,6 +48,7 @@ if(G_IR_SCANNER AND G_IR_COMPILER)
 
     set(WW_GIR_FILE "${CMAKE_CURRENT_BINARY_DIR}/${WW_GIR_FILENAME}")
     set(WW_TYPELIB_FILE "${CMAKE_CURRENT_BINARY_DIR}/${WW_TYPELIB_FILENAME}")
+    set(WW_VERIFY_GIR "${CMAKE_CURRENT_SOURCE_DIR}/verify-gir.cmake")
 
     add_custom_command(
         OUTPUT  ${WW_GIR_FILE}
@@ -79,8 +80,11 @@ if(G_IR_SCANNER AND G_IR_COMPILER)
 
     add_custom_command(
         OUTPUT  ${WW_TYPELIB_FILE}
+        COMMAND ${CMAKE_COMMAND}
+                -DWW_GIR_FILE=${WW_GIR_FILE}
+                -P ${WW_VERIFY_GIR}
         COMMAND ${G_IR_COMPILER} ${WW_GIR_FILE} -o ${WW_TYPELIB_FILE}
-        DEPENDS ${WW_GIR_FILE}
+        DEPENDS ${WW_GIR_FILE} ${WW_VERIFY_GIR}
         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
         COMMENT "Compiling Waywallen typelib"
         VERBATIM
