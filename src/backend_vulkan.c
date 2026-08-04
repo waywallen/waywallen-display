@@ -428,6 +428,7 @@ int ww_vk_import_dmabuf(const ww_vk_backend_t* backend, const ww_vk_dmabuf_impor
                im->height,
                im->modifier,
                im->n_planes);
+        if (vr == VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT) return -ENOTSUP;
         return -EIO;
     }
 
