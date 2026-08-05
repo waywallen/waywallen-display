@@ -7,7 +7,7 @@
 mod watcher;
 
 use std::collections::HashMap;
-use std::ffi::{c_void, CStr, CString};
+use std::ffi::{c_char, c_void, CStr, CString};
 use std::os::fd::{AsFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
@@ -1414,7 +1414,7 @@ unsafe extern "C" fn on_frame_ready(user_data: *mut c_void, f: *const sys::waywa
     }
 }
 
-unsafe extern "C" fn on_disconnected(user_data: *mut c_void, err: i32, msg: *const i8) {
+unsafe extern "C" fn on_disconnected(user_data: *mut c_void, err: i32, msg: *const c_char) {
     let binding = binding_from_user_data(user_data);
     let msg = if msg.is_null() {
         ""
