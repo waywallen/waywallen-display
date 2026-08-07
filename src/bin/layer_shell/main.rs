@@ -1608,9 +1608,7 @@ fn run(socket: PathBuf, name_prefix: String) -> Result<()> {
 
     let mut app = App::new(socket, name_prefix);
 
-    watcher::hyprland::spawn(app.binding_registry.clone());
-    watcher::niri::spawn(app.binding_registry.clone());
-    watcher::wayfire::spawn(app.binding_registry.clone());
+    watcher::spawn_all(app.binding_registry.clone());
 
     for g in globals.contents().clone_list() {
         match g.interface.as_str() {
