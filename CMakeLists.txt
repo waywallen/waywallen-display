@@ -269,10 +269,14 @@ target_compile_options(waywallen_display_static PRIVATE
     -Werror
     -Wpedantic
     -Wconversion
-    -Wsign-conversion
-    PUBLIC
-    -include ${CMAKE_CURRENT_SOURCE_DIR}/glibc-2.17.h
-    )
+    -Wsign-conversion)
+
+string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" _ww_system_processor)
+# The compatibility map uses the x86_64 glibc baseline and arch_prctl symbols.
+if(_ww_system_processor MATCHES "^(x86_64|amd64)$")
+    target_compile_options(waywallen_display_static PUBLIC
+        -include ${CMAKE_CURRENT_SOURCE_DIR}/glibc-2.17.h)
+endif()
 target_compile_definitions(waywallen_display_static PRIVATE
     ${_backend_defines}
     WAYWALLEN_DISPLAY_VERSION_PATCH=${WAYWALLEN_DISPLAY_VERSION_PATCH})

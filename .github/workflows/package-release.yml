@@ -17,13 +17,13 @@ permissions:
 
 jobs:
   extension:
-    name: Build ${{ matrix.name }}
-    runs-on: ubuntu-24.04
+    name: Build ${{ matrix.extension.name }} (${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.runner }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        include:
+        extension:
           - name: kde
             script: ./scripts/build_kde_embed.sh
             artifact: waywallen-kde
@@ -42,6 +42,11 @@ jobs:
               gobject-introspection libgirepository1.0-dev
               gir1.2-gtk-4.0
               libvulkan-dev libegl-dev libgles-dev
+        platform:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
         with:
@@ -50,17 +55,17 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ${{ matrix.packages }}
+          sudo apt-get install -y --no-install-recommends ${{ matrix.extension.packages }}
 
-      - name: Build ${{ matrix.name }} extension
-        run: ${{ matrix.script }}
+      - name: Build ${{ matrix.extension.name }} extension
+        run: ${{ matrix.extension.script }}
 
       - name: Verify translation assets
         run: |
-          archive=$(compgen -G '${{ matrix.pattern }}' | head -n1)
+          archive=$(compgen -G '${{ matrix.extension.pattern }}' | head -n1)
           test -n "$archive"
           entries=$(unzip -Z1 "$archive")
-          if [ '${{ matrix.name }}' = kde ]; then
+          if [ '${{ matrix.extension.name }}' = kde ]; then
             grep -qx 'org.waywallen.kde/contents/locale/ru/LC_MESSAGES/plasma_wallpaper_org.waywallen.kde.mo' <<<"$entries"
             grep -qx 'org.waywallen.kde/contents/ui/Plugin/qmldir' <<<"$entries"
             grep -qx 'org.waywallen.kde/contents/ui/Plugin/PluginDisplay.qml' <<<"$entries"
@@ -86,14 +91,22 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.pattern }}
+          name: ${{ matrix.extension.artifact }}-${{ matrix.platform.arch }}
+          path: ${{ matrix.extension.pattern }}
           if-no-files-found: error
 
   layer-shell:
-    name: Build layer-shell
-    runs-on: ubuntu-24.04
+    name: Build layer-shell (${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.runner }}
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
         with:
@@ -142,7 +155,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: waywallen-layer-shell
+          name: waywallen-layer-shell-${{ matrix.platform.arch }}
           path: dist/waywallen-layer-shell-*.tar.gz
           if-no-files-found: error
 
