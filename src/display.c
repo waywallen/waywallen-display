@@ -650,7 +650,6 @@ static int enc_ack_unbind(const void* m, ww_buf_t* out) {
 /* Consumer capability bits mirrored from the daemon's public v8 schema. */
 #define WW_MEM_HINT_DEVICE_LOCAL (1u << 0)
 #define WW_MEM_HINT_HOST_VISIBLE (1u << 1)
-#define WW_MEM_HINT_LINEAR_ONLY  (1u << 4)
 #define WW_SYNC_SYNCOBJ_BINARY   (1u << 1)
 #define WW_SYNC_SYNCOBJ_TIMELINE (1u << 2)
 #define WW_COLOR_ENC_SRGB        (1u << 0)
@@ -852,21 +851,6 @@ static int build_consumer_caps(waywallen_display_t* d, ww_consumer_caps_storage_
         memcpy(&storage->driver_uuid[i], drv_uuid_bytes + i * 4, 4);
     }
 
-    /* LINEAR_ONLY: every advertised modifier is DRM_FORMAT_MOD_LINEAR.
-     * Covers both the probe-failed fallback (we just emitted ABGR/XRGB
-     * + LINEAR above) and the case where the driver only reports
-     * LINEAR for the formats it advertises. Telling the daemon
-     * up-front avoids a failed import and renegotiation round-trip when the producer
-     * happens to live on the same vendor and would otherwise have
-     * tried a tile modifier. */
-    bool linear_only = (buf->n > 0);
-    for (size_t i = 0; i < buf->n; ++i) {
-        if (buf->modifiers[i] != WW_DRM_FORMAT_MOD_LINEAR) {
-            linear_only = false;
-            break;
-        }
-    }
-
     waywallen_consumer_capabilities_t* caps = &storage->caps;
     caps->fourccs.count                     = (uint32_t)grp_n;
     caps->fourccs.data                      = storage->grouped_fourccs;
@@ -882,9 +866,8 @@ static int build_consumer_caps(waywallen_display_t* d, ww_consumer_caps_storage_
     caps->driver_uuid.data                  = storage->driver_uuid;
     caps->drm_render_major                  = d->hs_drm_render_major;
     caps->drm_render_minor                  = d->hs_drm_render_minor;
-    caps->mem_hints = WW_MEM_HINT_HOST_VISIBLE |
-                      (advertise_device_local ? WW_MEM_HINT_DEVICE_LOCAL : 0u) |
-                      (linear_only ? WW_MEM_HINT_LINEAR_ONLY : 0u);
+    caps->mem_hints =
+        WW_MEM_HINT_HOST_VISIBLE | (advertise_device_local ? WW_MEM_HINT_DEVICE_LOCAL : 0u);
     /* sync_caps: consumer-side release/wait always lands on the kernel
      * drm_syncobj ioctl path (`waywallen_display_signal_release_syncobj`
      * + `vk/egl_wait_sync_fd`); both BINARY and TIMELINE are always

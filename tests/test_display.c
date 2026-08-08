@@ -1103,10 +1103,9 @@ static void test_unknown_pause_effect_kind_is_protocol_error(void) {
 /* No backend bound → consumer_caps probe falls through to the
  * hardcoded ABGR/XRGB + LINEAR fallback. The library should:
  *   - set HOST_VISIBLE in mem_hints (always)
- *   - set LINEAR_ONLY in mem_hints (every advertised modifier is LINEAR)
  *   - leave DEVICE_LOCAL clear (no Vulkan probe ran)
  *   - advertise both BINARY+TIMELINE in sync_caps unconditionally */
-static void test_consumer_caps_signals_linear_only_when_no_backend(void) {
+static void test_consumer_caps_without_backend(void) {
     struct test_state ts;
     ts_init(&ts);
     pthread_t srv = spawn_server(&ts, handler_full_handshake_capture_caps);
@@ -1123,14 +1122,11 @@ static void test_consumer_caps_signals_linear_only_when_no_backend(void) {
 
     const uint32_t WW_MEM_HINT_DEVICE_LOCAL = 1u << 0;
     const uint32_t WW_MEM_HINT_HOST_VISIBLE = 1u << 1;
-    const uint32_t WW_MEM_HINT_LINEAR_ONLY  = 1u << 4;
     const uint32_t WW_SYNC_SYNCOBJ_BINARY   = 1u << 1;
     const uint32_t WW_SYNC_SYNCOBJ_TIMELINE = 1u << 2;
 
     assert((ts.consumer_caps_mem_hints & WW_MEM_HINT_HOST_VISIBLE) != 0 &&
            "expected HOST_VISIBLE in mem_hints");
-    assert((ts.consumer_caps_mem_hints & WW_MEM_HINT_LINEAR_ONLY) != 0 &&
-           "expected LINEAR_ONLY in mem_hints (no backend → fallback)");
     assert((ts.consumer_caps_mem_hints & WW_MEM_HINT_DEVICE_LOCAL) == 0 &&
            "DEVICE_LOCAL must not be advertised without Vulkan probe");
     assert((ts.consumer_caps_sync_caps & (WW_SYNC_SYNCOBJ_BINARY | WW_SYNC_SYNCOBJ_TIMELINE)) ==
@@ -1140,7 +1136,7 @@ static void test_consumer_caps_signals_linear_only_when_no_backend(void) {
     waywallen_display_close(d);
     waywallen_display_free(d);
     ts_teardown(&ts);
-    printf("  ok test_consumer_caps_signals_linear_only_when_no_backend "
+    printf("  ok test_consumer_caps_without_backend "
            "(mem_hints=0x%x sync_caps=0x%x)\n",
            ts.consumer_caps_mem_hints,
            ts.consumer_caps_sync_caps);
@@ -1562,7 +1558,7 @@ int main(void) {
     test_cross_generation_state_is_protocol_error();
     test_invalid_presentation_radius_is_protocol_error();
     test_unknown_pause_effect_kind_is_protocol_error();
-    test_consumer_caps_signals_linear_only_when_no_backend();
+    test_consumer_caps_without_backend();
     test_partial_welcome();
     test_server_closes_during_welcome_wait();
     test_server_sends_error_event();
