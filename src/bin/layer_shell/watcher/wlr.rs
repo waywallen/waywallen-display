@@ -18,11 +18,8 @@
 //! That is why [`crate::watcher::spawn_all`] hands the compositor to its own
 //! watcher whenever there is one and only falls back to this.
 
-use crate::watcher::{handle_return_code, BindingRegistry};
-use crate::OutputBinding;
+use crate::watcher::{Command, CommandSender};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use std::thread;
 use wayland_client::backend::ObjectId;
 use wayland_client::globals::{registry_queue_init, GlobalListContents};
@@ -48,7 +45,7 @@ const MANAGER_VERSION: u32 = 3;
 /// by, and it needs version 4.
 const OUTPUT_VERSION: u32 = 4;
 
-pub fn spawn(registry: BindingRegistry) {
+pub fn spawn(commands: CommandSender) {
     let conn = match Connection::connect_to_env() {
         Ok(conn) => conn,
         Err(error) => {
@@ -64,7 +61,7 @@ pub fn spawn(registry: BindingRegistry) {
         }
     };
     let qh = queue.handle();
-    let mut watcher = Watcher::new(registry);
+    let mut watcher = Watcher::new(commands);
     let mut manager = None;
     for global in globals.contents().clone_list() {
         match global.interface.as_str() {
@@ -121,7 +118,7 @@ fn run_loop(
 }
 
 struct Watcher {
-    registry: BindingRegistry,
+    commands: CommandSender,
     outputs: HashMap<ObjectId, Output>,
     toplevels: HashMap<ObjectId, Toplevel>,
     dirty: bool,
@@ -202,9 +199,9 @@ impl WindowState {
 }
 
 impl Watcher {
-    fn new(registry: BindingRegistry) -> Self {
+    fn new(commands: CommandSender) -> Self {
         Self {
-            registry,
+            commands,
             outputs: HashMap::new(),
             toplevels: HashMap::new(),
             dirty: false,
@@ -263,28 +260,17 @@ impl Watcher {
 
     fn push_state(&self) {
         let by_output = self.aggregate_flags();
-        let bindings: Vec<Arc<OutputBinding>> = match self.registry.lock() {
-            Ok(registry) => registry.values().cloned().collect(),
-            Err(error) => {
-                log::error!("wlr_watcher: lock registry: {error}");
-                return;
-            }
-        };
-        for binding in bindings {
-            let flags = by_output.get(binding.display_name()).copied().unwrap_or(0);
-            if binding.window_flags().swap(flags, Ordering::SeqCst) == flags {
-                continue;
-            }
-            log::debug!("wlr_watcher: {} flags: {flags}", binding.display_name());
-            if !binding.is_registered() {
-                continue;
-            }
-            let return_code = binding.with_display(|display| unsafe {
-                waywallen_display::waywallen_display_set_window_state(display, flags)
+        for display_name in self
+            .outputs
+            .values()
+            .filter_map(|output| output.display_name.as_deref())
+        {
+            let flags = by_output.get(display_name).copied().unwrap_or(0);
+            log::debug!("wlr_watcher: {display_name} flags: {flags}");
+            self.commands.send(Command::WindowState {
+                display_name: display_name.to_string(),
+                flags,
             });
-            if let Some(return_code) = return_code {
-                handle_return_code("wlr_watcher", return_code, flags, &binding);
-            }
         }
     }
 }

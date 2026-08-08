@@ -185,6 +185,7 @@ struct App {
     name_prefix: String,
     pointers: HashMap<u32, PointerCtx>,
     binding_registry: watcher::BindingRegistry,
+    window_states: HashMap<String, u32>,
     watcher_commands: watcher::CommandReceiver,
     vulkan: Option<Arc<vulkan::VulkanRuntime>>,
 }
@@ -218,6 +219,7 @@ impl App {
             name_prefix,
             pointers: HashMap::new(),
             binding_registry: watcher::new_registry(),
+            window_states: HashMap::new(),
             watcher_commands,
             vulkan: None,
         }
@@ -547,16 +549,21 @@ impl App {
                     display_name,
                     flags,
                 } => {
+                    self.window_states.insert(display_name.clone(), flags);
                     let target = self.outputs.values().find_map(|entry| {
                         let binding = entry.binding.as_ref()?;
-                        let session = entry.session.as_ref()?;
-                        (binding.display_name == display_name
-                            && !matches!(session.state, DisplaySessionState::Retiring))
-                        .then_some((binding, session))
+                        (binding.display_name == display_name).then_some((binding, &entry.session))
                     });
                     let Some((binding, session)) = target else {
                         continue;
                     };
+                    binding.watcher.replace_window_flags(flags);
+                    let Some(session) = session.as_ref() else {
+                        continue;
+                    };
+                    if matches!(session.state, DisplaySessionState::Retiring) {
+                        continue;
+                    }
                     let rc = unsafe {
                         sys::waywallen_display_set_window_state(session.display.0, flags)
                     };
@@ -1454,6 +1461,11 @@ impl Dispatch<ZwlrLayerSurfaceV1, u32> for App {
                         physical,
                         None,
                     ));
+                    if let Some(binding) = entry.binding.as_ref() {
+                        if let Some(flags) = state.window_states.get(binding.display_name()) {
+                            binding.watcher.replace_window_flags(*flags);
+                        }
+                    }
                 }
                 let binding = entry.binding.as_ref().expect("binding just created");
                 {
@@ -2184,7 +2196,7 @@ fn run(socket: PathBuf, name_prefix: String) -> Result<()> {
         watcher::command_channel().context("create watcher command channel")?;
     let mut app = App::new(socket, name_prefix, watcher_commands);
 
-    watcher::spawn_all(app.binding_registry.clone());
+    watcher::spawn_all(app.binding_registry.clone(), watcher_sender);
 
     for g in globals.contents().clone_list() {
         match g.interface.as_str() {
