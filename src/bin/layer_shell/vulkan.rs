@@ -1,5 +1,5 @@
 use std::collections::{HashSet, VecDeque};
-use std::ffi::{c_void, CStr, CString};
+use std::ffi::{c_char, c_void, CStr, CString};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -151,7 +151,7 @@ impl VulkanRuntime {
                     .queue_priorities(&priorities)
             })
             .collect();
-        let mut device_extensions: Vec<*const i8> = requirements
+        let mut device_extensions: Vec<*const c_char> = requirements
             .device_extensions
             .iter()
             .map(|extension| extension.as_ptr())
