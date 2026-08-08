@@ -27,7 +27,7 @@ fi
 cxx_files=()
 while IFS= read -r file; do
     case "$file" in
-        glibc-2.17.h | src/generated/*)
+        glibc-2.17.h | include/waywallen_display_protocol_types.h | src/generated/*)
             continue
             ;;
     esac

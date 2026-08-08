@@ -199,6 +199,20 @@ typedef struct waywallen_presentation_snapshot {
 
 #endif /* WAYWALLEN_PROTOCOL_NAMED_TYPES_DEFINED */
 
+/* --- Named value lifecycle --- */
+
+void waywallen_blur_effect_config_free(waywallen_blur_effect_config_t *value);
+void waywallen_rgba_color_free(waywallen_rgba_color_t *value);
+void waywallen_composition_config_free(waywallen_composition_config_t *value);
+void waywallen_consumer_capabilities_free(waywallen_consumer_capabilities_t *value);
+void waywallen_display_metrics_free(waywallen_display_metrics_t *value);
+void waywallen_pause_effect_config_free(waywallen_pause_effect_config_t *value);
+void waywallen_pause_effect_state_free(waywallen_pause_effect_state_t *value);
+void waywallen_presentation_capabilities_free(waywallen_presentation_capabilities_t *value);
+void waywallen_presentation_config_free(waywallen_presentation_config_t *value);
+void waywallen_presentation_state_free(waywallen_presentation_state_t *value);
+void waywallen_presentation_snapshot_free(waywallen_presentation_snapshot_t *value);
+
 /* --- Opcodes --- */
 
 typedef enum ww_request_op {

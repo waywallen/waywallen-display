@@ -494,6 +494,12 @@ static void free_blur_effect_config(waywallen_blur_effect_config_t *v) {
     (void)v;
 }
 
+void waywallen_blur_effect_config_free(waywallen_blur_effect_config_t *value) {
+    if (!value) return;
+    free_blur_effect_config(value);
+    memset(value, 0, sizeof(*value));
+}
+
 static int w_rgba_color(ww_buf_t *b, const waywallen_rgba_color_t *v) {
     int rc;
     if ((rc = w_f32(b, v->r))) return rc;
@@ -514,6 +520,12 @@ static int rd_rgba_color(ww_rd_t *r, waywallen_rgba_color_t *v) {
 
 static void free_rgba_color(waywallen_rgba_color_t *v) {
     (void)v;
+}
+
+void waywallen_rgba_color_free(waywallen_rgba_color_t *value) {
+    if (!value) return;
+    free_rgba_color(value);
+    memset(value, 0, sizeof(*value));
 }
 
 static int w_composition_config(ww_buf_t *b, const waywallen_composition_config_t *v) {
@@ -540,6 +552,12 @@ static int rd_composition_config(ww_rd_t *r, waywallen_composition_config_t *v) 
 
 static void free_composition_config(waywallen_composition_config_t *v) {
     free_rgba_color(&v->clear_color);
+}
+
+void waywallen_composition_config_free(waywallen_composition_config_t *value) {
+    if (!value) return;
+    free_composition_config(value);
+    memset(value, 0, sizeof(*value));
 }
 
 static int w_consumer_capabilities(ww_buf_t *b, const waywallen_consumer_capabilities_t *v) {
@@ -587,6 +605,12 @@ static void free_consumer_capabilities(waywallen_consumer_capabilities_t *v) {
     free(v->driver_uuid.data); v->driver_uuid.data = NULL; v->driver_uuid.count = 0;
 }
 
+void waywallen_consumer_capabilities_free(waywallen_consumer_capabilities_t *value) {
+    if (!value) return;
+    free_consumer_capabilities(value);
+    memset(value, 0, sizeof(*value));
+}
+
 static int w_display_metrics(ww_buf_t *b, const waywallen_display_metrics_t *v) {
     int rc;
     if ((rc = w_u32(b, v->width))) return rc;
@@ -607,6 +631,12 @@ static void free_display_metrics(waywallen_display_metrics_t *v) {
     (void)v;
 }
 
+void waywallen_display_metrics_free(waywallen_display_metrics_t *value) {
+    if (!value) return;
+    free_display_metrics(value);
+    memset(value, 0, sizeof(*value));
+}
+
 static int w_pause_effect_config(ww_buf_t *b, const waywallen_pause_effect_config_t *v) {
     int rc;
     if ((rc = w_pause_effect_kind(b, v->kind))) return rc;
@@ -625,6 +655,12 @@ static void free_pause_effect_config(waywallen_pause_effect_config_t *v) {
     free_blur_effect_config(&v->blur);
 }
 
+void waywallen_pause_effect_config_free(waywallen_pause_effect_config_t *value) {
+    if (!value) return;
+    free_pause_effect_config(value);
+    memset(value, 0, sizeof(*value));
+}
+
 static int w_pause_effect_state(ww_buf_t *b, const waywallen_pause_effect_state_t *v) {
     int rc;
     if ((rc = w_bool(b, v->active))) return rc;
@@ -639,6 +675,12 @@ static int rd_pause_effect_state(ww_rd_t *r, waywallen_pause_effect_state_t *v) 
 
 static void free_pause_effect_state(waywallen_pause_effect_state_t *v) {
     (void)v;
+}
+
+void waywallen_pause_effect_state_free(waywallen_pause_effect_state_t *value) {
+    if (!value) return;
+    free_pause_effect_state(value);
+    memset(value, 0, sizeof(*value));
 }
 
 static int w_presentation_capabilities(ww_buf_t *b, const waywallen_presentation_capabilities_t *v) {
@@ -657,6 +699,12 @@ static void free_presentation_capabilities(waywallen_presentation_capabilities_t
     (void)v;
 }
 
+void waywallen_presentation_capabilities_free(waywallen_presentation_capabilities_t *value) {
+    if (!value) return;
+    free_presentation_capabilities(value);
+    memset(value, 0, sizeof(*value));
+}
+
 static int w_presentation_config(ww_buf_t *b, const waywallen_presentation_config_t *v) {
     int rc;
     if ((rc = w_u64(b, v->generation))) return rc;
@@ -673,6 +721,12 @@ static int rd_presentation_config(ww_rd_t *r, waywallen_presentation_config_t *v
 
 static void free_presentation_config(waywallen_presentation_config_t *v) {
     free_pause_effect_config(&v->pause_effect);
+}
+
+void waywallen_presentation_config_free(waywallen_presentation_config_t *value) {
+    if (!value) return;
+    free_presentation_config(value);
+    memset(value, 0, sizeof(*value));
 }
 
 static int w_presentation_state(ww_buf_t *b, const waywallen_presentation_state_t *v) {
@@ -695,6 +749,12 @@ static void free_presentation_state(waywallen_presentation_state_t *v) {
     free_pause_effect_state(&v->pause_effect);
 }
 
+void waywallen_presentation_state_free(waywallen_presentation_state_t *value) {
+    if (!value) return;
+    free_presentation_state(value);
+    memset(value, 0, sizeof(*value));
+}
+
 static int w_presentation_snapshot(ww_buf_t *b, const waywallen_presentation_snapshot_t *v) {
     int rc;
     if ((rc = w_presentation_config(b, &v->config))) return rc;
@@ -712,6 +772,12 @@ static int rd_presentation_snapshot(ww_rd_t *r, waywallen_presentation_snapshot_
 static void free_presentation_snapshot(waywallen_presentation_snapshot_t *v) {
     free_presentation_config(&v->config);
     free_presentation_state(&v->state);
+}
+
+void waywallen_presentation_snapshot_free(waywallen_presentation_snapshot_t *value) {
+    if (!value) return;
+    free_presentation_snapshot(value);
+    memset(value, 0, sizeof(*value));
 }
 
 int ww_req_hello_encode(const ww_req_hello_t *m, ww_buf_t *out) {
