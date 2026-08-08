@@ -1,3 +1,19 @@
+<release version="0.3.1" date="2026-08-08">
+  <description>
+    <p>Added:</p>
+    <ul>
+      <li>Publish aarch64 release artifacts.</li>
+      <li>Add generic window-state watching for wlroots compositors. #34 by @wehrwolfmann</li>
+      <li>Add animated pause blur to the layer-shell display.</li>
+    </ul>
+    <p>Fixed:</p>
+    <ul>
+      <li>layer-shell presentation moved Vulkan WSI. #29 #36</li>
+      <li>Clear display integrations to black after the daemon disconnects.</li>
+      <li>Correct consumer memory capability reporting and aarch64 callback types.</li>
+    </ul>
+  </description>
+</release>
 <release version="0.3.0" date="2026-08-02">
   <description>
     <p>Added:</p>
