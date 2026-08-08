@@ -2184,9 +2184,7 @@ fn run(socket: PathBuf, name_prefix: String) -> Result<()> {
         watcher::command_channel().context("create watcher command channel")?;
     let mut app = App::new(socket, name_prefix, watcher_commands);
 
-    watcher::hyprland::spawn(app.binding_registry.clone(), watcher_sender.clone());
-    watcher::niri::spawn(app.binding_registry.clone(), watcher_sender.clone());
-    watcher::wayfire::spawn(app.binding_registry.clone(), watcher_sender);
+    watcher::spawn_all(app.binding_registry.clone());
 
     for g in globals.contents().clone_list() {
         match g.interface.as_str() {
