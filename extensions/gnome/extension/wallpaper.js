@@ -36,7 +36,8 @@ const FADE_IN_MS = 800;
 
 export const LiveWallpaper = GObject.registerClass(
 class LiveWallpaper extends St.Widget {
-    _init(backgroundActor, role = WallpaperRole.Other) {
+    _init(backgroundActor, role = WallpaperRole.Other, rendererAvailable = false,
+        rendererLauncher = null) {
         super._init({
             // FixedLayout: we position the clone ourselves in vfunc_allocate
             // (top-left origin, scaled to fill). BinLayout centered the
@@ -50,11 +51,13 @@ class LiveWallpaper extends St.Widget {
             // (see vfuncs) so we don't distort the overview workspace layout.
             x_expand: true,
             y_expand: true,
-            opacity: 0,
+            opacity: role === WallpaperRole.Desktop ? 255 : 0,
         });
         this._backgroundActor = backgroundActor;
         this._monitorIndex = backgroundActor.monitor;
         this._role = role;
+        this._rendererAvailable = rendererAvailable;
+        this._rendererLauncher = rendererLauncher;
         this._presentation = null;
         this._blurController = null;
 
@@ -66,6 +69,8 @@ class LiveWallpaper extends St.Widget {
         this._sourceActor = null;
         this._sourceDestroyId = 0;
         this._pollId = 0;
+        if (this._role === WallpaperRole.Desktop)
+            this.set_style('background-color: black;');
         this._tryAttach();
     }
 
@@ -98,10 +103,15 @@ class LiveWallpaper extends St.Widget {
     }
 
     _tryAttach() {
+        if (!this._rendererAvailable) {
+            this._showFallback();
+            return;
+        }
         const renderer = this._findRenderer();
         if (renderer) {
             this._cloneActor = new Clutter.Clone({
                 source: renderer,
+                opacity: 0,
             });
             this._cloneDestroyId = this._cloneActor.connect('destroy', () => {
                 this._cloneActor = null;
@@ -116,7 +126,8 @@ class LiveWallpaper extends St.Widget {
                     this._cloneActor, 'waywallen-desktop-blur');
                 this._applyPresentation();
             }
-            this.ease({
+            this.opacity = 255;
+            this._cloneActor.ease({
                 opacity: 255,
                 duration: FADE_IN_MS,
                 mode: Clutter.AnimationMode.EASE_OUT_QUAD,
@@ -131,7 +142,7 @@ class LiveWallpaper extends St.Widget {
     }
 
     _schedulePoll() {
-        if (this._pollId !== 0)
+        if (this._pollId !== 0 || !this._rendererAvailable)
             return;
         this._pollId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1000, () => {
             this._pollId = 0;
@@ -146,8 +157,8 @@ class LiveWallpaper extends St.Widget {
     // colored veil — most visible in the overview workspace preview, which
     // renders that content at brightness 0.5. While we are actively covering
     // the actor, pin the backdrop to black so any bleed reads as shadow.
-    // Restored when the source goes away so lock-screen / fallback still get
-    // the normal dimmed GNOME background.
+    // Non-desktop backgrounds restore their normal brightness when the source
+    // goes away; the desktop keeps the disconnected fallback black.
     _dimBackdrop(dim) {
         try {
             const content = this._backgroundActor?.content;
@@ -176,11 +187,47 @@ class LiveWallpaper extends St.Widget {
                 try { clone.disconnect(this._cloneDestroyId); } catch (_e) {}
                 this._cloneDestroyId = 0;
             }
-            this.opacity = 0;
             try { clone.destroy(); } catch (_e) {}
         }
-        this._dimBackdrop(false);
+        this._showFallback();
         this._schedulePoll();
+    }
+
+    _showFallback() {
+        this._cloneActor?.remove_all_transitions();
+        if (this._cloneActor)
+            this._cloneActor.opacity = 0;
+        if (this._role === WallpaperRole.Desktop) {
+            this.opacity = 255;
+            this._dimBackdrop(true);
+        } else {
+            this.opacity = 0;
+            this._dimBackdrop(false);
+        }
+    }
+
+    setRendererAvailable(available) {
+        if (this._rendererAvailable === available)
+            return;
+        this._rendererAvailable = available;
+        if (!available) {
+            this._showFallback();
+            return;
+        }
+        if (this._cloneActor) {
+            this.opacity = 255;
+            this._cloneActor.ease({
+                opacity: 255,
+                duration: FADE_IN_MS,
+                mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+            });
+            return;
+        }
+        this._tryAttach();
+    }
+
+    setRendererLauncher(launcher) {
+        this._rendererLauncher = launcher;
     }
 
     _findRenderer() {
@@ -188,6 +235,7 @@ class LiveWallpaper extends St.Widget {
         const actors = global.get_window_actors(false);
         const ours = actors.filter(a =>
             a.meta_window.title?.includes(APPLICATION_ID) &&
+            this._rendererLauncher?.ownsWindow(a.meta_window) &&
             rendererPresentationReady(a));
 
         const numMonitors = global.display.get_n_monitors();
@@ -251,6 +299,7 @@ class LiveWallpaper extends St.Widget {
             this._cloneDestroyId = 0;
         }
         this._cloneActor = null;
+        this._dimBackdrop(false);
         super.on_destroy?.();
     }
 });

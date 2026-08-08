@@ -485,6 +485,7 @@ class MonitorRenderer {
 
     _onDisconnected(code, msg) {
         logIndexed(this._index, `disconnected: code=${code} msg=${msg}`);
+        this._paintable?.clear();
         this._exit();  // extension respawns us
     }
 

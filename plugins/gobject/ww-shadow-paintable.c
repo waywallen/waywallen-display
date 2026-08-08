@@ -296,6 +296,14 @@ void ww_shadow_paintable_clear(WwShadowPaintable* self) {
         close(self->fd);
         self->fd = -1;
     }
-    self->have_shadow = FALSE;
+    self->have_shadow      = FALSE;
+    self->have_composition = FALSE;
+    memset(self->src, 0, sizeof(self->src));
+    memset(self->dst, 0, sizeof(self->dst));
+    self->transform = 0;
+    self->clear[0]  = 0.0f;
+    self->clear[1]  = 0.0f;
+    self->clear[2]  = 0.0f;
+    self->clear[3]  = 1.0f;
     gdk_paintable_invalidate_contents(GDK_PAINTABLE(self));
 }

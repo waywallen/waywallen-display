@@ -616,8 +616,10 @@ void WaywallenDisplay::cleanup() {
     m_glTextures.clear();
     m_vkImagesValid = false;
     m_vkImages.clear();
+    bool hadPresentedContent = false;
     {
         QMutexLocker lk(&m_pendingMutex);
+        hadPresentedContent = m_presentationState.presented().valid;
         m_presentationState.reset();
         m_preparedEglContent         = ContentSnapshot {};
         m_notifiedPresentationSerial = m_presentationSerial;
@@ -625,6 +627,12 @@ void WaywallenDisplay::cleanup() {
     m_textureCount  = 0;
     m_activeBackend = BackendNone;
     resetPresentation();
+    const bool fallbackChanged = m_clearColor != Qt::black;
+    setPresentedClearColor(Qt::black);
+    if (hadPresentedContent || fallbackChanged) {
+        m_contentRevision++;
+        emit contentRevisionChanged();
+    }
 
     if (m_displayId != 0) {
         m_displayId = 0;

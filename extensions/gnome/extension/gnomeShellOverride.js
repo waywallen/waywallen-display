@@ -27,6 +27,8 @@ export class GnomeShellOverride {
         // down). Stale entries are pruned at disable() / on next switch.
         this._wallpaperActors = new Set();
         this._desktopPresentation = new Map();
+        this._rendererAvailable = false;
+        this._rendererLauncher = null;
     }
 
     enable() {
@@ -40,7 +42,8 @@ export class GnomeShellOverride {
                 const role = this._container === Main.layoutManager._backgroundGroup
                     ? Wallpaper.WallpaperRole.Desktop
                     : Wallpaper.WallpaperRole.Other;
-                this.waywallenActor = new Wallpaper.LiveWallpaper(backgroundActor, role);
+                this.waywallenActor = new Wallpaper.LiveWallpaper(
+                    backgroundActor, role, self._rendererAvailable, self._rendererLauncher);
                 self._wallpaperActors.add(this.waywallenActor);
                 if (role === Wallpaper.WallpaperRole.Desktop)
                     self._applyPresentationToActor(this.waywallenActor);
@@ -351,6 +354,22 @@ export class GnomeShellOverride {
         for (const actor of this._wallpaperActors) {
             if (actor.role === Wallpaper.WallpaperRole.Desktop)
                 actor.setPresentation(null);
+        }
+    }
+
+    setRendererAvailable(available) {
+        if (this._rendererAvailable === available)
+            return;
+        this._rendererAvailable = available;
+        for (const actor of this._wallpaperActors) {
+            try { actor.setRendererAvailable(available); } catch (_e) {}
+        }
+    }
+
+    setRendererLauncher(launcher) {
+        this._rendererLauncher = launcher;
+        for (const actor of this._wallpaperActors) {
+            try { actor.setRendererLauncher(launcher); } catch (_e) {}
         }
     }
 

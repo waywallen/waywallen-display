@@ -55,6 +55,9 @@ struct test_state {
     int  listen_fd;
 
     int on_disconnected_count;
+    int callback_sequence;
+    int last_presentation_snapshot_sequence;
+    int last_disconnected_sequence;
     int on_binding_ready_count;
     int on_textures_releasing_count;
     int on_composition_config_count;
@@ -125,7 +128,8 @@ static void cb_presentation_snapshot(void*                                    ud
                                      const waywallen_presentation_snapshot_t* presentation) {
     struct test_state* ts = (struct test_state*)ud;
     ts->on_presentation_snapshot_count++;
-    ts->last_presentation = *presentation;
+    ts->last_presentation_snapshot_sequence = ++ts->callback_sequence;
+    ts->last_presentation                   = *presentation;
 }
 static void cb_presentation_state(void* ud, const waywallen_presentation_state_t* state) {
     struct test_state* ts = (struct test_state*)ud;
@@ -135,7 +139,8 @@ static void cb_presentation_state(void* ud, const waywallen_presentation_state_t
 static void cb_disconnected(void* ud, int code, const char* msg) {
     struct test_state* ts = (struct test_state*)ud;
     ts->on_disconnected_count++;
-    ts->last_disconnect_code = code;
+    ts->last_disconnected_sequence = ++ts->callback_sequence;
+    ts->last_disconnect_code       = code;
     if (msg) {
         snprintf(ts->last_disconnect_msg, sizeof(ts->last_disconnect_msg), "%s", msg);
     } else {
@@ -1035,6 +1040,8 @@ static void test_presentation_snapshot_updates_and_disconnect_reset(void) {
     assert(ts.on_presentation_snapshot_count == 3);
     assert(ts.last_presentation.config.pause_effect.kind == WAYWALLEN_PAUSE_EFFECT_KIND_NONE);
     assert(! ts.last_presentation.state.pause_effect.active);
+    assert(ts.last_presentation_snapshot_sequence + 1 == ts.last_disconnected_sequence);
+    assert(ts.on_composition_config_count == 0);
     assert(waywallen_display_get_presentation_snapshot(d, &ts.last_presentation) ==
            WAYWALLEN_ERR_NOTCONN);
 
@@ -1171,7 +1178,9 @@ static void test_server_closes_during_welcome_wait(void) {
     assert(rc == WAYWALLEN_OK);
     rc = drive_handshake(d, 1000);
     assert(rc == WAYWALLEN_ERR_NOTCONN);
+    assert(ts.on_presentation_snapshot_count == 0);
     assert(ts.on_disconnected_count == 1);
+    assert(ts.last_disconnected_sequence == 1);
 
     waywallen_display_free(d);
     pthread_join(srv, NULL);

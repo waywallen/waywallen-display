@@ -105,6 +105,7 @@ export default class WaywallenExtension extends Extension {
     _onDaemonAppeared() {
         log('[waywallen] daemon appeared on session bus');
         this._daemonUp = true;
+        this._override?.setRendererAvailable(false);
         this._respawnDelayMs = 100;
         if (this._isEnabled && !this._currentProc)
             this._spawnRenderer();
@@ -113,6 +114,8 @@ export default class WaywallenExtension extends Extension {
     _onDaemonVanished() {
         log('[waywallen] daemon vanished from session bus');
         this._daemonUp = false;
+        this._override?.setRendererAvailable(false);
+        this._override?.setRendererLauncher(null);
         if (this._respawnId) {
             GLib.source_remove(this._respawnId);
             this._respawnId = 0;
@@ -143,6 +146,8 @@ export default class WaywallenExtension extends Extension {
             '--instance-id',   this._settings.get_string('instance-id'),
             '--display-name',  this._settings.get_string('display-name'),
         ];
+        this._override?.setRendererAvailable(false);
+        this._override?.setRendererLauncher(null);
         if (this._settings.get_boolean('show-diagnostics'))
             argv.push('--diagnostics');
 
@@ -152,7 +157,10 @@ export default class WaywallenExtension extends Extension {
             if (this._currentProc !== proc || !this._override)
                 return;
             const applied = this._override.applyControlFrame(frame);
+            if (applied && frame.type === 'reset')
+                this._override.setRendererAvailable(false);
             if (applied && frame.type === 'connection') {
+                this._override.setRendererAvailable(true);
                 const g = frame.geometry;
                 proc.writeStdin(
                     `R ${g.x} ${g.y} ${frame.presentation.config.generation}\n`);
@@ -172,6 +180,7 @@ export default class WaywallenExtension extends Extension {
         this._currentProc.set_env('GTK_A11Y', 'none');
 
         this._currentProc.spawnv(argv);
+        this._override?.setRendererLauncher(this._currentProc);
         this._windowMgr?.setLauncher(this._currentProc);
         this._pointer?.setLauncher(this._currentProc);
         this._winState?.setLauncher(this._currentProc);
@@ -183,6 +192,8 @@ export default class WaywallenExtension extends Extension {
             if (this._currentProc !== proc)
                 return;
             this._currentProc = null;
+            this._override?.setRendererAvailable(false);
+            this._override?.setRendererLauncher(null);
             this._override?.resetPresentation();
             if (!this._isEnabled || !this._daemonUp)
                 return;

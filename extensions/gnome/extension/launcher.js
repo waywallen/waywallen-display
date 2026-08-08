@@ -155,12 +155,13 @@ export class LaunchSubprocess {
 
     /**
      * Returns true iff the given MetaWindow was spawned by this subprocess.
-     * Always false on X11 (no Wayland-client equivalent).
      */
     ownsWindow(window) {
-        if (this._isX11 || !this.running)
+        if (!this.running || !this.subprocess)
             return false;
         try {
+            if (this._isX11)
+                return `${window.get_pid()}` === this.subprocess.get_identifier();
             return this._waylandClient.owns_window(window);
         } catch (_e) {
             return false;

@@ -671,6 +671,41 @@ struct RetiredSwapchain {
     present_ready: Vec<vk::Semaphore>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BlankState {
+    Inactive,
+    Pending,
+    Committed,
+}
+
+impl BlankState {
+    fn request(&mut self) -> bool {
+        if *self != Self::Inactive {
+            return false;
+        }
+        *self = Self::Pending;
+        true
+    }
+
+    fn presented(&mut self, blank: bool) {
+        *self = if blank {
+            Self::Committed
+        } else {
+            Self::Inactive
+        };
+    }
+
+    fn invalidate_swapchain(&mut self) {
+        if *self == Self::Committed {
+            *self = Self::Pending;
+        }
+    }
+
+    fn abandon(&mut self) {
+        *self = Self::Inactive;
+    }
+}
+
 pub struct WsiPresenter {
     runtime: Arc<VulkanRuntime>,
     surface: vk::SurfaceKHR,
@@ -696,6 +731,7 @@ pub struct WsiPresenter {
     pause_blur_available: bool,
     direct_binding: Option<DirectBinding>,
     direct_frames: VecDeque<DirectFrame>,
+    blank_state: BlankState,
     recreate_extent: Option<vk::Extent2D>,
     retired_swapchains: Vec<RetiredSwapchain>,
 }
@@ -736,6 +772,7 @@ impl WsiPresenter {
             pause_blur_available: true,
             direct_binding: None,
             direct_frames: VecDeque::new(),
+            blank_state: BlankState::Inactive,
             recreate_extent: None,
             retired_swapchains: Vec::new(),
         };
@@ -870,6 +907,7 @@ impl WsiPresenter {
         let extent = vk::Extent2D { width, height };
         if self.extent != extent {
             self.recreate_extent = Some(extent);
+            self.blank_state.invalidate_swapchain();
         }
     }
 
@@ -953,7 +991,10 @@ impl WsiPresenter {
         Ok(())
     }
 
-    pub fn discard_direct_frames(&mut self, display: *mut sys::waywallen_display_t) -> Result<()> {
+    pub fn discard_direct_frames(
+        &mut self,
+        display: Option<*mut sys::waywallen_display_t>,
+    ) -> Result<()> {
         let mut first_error = None;
         while let Some(frame) = self.direct_frames.pop_front() {
             if let Err(error) = resolve_direct_release(
@@ -975,7 +1016,10 @@ impl WsiPresenter {
         Ok(())
     }
 
-    pub fn retire_direct_binding(&mut self, display: *mut sys::waywallen_display_t) -> Result<()> {
+    pub fn retire_direct_binding(
+        &mut self,
+        display: Option<*mut sys::waywallen_display_t>,
+    ) -> Result<()> {
         let discard_result = self.discard_direct_frames(display);
         if let Err(error) = self.wait_frames_idle() {
             log::warn!("timed Vulkan retirement failed, waiting for the shared device: {error:#}");
@@ -1037,9 +1081,22 @@ impl WsiPresenter {
         }
     }
 
+    pub fn request_blank(&mut self) -> bool {
+        self.reset_display_session();
+        self.blank_state.request()
+    }
+
+    pub fn blank_committed(&self) -> bool {
+        self.blank_state == BlankState::Committed
+    }
+
+    pub fn abandon_blank(&mut self) {
+        self.blank_state.abandon();
+    }
+
     pub fn present(
         &mut self,
-        display: *mut sys::waywallen_display_t,
+        display: Option<*mut sys::waywallen_display_t>,
         composition: &Composition,
         now: Instant,
     ) -> Result<PresentResult> {
@@ -1057,7 +1114,6 @@ impl WsiPresenter {
             }
             self.destroy_current_blur_resources();
         }
-        let pending_direct = self.direct_frames.front().map(direct_frame_handles);
         if let Some(extent) = self.recreate_extent {
             if !self.frames_idle()? {
                 return Ok(PresentResult::Pending);
@@ -1065,6 +1121,15 @@ impl WsiPresenter {
             self.recreate_extent = None;
             self.recreate_swapchain(extent)?;
         }
+
+        let blank_pending = self.blank_state == BlankState::Pending;
+        let pending_direct = (!blank_pending)
+            .then(|| self.direct_frames.front().map(direct_frame_handles))
+            .flatten();
+        let direct_display = pending_direct
+            .is_some()
+            .then(|| display.ok_or_else(|| anyhow!("direct frame present without live display")))
+            .transpose()?;
 
         if scene_path && pending_direct.is_some() {
             let extent_mismatch = self
@@ -1094,7 +1159,7 @@ impl WsiPresenter {
             .blur_resources
             .as_ref()
             .is_some_and(|resources| resources.base_valid);
-        if pending_direct.is_none() && !(scene_path && scene_valid) {
+        if pending_direct.is_none() && !(scene_path && scene_valid) && !blank_pending {
             return Ok(PresentResult::Presented {
                 redraw: release_pending,
             });
@@ -1158,9 +1223,14 @@ impl WsiPresenter {
                 .begin_command_buffer(frame.command_buffer, &begin)
         }
         .context("vkBeginCommandBuffer")?;
+        let clear_color = if blank_pending {
+            [0.0, 0.0, 0.0, 1.0]
+        } else {
+            composition.clear
+        };
         let clear = [vk::ClearValue {
             color: vk::ClearColorValue {
-                float32: composition.clear,
+                float32: clear_color,
             },
         }];
         let swapchain_render_area = vk::Rect2D {
@@ -1359,9 +1429,7 @@ impl WsiPresenter {
                 self.runtime
                     .device
                     .cmd_end_render_pass(frame.command_buffer);
-            } else {
-                let push_bytes = composition_push_bytes
-                    .expect("direct swapchain draw must have a producer frame");
+            } else if let Some(push_bytes) = composition_push_bytes {
                 self.runtime.device.cmd_begin_render_pass(
                     frame.command_buffer,
                     &swapchain_begin,
@@ -1391,6 +1459,15 @@ impl WsiPresenter {
                 self.runtime
                     .device
                     .cmd_draw(frame.command_buffer, 6, 1, 0, 0);
+                self.runtime
+                    .device
+                    .cmd_end_render_pass(frame.command_buffer);
+            } else {
+                self.runtime.device.cmd_begin_render_pass(
+                    frame.command_buffer,
+                    &swapchain_begin,
+                    vk::SubpassContents::INLINE,
+                );
                 self.runtime
                     .device
                     .cmd_end_render_pass(frame.command_buffer);
@@ -1461,7 +1538,7 @@ impl WsiPresenter {
                 .pop_front()
                 .expect("submitted direct source must remain queued");
             Some(self.arm_direct_release(
-                display,
+                direct_display.expect("direct display validated before submit"),
                 frame_index,
                 DirectRelease {
                     release_syncobj_fd: direct.release_syncobj_fd,
@@ -1484,16 +1561,23 @@ impl WsiPresenter {
                 .swapchain_loader
                 .queue_present(self.runtime.present_queue, &present_info)
         };
-        match present {
+        let presented_to_compositor = match present {
             Ok(present_suboptimal) => {
                 if suboptimal || present_suboptimal {
                     self.recreate_extent = Some(self.extent);
                 }
+                true
             }
             Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
                 self.recreate_extent = Some(self.extent);
+                false
             }
             Err(error) => return Err(anyhow!("vkQueuePresentKHR: {error:?}")),
+        };
+        if presented_to_compositor {
+            if blank_pending || pending_direct.is_some() {
+                self.blank_state.presented(blank_pending);
+            }
         }
         if let Some(result) = release_arm {
             release_pending |= result?;
@@ -1505,6 +1589,8 @@ impl WsiPresenter {
             redraw: blur.animating
                 || cleanup_pending
                 || release_pending
+                || self.blank_state == BlankState::Pending
+                || self.recreate_extent.is_some()
                 || !self.direct_frames.is_empty(),
         })
     }
@@ -1650,6 +1736,7 @@ impl WsiPresenter {
         self.framebuffers = new_framebuffers;
         self.format = surface_format.format;
         self.extent = extent;
+        self.blank_state.invalidate_swapchain();
         if self.choose_scene_format(self.format).is_none() {
             self.pause_blur_available = false;
             log::warn!(
@@ -1705,7 +1792,7 @@ impl WsiPresenter {
 
     fn drain_cpu_release_fallbacks(
         &mut self,
-        display: *mut sys::waywallen_display_t,
+        display: Option<*mut sys::waywallen_display_t>,
     ) -> Result<bool> {
         let mut first_error = None;
         for frame in &mut self.frames {
@@ -2511,26 +2598,40 @@ fn direct_frame_handles(frame: &DirectFrame) -> DirectFrameHandles {
 }
 
 fn resolve_direct_release(
-    display: *mut sys::waywallen_display_t,
+    display: Option<*mut sys::waywallen_display_t>,
     release: DirectRelease,
 ) -> Result<()> {
     let rc = unsafe { sys::waywallen_display_signal_release_syncobj(release.release_syncobj_fd) };
     if rc != sys::WAYWALLEN_OK {
+        if display.is_none() {
+            log::warn!(
+                "signal disconnected direct frame release generation={} seq={} failed: {rc}",
+                release.buffer_generation,
+                release.seq
+            );
+            return Ok(());
+        }
         bail!(
             "signal direct frame release generation={} seq={} failed: {rc}",
             release.buffer_generation,
             release.seq
         );
     }
-    let rc = unsafe {
-        sys::waywallen_display_frame_release_armed(display, release.buffer_generation, release.seq)
-    };
-    if rc != sys::WAYWALLEN_OK {
-        bail!(
-            "acknowledge direct frame release generation={} seq={} failed: {rc}",
-            release.buffer_generation,
-            release.seq
-        );
+    if let Some(display) = display {
+        let rc = unsafe {
+            sys::waywallen_display_frame_release_armed(
+                display,
+                release.buffer_generation,
+                release.seq,
+            )
+        };
+        if rc != sys::WAYWALLEN_OK {
+            bail!(
+                "acknowledge direct frame release generation={} seq={} failed: {rc}",
+                release.buffer_generation,
+                release.seq
+            );
+        }
     }
     Ok(())
 }
@@ -2543,7 +2644,7 @@ pub fn discard_direct_frame(
         return Ok(());
     }
     resolve_direct_release(
-        display,
+        Some(display),
         DirectRelease {
             release_syncobj_fd: frame.release_syncobj_fd,
             buffer_generation: frame.buffer_generation,
@@ -2740,6 +2841,32 @@ mod tests {
 
     fn assert_near(actual: f32, expected: f32) {
         assert!((actual - expected).abs() < 0.001, "{actual} != {expected}");
+    }
+
+    #[test]
+    fn blank_state_is_committed_once_and_rearmed_by_swapchain_recreate() {
+        let mut state = BlankState::Inactive;
+        assert!(state.request());
+        assert!(!state.request());
+        state.presented(true);
+        assert_eq!(state, BlankState::Committed);
+        assert!(!state.request());
+        state.invalidate_swapchain();
+        assert_eq!(state, BlankState::Pending);
+    }
+
+    #[test]
+    fn source_present_replaces_committed_blank() {
+        let mut state = BlankState::Committed;
+        state.presented(false);
+        assert_eq!(state, BlankState::Inactive);
+    }
+
+    #[test]
+    fn abandoned_blank_does_not_block_the_next_source() {
+        let mut state = BlankState::Pending;
+        state.abandon();
+        assert_eq!(state, BlankState::Inactive);
     }
 
     #[test]

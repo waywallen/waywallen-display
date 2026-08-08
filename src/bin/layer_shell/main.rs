@@ -97,10 +97,11 @@ const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(2);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 const STABLE_SESSION_TIME: Duration = Duration::from_secs(20);
 
+#[derive(Clone, Copy)]
 enum DisplaySessionState {
     Handshake { events: i16 },
     Ready,
-    Retiring,
+    Retiring { blank_required: bool },
 }
 
 struct DisplaySession {
@@ -125,7 +126,7 @@ impl DisplaySession {
                 }
                 events
             }
-            DisplaySessionState::Retiring => 0,
+            DisplaySessionState::Retiring { .. } => 0,
         }
     }
 }
@@ -448,17 +449,49 @@ impl App {
         let Some(session) = entry.session.as_mut() else {
             return;
         };
+        if matches!(session.state, DisplaySessionState::Retiring { .. }) {
+            if let Some(binding) = entry.binding.as_ref() {
+                log::warn!(
+                    "[{}] black fallback presentation failed: {error:#}",
+                    binding.display_name
+                );
+                binding.pending_present.store(false, Ordering::SeqCst);
+                binding.next_redraw.lock().unwrap().take();
+                binding.presenter.lock().unwrap().abandon_blank();
+            }
+            session.state = DisplaySessionState::Retiring {
+                blank_required: false,
+            };
+            return;
+        }
         if let Some(binding) = entry.binding.as_ref() {
             log::warn!(
                 "[{}] display session error: {error:#}",
                 binding.display_name
             );
             binding.registered.store(false, Ordering::SeqCst);
-            binding.pending_present.store(false, Ordering::SeqCst);
             binding.next_redraw.lock().unwrap().take();
             binding.last_pushed_metrics.lock().unwrap().take();
+            let mut presenter = binding.presenter.lock().unwrap();
+            if let Err(release_error) = presenter.discard_direct_frames(None) {
+                log::warn!(
+                    "[{}] release queued frames after disconnect failed: {release_error:#}",
+                    binding.display_name
+                );
+            }
+            let already_blank = presenter.blank_committed();
+            let requested = presenter.request_blank();
+            drop(presenter);
+            if !already_blank {
+                binding.pending_present.store(true, Ordering::SeqCst);
+            }
+            if requested {
+                log::info!("[{}] black fallback requested", binding.display_name);
+            }
         }
-        session.state = DisplaySessionState::Retiring;
+        session.state = DisplaySessionState::Retiring {
+            blank_required: true,
+        };
     }
 
     fn retire_finished_sessions(&mut self) {
@@ -467,11 +500,15 @@ impl App {
             .iter()
             .filter_map(|(name, entry)| {
                 let session = entry.session.as_ref()?;
-                if !matches!(session.state, DisplaySessionState::Retiring) {
+                let DisplaySessionState::Retiring { blank_required } = session.state else {
+                    return None;
+                };
+                let binding = entry.binding.as_ref()?;
+                let presenter = binding.presenter.lock().unwrap();
+                if blank_required && !presenter.blank_committed() {
                     return None;
                 }
-                let binding = entry.binding.as_ref()?;
-                match binding.presenter.lock().unwrap().frames_idle() {
+                match presenter.frames_idle() {
                     Ok(true) => Some(*name),
                     Ok(false) => None,
                     Err(error) => {
@@ -504,7 +541,7 @@ impl App {
             .iter()
             .filter_map(|(name, entry)| {
                 let session = entry.session.as_ref()?;
-                if matches!(session.state, DisplaySessionState::Retiring) {
+                if matches!(session.state, DisplaySessionState::Retiring { .. }) {
                     return None;
                 }
                 let fd = unsafe { sys::waywallen_display_get_fd(session.display.0) };
@@ -561,7 +598,7 @@ impl App {
                     let Some(session) = session.as_ref() else {
                         continue;
                     };
-                    if matches!(session.state, DisplaySessionState::Retiring) {
+                    if matches!(session.state, DisplaySessionState::Retiring { .. }) {
                         continue;
                     }
                     let rc = unsafe {
@@ -585,14 +622,12 @@ impl App {
 
     fn poll_timeout_ms(&self) -> i32 {
         if self.outputs.values().any(|entry| {
-            entry
-                .session
+            entry.session.as_ref().is_some_and(|session| {
+                matches!(session.state, DisplaySessionState::Retiring { .. })
+            }) || entry
+                .binding
                 .as_ref()
-                .is_some_and(|session| matches!(session.state, DisplaySessionState::Retiring))
-                || entry
-                    .binding
-                    .as_ref()
-                    .is_some_and(|binding| binding.pending_present.load(Ordering::SeqCst))
+                .is_some_and(|binding| binding.pending_present.load(Ordering::SeqCst))
         }) {
             return 8;
         }
@@ -1848,11 +1883,14 @@ unsafe extern "C" fn on_textures_releasing(
         };
         display.0
     };
+    let release_display = (sys::waywallen_display_conn_state(display)
+        == sys::WAYWALLEN_CONN_CONNECTED)
+        .then_some(display);
     if let Err(error) = binding
         .presenter
         .lock()
         .unwrap()
-        .retire_direct_binding(display)
+        .retire_direct_binding(release_display)
     {
         log::error!(
             "[{}] retire direct Vulkan binding failed: {error:#}",
@@ -2061,9 +2099,21 @@ fn present_latest(binding: &OutputBinding) -> Result<()> {
         .as_ref()
         .ok_or_else(|| anyhow!("present requested without a display session"))?
         .0;
+    let release_display = (unsafe { sys::waywallen_display_conn_state(display) }
+        == sys::WAYWALLEN_CONN_CONNECTED)
+        .then_some(display);
     let mut presenter = binding.presenter.lock().unwrap();
-    match presenter.present(display, &composition, Instant::now())? {
+    let was_blank = presenter.blank_committed();
+    match presenter.present(release_display, &composition, Instant::now())? {
         vulkan::PresentResult::Presented { redraw } => {
+            if !was_blank && presenter.blank_committed() {
+                log::info!("[{}] black fallback committed", binding.display_name);
+            } else if was_blank && !presenter.blank_committed() {
+                log::info!(
+                    "[{}] first frame replaced black fallback",
+                    binding.display_name
+                );
+            }
             binding.pending_present.store(false, Ordering::SeqCst);
             *binding.next_redraw.lock().unwrap() = redraw.then(|| {
                 Instant::now() + redraw_interval(binding.refresh_mhz.load(Ordering::SeqCst))

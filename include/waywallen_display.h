@@ -318,6 +318,10 @@ typedef struct waywallen_display_callbacks {
     /* A state update is already validated against the current
      * persistent config generation when this callback runs. */
     void (*on_presentation_state)(void* user_data, const waywallen_presentation_state_t* state);
+    /* The presentation snapshot reset, when needed, is delivered before
+     * this callback. The connection-local binding and composition config
+     * are no longer current; the host must stop presenting their content
+     * and switch to its local disconnected fallback. */
     void (*on_disconnected)(void* user_data, int err_code, const char* message);
     void* user_data;
 } waywallen_display_callbacks_t;
