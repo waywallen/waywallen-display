@@ -14,58 +14,49 @@ msgstr ""
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Plural-Forms: nplurals=3; plural=(n%10==1 && n%100!=11 ? 0 : n%10>=2 && "
-"n%10<=4 && (n%100<10 || n%100>=20) ? 1 : 2);\n"
+"Plural-Forms: nplurals=3; plural=(n%10==1 && n%100!=11 ? 0 : n%10>=2 && n%10<=4 && (n%100<10 || n%100>=20) ? 1 : 2);\n"
 
-#: src/bin/layer_shell/main.rs:1515
+#: src/bin/layer_shell/main.rs:2190
 msgid ""
-"usage: waywallen-layer-shell [--socket PATH] [--name STR]\n"
+"usage: waywallen-layer-shell [--socket PATH] [--name STR] [--version]\n"
 "\n"
 "Environment:\n"
 "WAYWALLEN_SOCKET   fallback UDS path when --socket is omitted\n"
 "WAYLAND_DISPLAY    required — picks the compositor to attach to"
 msgstr ""
-"использование: waywallen-layer-shell [--socket ПУТЬ] [--name СТРОКА]\n"
+"использование: waywallen-layer-shell [--socket ПУТЬ] [--name СТРОКА] [--version]\n"
 "\n"
 "Переменные окружения:\n"
 "WAYWALLEN_SOCKET   путь к UDS по умолчанию, если параметр --socket не указан\n"
 "WAYLAND_DISPLAY    обязательная переменная, определяющая композитор для подключения"
 
-#: src/bin/layer_shell/main.rs:1537
+#: src/bin/layer_shell/main.rs:2212
 msgid "--socket requires a value"
 msgstr "Для параметра --socket требуется значение"
 
-#: src/bin/layer_shell/main.rs:1543
+#: src/bin/layer_shell/main.rs:2218
 msgid "--name requires a value"
 msgstr "Для параметра --name требуется значение"
 
-#: src/bin/layer_shell/main.rs:1549
+#: src/bin/layer_shell/main.rs:2233
 msgid "unknown argument"
 msgstr "неизвестный аргумент"
 
-#: src/bin/layer_shell/main.rs:1564
-msgid ""
-"connect to WAYLAND_DISPLAY — are you running under a Wayland compositor?"
-msgstr ""
-"Не удалось подключиться к WAYLAND_DISPLAY. Проверьте, запущен ли сеанс с "
-"композитором Wayland."
+#: src/bin/layer_shell/main.rs:2248
+msgid "connect to WAYLAND_DISPLAY — are you running under a Wayland compositor?"
+msgstr "Не удалось подключиться к WAYLAND_DISPLAY. Проверьте, запущен ли сеанс с композитором Wayland."
 
-#: src/bin/layer_shell/main.rs:1660
+#: src/bin/layer_shell/main.rs:2349
 msgid "compositor does not expose wl_compositor"
 msgstr "Композитор не предоставляет wl_compositor"
 
-#: src/bin/layer_shell/main.rs:1664
-msgid ""
-"compositor does not expose zwlr_layer_shell_v1 — try a different compositor "
-"(Hyprland/Sway/KWin/new Mutter)"
-msgstr ""
-"Композитор не предоставляет zwlr_layer_shell_v1. Попробуйте другой "
-"композитор: Hyprland, Sway, KWin или новую версию Mutter."
+#: src/bin/layer_shell/main.rs:2354
+msgid "compositor does not expose zwlr_layer_shell_v1 — try a different compositor (Hyprland/Sway/KWin/new Mutter)"
+msgstr "Композитор не предоставляет zwlr_layer_shell_v1. Попробуйте другой композитор: Hyprland, Sway, KWin или новую версию Mutter."
 
-#: src/bin/layer_shell/main.rs:1669
-msgid "compositor does not expose zwp_linux_dmabuf_v1"
-msgstr "Композитор не предоставляет zwp_linux_dmabuf_v1"
-
-#: src/bin/layer_shell/main.rs:1673
+#: src/bin/layer_shell/main.rs:2358
 msgid "no wl_output available"
 msgstr "Не найдено ни одного доступного объекта wl_output"
+
+#~ msgid "compositor does not expose zwp_linux_dmabuf_v1"
+#~ msgstr "Композитор не предоставляет zwp_linux_dmabuf_v1"

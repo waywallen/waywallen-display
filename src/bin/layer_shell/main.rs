@@ -2187,7 +2187,7 @@ fn usage() -> ! {
     eprintln!(
         "{}",
         gettextrs::gettext(
-            "usage: waywallen-layer-shell [--socket PATH] [--name STR]\n\
+            "usage: waywallen-layer-shell [--socket PATH] [--name STR] [--version]\n\
              \n\
              Environment:\n\
                WAYWALLEN_SOCKET   fallback UDS path when --socket is omitted\n\
@@ -2218,6 +2218,15 @@ fn main() -> Result<()> {
                     eprintln!("{}", gettextrs::gettext("--name requires a value"));
                     usage();
                 });
+            }
+            "--version" => {
+                println!(
+                    "waywallen-layer-shell {}.{}.{}",
+                    sys::WAYWALLEN_DISPLAY_VERSION_MAJOR,
+                    sys::WAYWALLEN_DISPLAY_VERSION_MINOR,
+                    sys::WAYWALLEN_DISPLAY_VERSION_PATCH
+                );
+                return Ok(());
             }
             "-h" | "--help" => usage(),
             other => {

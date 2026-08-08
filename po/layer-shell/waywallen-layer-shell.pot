@@ -17,43 +17,39 @@ msgstr ""
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
 
-#: src/bin/layer_shell/main.rs:1515
+#: src/bin/layer_shell/main.rs:2190
 msgid ""
-"usage: waywallen-layer-shell [--socket PATH] [--name STR]\n"
+"usage: waywallen-layer-shell [--socket PATH] [--name STR] [--version]\n"
 "\n"
 "Environment:\n"
 "WAYWALLEN_SOCKET   fallback UDS path when --socket is omitted\n"
 "WAYLAND_DISPLAY    required — picks the compositor to attach to"
 msgstr ""
 
-#: src/bin/layer_shell/main.rs:1537
+#: src/bin/layer_shell/main.rs:2212
 msgid "--socket requires a value"
 msgstr ""
 
-#: src/bin/layer_shell/main.rs:1543
+#: src/bin/layer_shell/main.rs:2218
 msgid "--name requires a value"
 msgstr ""
 
-#: src/bin/layer_shell/main.rs:1549
+#: src/bin/layer_shell/main.rs:2233
 msgid "unknown argument"
 msgstr ""
 
-#: src/bin/layer_shell/main.rs:1564
+#: src/bin/layer_shell/main.rs:2248
 msgid "connect to WAYLAND_DISPLAY — are you running under a Wayland compositor?"
 msgstr ""
 
-#: src/bin/layer_shell/main.rs:1660
+#: src/bin/layer_shell/main.rs:2349
 msgid "compositor does not expose wl_compositor"
 msgstr ""
 
-#: src/bin/layer_shell/main.rs:1664
+#: src/bin/layer_shell/main.rs:2354
 msgid "compositor does not expose zwlr_layer_shell_v1 — try a different compositor (Hyprland/Sway/KWin/new Mutter)"
 msgstr ""
 
-#: src/bin/layer_shell/main.rs:1669
-msgid "compositor does not expose zwp_linux_dmabuf_v1"
-msgstr ""
-
-#: src/bin/layer_shell/main.rs:1673
+#: src/bin/layer_shell/main.rs:2358
 msgid "no wl_output available"
 msgstr ""
