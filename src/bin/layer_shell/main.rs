@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
+use ash::vk::{self, Handle};
 use md5::{Digest, Md5};
 use wayland_client::globals::{registry_queue_init, GlobalListContents};
 use wayland_client::protocol::{
@@ -72,6 +73,7 @@ pub struct OutputBinding {
     runtime: Arc<vulkan::VulkanRuntime>,
     presenter: Mutex<vulkan::WsiPresenter>,
     pending_present: AtomicBool,
+    next_redraw: Mutex<Option<Instant>>,
     watcher: Arc<watcher::OutputInfo>,
 }
 
@@ -451,6 +453,7 @@ impl App {
             );
             binding.registered.store(false, Ordering::SeqCst);
             binding.pending_present.store(false, Ordering::SeqCst);
+            binding.next_redraw.lock().unwrap().take();
             binding.last_pushed_metrics.lock().unwrap().take();
         }
         session.state = DisplaySessionState::Retiring;
@@ -587,6 +590,18 @@ impl App {
             return 8;
         }
         let now = Instant::now();
+        let until_redraw = self
+            .outputs
+            .values()
+            .filter_map(|entry| {
+                let binding = entry.binding.as_ref()?;
+                binding
+                    .next_redraw
+                    .lock()
+                    .unwrap()
+                    .map(|deadline| deadline.saturating_duration_since(now))
+            })
+            .min();
         let until_reconnect = self
             .outputs
             .values()
@@ -594,24 +609,34 @@ impl App {
             .map(|entry| entry.reconnect_at.saturating_duration_since(now))
             .min()
             .unwrap_or(Duration::from_millis(500));
-        i32::try_from(until_reconnect.min(Duration::from_millis(500)).as_millis()).unwrap_or(500)
+        let timeout = until_redraw
+            .map(|redraw| redraw.min(until_reconnect))
+            .unwrap_or(until_reconnect)
+            .min(Duration::from_millis(500));
+        let millis = timeout.as_millis();
+        i32::try_from(if timeout.is_zero() { 0 } else { millis.max(1) }).unwrap_or(500)
     }
 
     fn pump_presenters(&mut self) {
+        let now = Instant::now();
         let pending = self
             .outputs
             .iter()
             .filter_map(|(name, entry)| {
                 let binding = entry.binding.as_ref()?;
-                binding
-                    .pending_present
-                    .load(Ordering::SeqCst)
-                    .then_some((*name, Rc::clone(binding)))
+                let due = binding.pending_present.load(Ordering::SeqCst)
+                    || binding
+                        .next_redraw
+                        .lock()
+                        .unwrap()
+                        .is_some_and(|deadline| deadline <= now);
+                due.then_some((*name, Rc::clone(binding)))
             })
             .collect::<Vec<_>>();
         for (output_name, binding) in pending {
             if let Err(error) = present_latest(&binding) {
                 binding.pending_present.store(false, Ordering::SeqCst);
+                binding.next_redraw.lock().unwrap().take();
                 log::warn!(
                     "[{}] present pending frame failed: {error:#}",
                     binding.display_name
@@ -956,6 +981,7 @@ fn make_output_binding(
         runtime,
         presenter: Mutex::new(presenter),
         pending_present: AtomicBool::new(false),
+        next_redraw: Mutex::new(None),
         watcher,
     })
 }
@@ -1580,8 +1606,8 @@ fn start_display_session(sock: &Path, binding: &Rc<OutputBinding>) -> Result<Dis
         on_textures_releasing: Some(on_textures_releasing),
         on_composition_config: Some(on_composition_config),
         on_frame_ready: Some(on_frame_ready),
-        on_presentation_snapshot: None,
-        on_presentation_state: None,
+        on_presentation_snapshot: Some(on_presentation_snapshot),
+        on_presentation_state: Some(on_presentation_state),
         on_disconnected: Some(on_disconnected),
         user_data: Rc::as_ptr(binding) as *mut c_void,
     };
@@ -1598,6 +1624,16 @@ fn start_display_session(sock: &Path, binding: &Rc<OutputBinding>) -> Result<Dis
         let rc = unsafe { sys::waywallen_display_bind_vulkan(display, &context) };
         if rc < 0 {
             bail!("waywallen_display_bind_vulkan failed: {rc}");
+        }
+        let presentation_caps = if binding.presenter.lock().unwrap().supports_pause_blur() {
+            sys::WAYWALLEN_PRESENTATION_CAP_PAUSE_BLUR
+        } else {
+            0
+        };
+        let rc =
+            unsafe { sys::waywallen_display_set_presentation_caps(display, presentation_caps) };
+        if rc < 0 {
+            bail!("waywallen_display_set_presentation_caps failed: {rc}");
         }
         let flags = binding.watcher.window_flags();
         let rc = unsafe { sys::waywallen_display_set_window_state(display, flags) };
@@ -1727,33 +1763,9 @@ fn process_display_event(
 fn shutdown_display_session(binding: &Rc<OutputBinding>, session: DisplaySession) {
     binding.registered.store(false, Ordering::SeqCst);
     binding.pending_present.store(false, Ordering::SeqCst);
+    binding.next_redraw.lock().unwrap().take();
     binding.last_pushed_metrics.lock().unwrap().take();
-    let cleared = binding.presenter.lock().unwrap().clear_sampled_frame();
-    match cleared {
-        Ok(true) => {}
-        Ok(false) => {
-            log::error!(
-                "[{}] display session retired before its WSI frames completed",
-                binding.display_name
-            );
-            binding
-                .presenter
-                .lock()
-                .unwrap()
-                .force_clear_sampled_frame();
-        }
-        Err(error) => {
-            log::error!(
-                "[{}] query WSI frame completion failed: {error:#}",
-                binding.display_name
-            );
-            binding
-                .presenter
-                .lock()
-                .unwrap()
-                .force_clear_sampled_frame();
-        }
-    }
+    binding.presenter.lock().unwrap().reset_display_session();
     unsafe { sys::waywallen_display_shutdown(session.display.0) };
     binding.display.lock().unwrap().take();
 }
@@ -1774,7 +1786,7 @@ unsafe extern "C" fn on_binding_ready(
     }
     let ready = &*raw_binding;
     let t = &ready.textures;
-    if t.backend != sys::WAYWALLEN_BACKEND_VULKAN || t.vk_images.is_null() {
+    if t.backend != sys::WAYWALLEN_BACKEND_VULKAN || t.count == 0 || t.vk_images.is_null() {
         log::warn!(
             "[{}] binding_ready without Vulkan images",
             binding.display_name
@@ -1790,16 +1802,71 @@ unsafe extern "C" fn on_binding_ready(
         t.tex_height,
         t.fourcc
     );
+    let raw_images = std::slice::from_raw_parts(t.vk_images, t.count as usize);
+    let images = raw_images
+        .iter()
+        .map(|image| vk::Image::from_raw(*image as usize as u64))
+        .collect::<Vec<_>>();
+    if let Err(error) = binding.presenter.lock().unwrap().install_direct_binding(
+        t.buffer_generation,
+        vk::Extent2D {
+            width: t.tex_width,
+            height: t.tex_height,
+        },
+        &images,
+    ) {
+        log::warn!(
+            "[{}] install direct Vulkan binding failed: {error:#}",
+            binding.display_name
+        );
+        return;
+    }
     apply_composition_config(binding, &ready.config);
 }
 
 unsafe extern "C" fn on_textures_releasing(
-    _user_data: *mut c_void,
+    user_data: *mut c_void,
     _t: *const sys::waywallen_textures_t,
 ) {
+    let binding = binding_from_user_data(user_data);
+    let display = {
+        let guard = binding.display.lock().unwrap();
+        let Some(display) = guard.as_ref() else {
+            return;
+        };
+        display.0
+    };
+    if let Err(error) = binding
+        .presenter
+        .lock()
+        .unwrap()
+        .retire_direct_binding(display)
+    {
+        log::error!(
+            "[{}] retire direct Vulkan binding failed: {error:#}",
+            binding.display_name
+        );
+    }
 }
 
 fn apply_composition_config(binding: &OutputBinding, c: &sys::waywallen_composition_config_t) {
+    log::debug!(
+        "[{}] composition source=({}, {}, {}, {}) destination=({}, {}, {}, {}) transform={} clear=({}, {}, {}, {})",
+        binding.display_name,
+        c.source_rect.x,
+        c.source_rect.y,
+        c.source_rect.w,
+        c.source_rect.h,
+        c.dest_rect.x,
+        c.dest_rect.y,
+        c.dest_rect.w,
+        c.dest_rect.h,
+        c.transform,
+        c.clear_color.r,
+        c.clear_color.g,
+        c.clear_color.b,
+        c.clear_color.a
+    );
     let mut cfg = binding.config.lock().unwrap();
     cfg.source = [
         c.source_rect.x,
@@ -1828,6 +1895,78 @@ unsafe extern "C" fn on_composition_config(
     apply_composition_config(binding, &*c);
 }
 
+fn request_present(binding: &OutputBinding) {
+    binding.next_redraw.lock().unwrap().take();
+    binding.pending_present.store(true, Ordering::SeqCst);
+}
+
+unsafe extern "C" fn on_presentation_snapshot(
+    user_data: *mut c_void,
+    presentation: *const sys::waywallen_presentation_snapshot_t,
+) {
+    let binding = binding_from_user_data(user_data);
+    if presentation.is_null() {
+        return;
+    }
+    let presentation = &*presentation;
+    if presentation.config.generation == 0 {
+        binding.presenter.lock().unwrap().reset_display_session();
+        binding.pending_present.store(false, Ordering::SeqCst);
+        binding.next_redraw.lock().unwrap().take();
+        return;
+    }
+    let pause = presentation.config.pause_effect;
+    let target = vulkan::PausePresentation {
+        configured: pause.kind
+            == sys::waywallen_pause_effect_kind_t::WAYWALLEN_PAUSE_EFFECT_KIND_BLUR,
+        active: presentation.state.pause_effect.active,
+        radius: pause.blur.radius,
+    };
+    let changed = binding
+        .presenter
+        .lock()
+        .unwrap()
+        .apply_pause_snapshot(target, Instant::now());
+    log::debug!(
+        "[{}] Pause Effect snapshot cfg={} state={} configured={} active={} radius={}",
+        binding.display_name,
+        presentation.config.generation,
+        presentation.state.generation,
+        target.configured,
+        target.active,
+        target.radius
+    );
+    if changed {
+        request_present(binding);
+    }
+}
+
+unsafe extern "C" fn on_presentation_state(
+    user_data: *mut c_void,
+    state: *const sys::waywallen_presentation_state_t,
+) {
+    let binding = binding_from_user_data(user_data);
+    if state.is_null() {
+        return;
+    }
+    let state = &*state;
+    let changed = binding
+        .presenter
+        .lock()
+        .unwrap()
+        .apply_pause_state(state.pause_effect.active, Instant::now());
+    log::debug!(
+        "[{}] Pause Effect state generation={} config={} active={}",
+        binding.display_name,
+        state.generation,
+        state.config_generation,
+        state.pause_effect.active
+    );
+    if changed {
+        request_present(binding);
+    }
+}
+
 unsafe extern "C" fn on_frame_ready(user_data: *mut c_void, f: *const sys::waywallen_frame_t) {
     let binding = binding_from_user_data(user_data);
     if f.is_null() {
@@ -1841,27 +1980,58 @@ unsafe extern "C" fn on_frame_ready(user_data: *mut c_void, f: *const sys::waywa
         };
         display.0
     };
-    let mut sampled = sys::waywallen_vk_sampled_frame_t::default();
-    let rc = sys::waywallen_display_vulkan_consume_frame(display, f, &mut sampled);
-    if rc != sys::WAYWALLEN_OK {
+    let mut presenter = binding.presenter.lock().unwrap();
+    if !presenter.has_direct_binding() {
         log::warn!(
-            "[{}] consume Vulkan frame seq={} failed: {rc}",
+            "[{}] skipping FrameReady generation={} index={} seq={}: direct Vulkan binding is not installed",
+            binding.display_name,
+            f.buffer_generation,
+            f.buffer_index,
+            f.seq
+        );
+        if let Err(release_error) = vulkan::discard_direct_frame(display, f) {
+            log::warn!(
+                "[{}] discard skipped frame seq={} failed: {release_error:#}",
+                binding.display_name,
+                f.seq
+            );
+        }
+        return;
+    }
+    let mut direct = sys::waywallen_vk_direct_frame_t::default();
+    let rc = sys::waywallen_display_vulkan_direct_frame(display, f, &mut direct);
+    if rc != sys::WAYWALLEN_OK {
+        if let Err(release_error) = vulkan::discard_direct_frame(display, f) {
+            log::warn!(
+                "[{}] discard unresolved direct frame seq={} failed: {release_error:#}",
+                binding.display_name,
+                f.seq
+            );
+        }
+        log::warn!(
+            "[{}] resolve direct Vulkan frame seq={} failed: {rc}",
             binding.display_name,
             f.seq
         );
         return;
     }
-    let mut presenter = binding.presenter.lock().unwrap();
-    if let Err(error) = presenter.install_sampled_frame(display, &sampled) {
+    if let Err(error) = presenter.enqueue_direct_frame(f, &direct) {
+        if let Err(release_error) = vulkan::discard_direct_frame(display, f) {
+            log::warn!(
+                "[{}] discard rejected direct frame seq={} failed: {release_error:#}",
+                binding.display_name,
+                f.seq
+            );
+        }
         log::warn!(
-            "[{}] install frame seq={} failed: {error:#}",
+            "[{}] queue direct frame seq={} failed: {error:#}",
             binding.display_name,
             f.seq
         );
         return;
     }
     drop(presenter);
-    binding.pending_present.store(true, Ordering::SeqCst);
+    request_present(binding);
 }
 
 fn present_latest(binding: &OutputBinding) -> Result<()> {
@@ -1872,12 +2042,33 @@ fn present_latest(binding: &OutputBinding) -> Result<()> {
         transform: config.transform,
         clear: config.clear,
     };
+    let display = binding
+        .display
+        .lock()
+        .unwrap()
+        .as_ref()
+        .ok_or_else(|| anyhow!("present requested without a display session"))?
+        .0;
     let mut presenter = binding.presenter.lock().unwrap();
-    match presenter.present(&composition)? {
-        vulkan::PresentResult::Presented => binding.pending_present.store(false, Ordering::SeqCst),
-        vulkan::PresentResult::Pending => binding.pending_present.store(true, Ordering::SeqCst),
+    match presenter.present(display, &composition, Instant::now())? {
+        vulkan::PresentResult::Presented { redraw } => {
+            binding.pending_present.store(false, Ordering::SeqCst);
+            *binding.next_redraw.lock().unwrap() = redraw.then(|| {
+                Instant::now() + redraw_interval(binding.refresh_mhz.load(Ordering::SeqCst))
+            });
+        }
+        vulkan::PresentResult::Pending => {
+            binding.pending_present.store(true, Ordering::SeqCst);
+            binding.next_redraw.lock().unwrap().take();
+        }
     }
     Ok(())
+}
+
+fn redraw_interval(refresh_mhz: u32) -> Duration {
+    let period_ns =
+        (1_000_000_000_000u64 / u64::from(refresh_mhz.max(1))).clamp(4_000_000, 33_000_000);
+    Duration::from_nanos(period_ns)
 }
 
 unsafe extern "C" fn on_disconnected(user_data: *mut c_void, err: i32, msg: *const c_char) {
@@ -2201,7 +2392,8 @@ fn run(socket: PathBuf, name_prefix: String) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::physical_output_size;
+    use super::{physical_output_size, redraw_interval};
+    use std::time::Duration;
 
     #[test]
     fn fractional_output_size_rounds_to_nearest_physical_pixel() {
@@ -2213,5 +2405,12 @@ mod tests {
             physical_output_size((1001, 801), 2, 150, false),
             (2002, 1602)
         );
+    }
+
+    #[test]
+    fn redraw_interval_tracks_refresh_rate_with_safe_bounds() {
+        assert_eq!(redraw_interval(60_000), Duration::from_nanos(16_666_666));
+        assert_eq!(redraw_interval(1_000_000), Duration::from_millis(4));
+        assert_eq!(redraw_interval(0), Duration::from_millis(33));
     }
 }

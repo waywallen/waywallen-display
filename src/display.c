@@ -793,14 +793,8 @@ static int build_consumer_caps(waywallen_display_t* d, ww_consumer_caps_storage_
     case WAYWALLEN_BACKEND_VULKAN:
     case WAYWALLEN_BACKEND_DMABUF_RELAY:
         if (d->vk_backend.loaded) {
-            /* Consumer's blit-out path imports the dma-buf as
-             * TRANSFER_SRC and samples from a host-owned shadow image,
-             * so the modifier must support both feature bits. SAMPLED
-             * stays in the mask because some drivers only return the
-             * right modifier sub-layout when both bits are present.
-             * DMABUF_RELAY uses the same import path internally — its
-             * vk_backend is loaded against the library's owned device,
-             * so the same probe applies. */
+            /* Both the direct-sampling and blit-out paths use this
+             * modifier contract. */
             const uint32_t want_features =
                 VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT;
             probe_rc =
@@ -1129,16 +1123,48 @@ int waywallen_display_vulkan_requirements(waywallen_vk_requirements_t* out) {
     if (! out) return WAYWALLEN_ERR_INVAL;
 #ifdef WW_HAVE_VULKAN
     *out = (waywallen_vk_requirements_t) {
-        .api_version                 = VK_API_VERSION_1_1,
-        .device_extensions           = ww_vk_required_device_extensions,
-        .device_extension_count      = ww_vk_required_device_extension_count,
-        .imported_image_usage        = (uint32_t)VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+        .api_version            = VK_API_VERSION_1_1,
+        .device_extensions      = ww_vk_required_device_extensions,
+        .device_extension_count = ww_vk_required_device_extension_count,
+        .imported_image_usage =
+            (uint32_t)(VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT),
         .imported_image_layout       = (uint32_t)VK_IMAGE_LAYOUT_GENERAL,
         .external_queue_family_index = VK_QUEUE_FAMILY_FOREIGN_EXT,
     };
     return WAYWALLEN_OK;
 #else
     memset(out, 0, sizeof(*out));
+    return WAYWALLEN_ERR_NOT_IMPL;
+#endif
+}
+
+int waywallen_display_vulkan_direct_frame(waywallen_display_t* d, const waywallen_frame_t* frame,
+                                          waywallen_vk_direct_frame_t* out) {
+    if (! d || ! frame || ! out) return WAYWALLEN_ERR_INVAL;
+    memset(out, 0, sizeof(*out));
+#ifdef WW_HAVE_VULKAN
+    if (d->backend != WAYWALLEN_BACKEND_VULKAN || ! d->vk_backend.loaded || ! d->bound.valid ||
+        frame->buffer_generation != d->bound.generation ||
+        frame->buffer_index >= d->vk_import_count || ! d->vk_images ||
+        d->vk_images[frame->buffer_index].image == VK_NULL_HANDLE ||
+        frame->vk_acquire_semaphore == NULL) {
+        return WAYWALLEN_ERR_STATE;
+    }
+    const waywallen_textures_t* textures = &d->bound.binding.textures;
+    out->image                           = (void*)d->vk_images[frame->buffer_index].image;
+    out->format                          = (uint32_t)ww_fourcc_to_vk_format(textures->fourcc);
+    out->width                           = textures->tex_width;
+    out->height                          = textures->tex_height;
+    out->layout                          = (uint32_t)VK_IMAGE_LAYOUT_GENERAL;
+    out->external_queue_family_index     = VK_QUEUE_FAMILY_FOREIGN_EXT;
+    if (out->format == (uint32_t)VK_FORMAT_UNDEFINED) {
+        memset(out, 0, sizeof(*out));
+        return WAYWALLEN_ERR_NOT_IMPL;
+    }
+    return WAYWALLEN_OK;
+#else
+    (void)d;
+    (void)frame;
     return WAYWALLEN_ERR_NOT_IMPL;
 #endif
 }

@@ -105,23 +105,56 @@ fn compile_layer_shell_shaders(manifest_dir: &Path, out_dir: &Path) {
     let shader_dir = manifest_dir.join("src/bin/layer_shell/shaders");
     let vertex_path = shader_dir.join("layer_shell.vert");
     let fragment_path = shader_dir.join("layer_shell.frag");
+    let fullscreen_vertex_path = shader_dir.join("fullscreen.vert");
+    let blur_fragment_path = shader_dir.join("blur.frag");
+    let downsample_fragment_path = shader_dir.join("downsample.frag");
     let vertex = compile_shader(&vertex_path, "vert", out_dir);
     let fragment = compile_shader(&fragment_path, "frag", out_dir);
+    let fullscreen_vertex = compile_shader(&fullscreen_vertex_path, "vert", out_dir);
+    let blur_fragment = compile_shader(&blur_fragment_path, "frag", out_dir);
+    let downsample_fragment = compile_shader(&downsample_fragment_path, "frag", out_dir);
     let mut generated = String::new();
     write_shader_words(&mut generated, "VERTEX_SHADER", &vertex);
     write_shader_words(&mut generated, "FRAGMENT_SHADER", &fragment);
+    write_shader_words(
+        &mut generated,
+        "FULLSCREEN_VERTEX_SHADER",
+        &fullscreen_vertex,
+    );
+    write_shader_words(&mut generated, "BLUR_FRAGMENT_SHADER", &blur_fragment);
+    write_shader_words(
+        &mut generated,
+        "DOWNSAMPLE_FRAGMENT_SHADER",
+        &downsample_fragment,
+    );
     fs::write(out_dir.join("layer_shell_shaders.rs"), generated)
         .expect("write generated layer-shell shaders");
 
     println!("cargo:rerun-if-changed={}", vertex_path.display());
     println!("cargo:rerun-if-changed={}", fragment_path.display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        fullscreen_vertex_path.display()
+    );
+    println!("cargo:rerun-if-changed={}", blur_fragment_path.display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        downsample_fragment_path.display()
+    );
     println!("cargo:rerun-if-env-changed=GLSLANG_VALIDATOR");
 }
 
 fn compile_shader(input: &Path, stage: &str, out_dir: &Path) -> Vec<u32> {
     let compiler =
         std::env::var_os("GLSLANG_VALIDATOR").unwrap_or_else(|| "glslangValidator".into());
-    let output_path = out_dir.join(format!("layer_shell.{stage}.spv"));
+    let output_name = format!(
+        "{}.spv",
+        input
+            .file_name()
+            .expect("layer-shell shader path has no file name")
+            .to_string_lossy()
+    );
+    let output_path = out_dir.join(output_name);
     let output = Command::new(&compiler)
         .arg("-V")
         .arg("--target-env")

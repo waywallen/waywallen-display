@@ -207,6 +207,17 @@ pub struct waywallen_vk_sampled_frame_t {
 }
 
 #[repr(C)]
+#[derive(Copy, Clone, Debug, Default)]
+pub struct waywallen_vk_direct_frame_t {
+    pub image: *mut c_void,
+    pub format: u32,
+    pub width: u32,
+    pub height: u32,
+    pub layout: u32,
+    pub external_queue_family_index: u32,
+}
+
+#[repr(C)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub enum waywallen_pause_effect_kind_t {
     #[default]
@@ -369,6 +380,11 @@ extern "C" {
         ctx: *const waywallen_vk_ctx_t,
     ) -> c_int;
     pub fn waywallen_display_vulkan_requirements(out: *mut waywallen_vk_requirements_t) -> c_int;
+    pub fn waywallen_display_vulkan_direct_frame(
+        d: *mut waywallen_display_t,
+        frame: *const waywallen_frame_t,
+        out: *mut waywallen_vk_direct_frame_t,
+    ) -> c_int;
     pub fn waywallen_display_vulkan_consume_frame(
         d: *mut waywallen_display_t,
         frame: *const waywallen_frame_t,

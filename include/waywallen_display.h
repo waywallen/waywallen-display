@@ -288,6 +288,15 @@ typedef struct waywallen_vk_sampled_frame {
     bool     candidate;
 } waywallen_vk_sampled_frame_t;
 
+typedef struct waywallen_vk_direct_frame {
+    void*    image; /* Imported VkImage, owned by the display session */
+    uint32_t format;
+    uint32_t width;
+    uint32_t height;
+    uint32_t layout;
+    uint32_t external_queue_family_index;
+} waywallen_vk_direct_frame_t;
+
 /* -------------------------------------------------------------------------
  * Callback table
  *
@@ -367,6 +376,14 @@ int waywallen_display_bind_vulkan(waywallen_display_t* d, const waywallen_vk_ctx
  * The returned extension array is immutable and library-owned. Vulkan
  * enum values are exposed as uint32_t so this header stays loader-only. */
 int waywallen_display_vulkan_requirements(waywallen_vk_requirements_t* out);
+
+/* Resolve a frame to its imported image for direct sampling. The host waits
+ * frame.vk_acquire_semaphore, acquires the image from the returned external
+ * queue family/layout, draws it, returns ownership/layout, and only then
+ * resolves frame.release_syncobj_fd and acknowledges the frame release.
+ * This query never consumes frame.release_syncobj_fd. */
+int waywallen_display_vulkan_direct_frame(waywallen_display_t* d, const waywallen_frame_t* frame,
+                                          waywallen_vk_direct_frame_t* out);
 
 /* Consume a Vulkan frame into a sampler-friendly optimal image. This
  * function waits for the producer acquire semaphore, performs the copy,
@@ -555,10 +572,10 @@ int waywallen_display_dispatch(waywallen_display_t* d);
  * waiting on this fd; signaling it lets the producer reuse the
  * buffer slot.
  *
- * Hosts with a Vulkan release fence should NOT call this — instead
- * import `release_syncobj_fd` as a binary VkSemaphore via
- * `vkImportSemaphoreFdKHR(VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT)`
- * and add it to the signal-semaphore list of the consume submit.
+ * Hosts with a Vulkan release fence should NOT call this. Signal an
+ * exportable SYNC_FD semaphore from the consume submit, export its
+ * sync_file, and pass both descriptors to
+ * waywallen_display_release_after_sync_file().
  *
  * `fd` ownership transfers in: closed on every return path.
  * Returns 0 on success or a negative `waywallen_err_t` on failure

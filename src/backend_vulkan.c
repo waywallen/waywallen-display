@@ -398,26 +398,16 @@ int ww_vk_import_dmabuf(const ww_vk_backend_t* backend, const ww_vk_dmabuf_impor
     };
 
     VkImageCreateInfo image_ci = {
-        .sType       = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-        .pNext       = &ext_mem_info,
-        .imageType   = VK_IMAGE_TYPE_2D,
-        .format      = format,
-        .extent      = { im->width, im->height, 1 },
-        .mipLevels   = 1,
-        .arrayLayers = 1,
-        .samples     = VK_SAMPLE_COUNT_1_BIT,
-        .tiling      = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT,
-        /* The consumer does NOT sample this image directly. With
-         * DRM_FORMAT_MODIFIER_EXT tiling, per-modifier format features
-         * decide which usages are legal — and SAMPLED_IMAGE_BIT often
-         * isn't part of the supported set (esp. for non-LINEAR vendor
-         * modifiers). Bridge unconditionally OR-s TRANSFER_SRC into the
-         * producer-side usage so importing here as TRANSFER_SRC always
-         * matches the modifier sub-layout the producer's image was
-         * allocated for. The host then blits this into a sampler-
-         * friendly OPTIMAL VkImage of its own creation. See
-         * src/backend_vulkan_blit.{h,c}. */
-        .usage                 = VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+        .sType                 = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .pNext                 = &ext_mem_info,
+        .imageType             = VK_IMAGE_TYPE_2D,
+        .format                = format,
+        .extent                = { im->width, im->height, 1 },
+        .mipLevels             = 1,
+        .arrayLayers           = 1,
+        .samples               = VK_SAMPLE_COUNT_1_BIT,
+        .tiling                = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT,
+        .usage                 = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
         .sharingMode           = VK_SHARING_MODE_EXCLUSIVE,
         .queueFamilyIndexCount = 1,
         .pQueueFamilyIndices   = &backend->queue_family_index,

@@ -148,9 +148,7 @@ typedef void (*ww_vk_caps_emit_fn)(uint32_t fourcc, uint64_t modifier, uint32_t 
  *
  * `want_features` is typically
  * `VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT`
- * for the standard "shadow-import + sample" consumer path; future
- * consumers that import directly into a sampled image may pass a
- * different mask.
+ * for the standard direct-sample and blit-out consumer paths.
  *
  * Returns 0 on success, -ENOSYS if the EXT entry points cannot be
  * resolved on the instance, or -errno from a failed query. On any
