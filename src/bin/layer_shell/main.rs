@@ -4,26 +4,25 @@
 //! (Hyprland, Sway, Niri, River, …) and registers each output as a
 //! display with the daemon over the waywallen-display UDS protocol.
 
+mod vulkan;
 mod watcher;
 
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void, CStr, CString};
-use std::os::fd::{AsFd, FromRawFd, OwnedFd};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use md5::{Digest, Md5};
 use wayland_client::globals::{registry_queue_init, GlobalListContents};
 use wayland_client::protocol::{
-    wl_buffer::WlBuffer,
-    wl_callback::{self, WlCallback},
     wl_compositor::WlCompositor,
-    wl_output::{self, Transform, WlOutput},
+    wl_output::{self, WlOutput},
     wl_pointer::{self, ButtonState, WlPointer},
     wl_registry::WlRegistry,
     wl_seat::{self, WlSeat},
@@ -35,7 +34,6 @@ use wayland_protocols::wp::fractional_scale::v1::client::{
     wp_fractional_scale_v1::{self, WpFractionalScaleV1},
 };
 use wayland_protocols::wp::linux_dmabuf::zv1::client::{
-    zwp_linux_buffer_params_v1::{self, ZwpLinuxBufferParamsV1},
     zwp_linux_dmabuf_feedback_v1::{self, ZwpLinuxDmabufFeedbackV1},
     zwp_linux_dmabuf_v1::{self, ZwpLinuxDmabufV1},
 };
@@ -63,38 +61,25 @@ fn default_socket_path() -> PathBuf {
 pub struct OutputBinding {
     display_name: String,
     instance_id: String,
-    surface: WlSurface,
-    dmabuf: ZwpLinuxDmabufV1,
-    conn: Connection,
-    qh: QueueHandle<App>,
-    output_name: u32,
     configured_size: Mutex<Option<(u32, u32)>>,
-    logical_size: Mutex<Option<(u32, u32)>>,
     scale: std::sync::atomic::AtomicI32,
     fractional_scale_120: AtomicU32,
     refresh_mhz: AtomicU32,
-    viewport: Option<WpViewport>,
-    closed: AtomicBool,
     display: Mutex<Option<DisplayPtr>>,
-    frame_pending: AtomicBool,
     registered: AtomicBool,
     last_pushed_metrics: Mutex<Option<(u32, u32, u32)>>,
-    layer_buffer: Mutex<Option<LayerBuffer>>,
     config: Mutex<FrameConfig>,
-    window_flags: AtomicU32,
+    runtime: Arc<vulkan::VulkanRuntime>,
+    presenter: Mutex<vulkan::WsiPresenter>,
+    pending_present: AtomicBool,
+    watcher: Arc<watcher::OutputInfo>,
 }
 
 impl OutputBinding {
     pub fn display_name(&self) -> &str {
         &self.display_name
     }
-    pub fn window_flags(&self) -> &AtomicU32 {
-        &self.window_flags
-    }
-    pub fn is_registered(&self) -> bool {
-        self.registered.load(Ordering::SeqCst)
-    }
-    pub fn with_display<F>(&self, f: F) -> Option<i32>
+    fn with_display<F>(&self, f: F) -> Option<i32>
     where
         F: FnOnce(*mut sys::waywallen_display_t) -> i32,
     {
@@ -106,34 +91,58 @@ impl OutputBinding {
 #[derive(Copy, Clone)]
 struct DisplayPtr(*mut sys::waywallen_display_t);
 
-unsafe impl Send for DisplayPtr {}
-unsafe impl Sync for DisplayPtr {}
+const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(2);
+const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
+const STABLE_SESSION_TIME: Duration = Duration::from_secs(20);
 
-struct LayerBuffer {
-    wl_buffer: WlBuffer,
-    width: u32,
-    height: u32,
+enum DisplaySessionState {
+    Handshake { events: i16 },
+    Ready,
+    Retiring,
 }
 
-impl Drop for LayerBuffer {
-    fn drop(&mut self) {
-        self.wl_buffer.destroy();
+struct DisplaySession {
+    display: DisplayPtr,
+    state: DisplaySessionState,
+    started: Instant,
+    _binding: Rc<OutputBinding>,
+}
+
+impl DisplaySession {
+    fn is_ready(&self) -> bool {
+        matches!(self.state, DisplaySessionState::Ready)
+    }
+
+    fn poll_events(&self) -> i16 {
+        match self.state {
+            DisplaySessionState::Handshake { events } => events,
+            DisplaySessionState::Ready => {
+                let mut events = libc::POLLIN;
+                if unsafe { sys::waywallen_display_wants_writable(self.display.0) } {
+                    events |= libc::POLLOUT;
+                }
+                events
+            }
+            DisplaySessionState::Retiring => 0,
+        }
     }
 }
 
 #[derive(Clone, Copy)]
 struct FrameConfig {
-    source: Option<(f32, f32, f32, f32)>,
+    source: [f32; 4],
+    destination: [f32; 4],
     transform: u32,
-    transform_dirty: bool,
+    clear: [f32; 4],
 }
 
 impl Default for FrameConfig {
     fn default() -> Self {
         Self {
-            source: None,
+            source: [0.0; 4],
+            destination: [0.0; 4],
             transform: 0,
-            transform_dirty: true,
+            clear: [0.0; 4],
         }
     }
 }
@@ -143,11 +152,15 @@ struct OutputEntry {
     surface: Option<WlSurface>,
     layer_surface: Option<ZwlrLayerSurfaceV1>,
     viewport: Option<WpViewport>,
-    binding: Option<Arc<OutputBinding>>,
-    worker_started: bool,
+    binding: Option<Rc<OutputBinding>>,
+    session: Option<DisplaySession>,
+    reconnect_at: Instant,
+    reconnect_delay: Duration,
     scale: i32,
     fractional_scale: Option<WpFractionalScaleV1>,
     fractional_scale_120: u32,
+    vk_surface: Option<ash::vk::SurfaceKHR>,
+    configured_size: Option<(u32, u32)>,
     refresh_mhz: u32,
     output_name_str: Option<String>,
     output_description: Option<String>,
@@ -170,6 +183,8 @@ struct App {
     name_prefix: String,
     pointers: HashMap<u32, PointerCtx>,
     binding_registry: watcher::BindingRegistry,
+    watcher_commands: watcher::CommandReceiver,
+    vulkan: Option<Arc<vulkan::VulkanRuntime>>,
 }
 
 struct PointerCtx {
@@ -181,7 +196,11 @@ struct PointerCtx {
 }
 
 impl App {
-    fn new(uds_sock: PathBuf, name_prefix: String) -> Self {
+    fn new(
+        uds_sock: PathBuf,
+        name_prefix: String,
+        watcher_commands: watcher::CommandReceiver,
+    ) -> Self {
         Self {
             compositor: None,
             layer_shell: None,
@@ -197,19 +216,26 @@ impl App {
             name_prefix,
             pointers: HashMap::new(),
             binding_registry: watcher::new_registry(),
+            watcher_commands,
+            vulkan: None,
         }
     }
 
-    fn bring_up_surface(&mut self, output_name: u32, qh: &QueueHandle<App>) {
+    fn bring_up_surface(
+        &mut self,
+        output_name: u32,
+        conn: &Connection,
+        qh: &QueueHandle<App>,
+    ) -> bool {
         let Some(entry) = self.outputs.get_mut(&output_name) else {
-            return;
+            return false;
         };
         if entry.surface.is_some() {
-            return;
+            return false;
         }
         let (Some(comp), Some(shell)) = (self.compositor.as_ref(), self.layer_shell.as_ref())
         else {
-            return;
+            return false;
         };
         let surface = comp.create_surface(qh, output_name);
         let layer_surface = shell.get_layer_surface(
@@ -233,34 +259,383 @@ impl App {
             .as_ref()
             .map(|m| m.get_fractional_scale(&surface, qh, output_name));
         surface.commit();
+        let mut rebuild_runtime = false;
+        if let Some(runtime) = self.vulkan.as_ref() {
+            match runtime.create_surface(conn, &surface) {
+                Ok(vk_surface) => entry.vk_surface = Some(vk_surface),
+                Err(error) => {
+                    rebuild_runtime = true;
+                    log::warn!(
+                        "output {output_name}: current Vulkan device cannot own the new surface: \
+                         {error:#}"
+                    );
+                }
+            }
+        }
         entry.surface = Some(surface);
         entry.layer_surface = Some(layer_surface);
         entry.viewport = viewport;
         entry.fractional_scale = fractional_scale;
         log::info!("output {output_name}: layer_surface committed, waiting for configure");
+        rebuild_runtime
     }
 
-    fn maybe_spawn_worker(&mut self, output_name: u32) {
+    fn rebuild_vulkan_runtime(&mut self, conn: &Connection) -> Result<()> {
+        let wayland_surfaces = self
+            .outputs
+            .iter()
+            .filter_map(|(name, entry)| entry.surface.clone().map(|surface| (*name, surface)))
+            .collect::<Vec<_>>();
+        let (runtime, surfaces) = vulkan::VulkanRuntime::new(
+            conn,
+            &wayland_surfaces,
+            (self.compositor_drm_major, self.compositor_drm_minor),
+        )?;
+        let mut raw_surfaces = surfaces.into_iter().collect::<HashMap<_, _>>();
+        let mut presenters = HashMap::new();
+        for (output_name, entry) in &self.outputs {
+            let Some(physical) = entry.configured_size else {
+                continue;
+            };
+            let Some(surface) = raw_surfaces.remove(output_name) else {
+                for surface in raw_surfaces.into_values() {
+                    runtime.destroy_surface(surface);
+                }
+                return Err(anyhow!("candidate runtime omitted output {output_name}"));
+            };
+            match vulkan::WsiPresenter::new(Arc::clone(&runtime), surface, physical) {
+                Ok(presenter) => {
+                    presenters.insert(*output_name, presenter);
+                }
+                Err(error) => {
+                    for surface in raw_surfaces.into_values() {
+                        runtime.destroy_surface(surface);
+                    }
+                    return Err(error).with_context(|| {
+                        format!("create candidate presenter for output {output_name}")
+                    });
+                }
+            }
+        }
+
+        let old_runtime = self
+            .vulkan
+            .take()
+            .ok_or_else(|| anyhow!("runtime rebuild requested before Vulkan initialization"))?;
+        let mut watchers = HashMap::new();
+        self.binding_registry.lock().unwrap().clear();
+        for (output_name, entry) in &mut self.outputs {
+            if let Some(binding) = entry.binding.as_ref() {
+                watchers.insert(*output_name, Arc::clone(&binding.watcher));
+            }
+            if let Some(session) = entry.session.take() {
+                if let Some(binding) = entry.binding.as_ref() {
+                    shutdown_display_session(binding, session);
+                }
+            }
+            entry.binding.take();
+            if let Some(surface) = entry.vk_surface.take() {
+                old_runtime.destroy_surface(surface);
+            }
+        }
+        drop(old_runtime);
+
+        let name_prefix = self.name_prefix.clone();
+        for (output_name, entry) in &mut self.outputs {
+            if let Some(presenter) = presenters.remove(output_name) {
+                let physical = entry
+                    .configured_size
+                    .expect("candidate presenter requires configured size");
+                let binding = make_output_binding(
+                    &name_prefix,
+                    entry,
+                    *output_name,
+                    Arc::clone(&runtime),
+                    presenter,
+                    physical,
+                    watchers.remove(output_name),
+                );
+                self.binding_registry
+                    .lock()
+                    .unwrap()
+                    .insert(binding.display_name.clone(), Arc::clone(&binding.watcher));
+                entry.binding = Some(binding);
+                entry.reconnect_at = Instant::now();
+                entry.reconnect_delay = INITIAL_RECONNECT_DELAY;
+            } else if let Some(surface) = raw_surfaces.remove(output_name) {
+                entry.vk_surface = Some(surface);
+            }
+        }
+        for surface in raw_surfaces.into_values() {
+            runtime.destroy_surface(surface);
+        }
+        self.vulkan = Some(runtime);
+        log::info!(
+            "rebuilt shared Vulkan runtime for {} active Wayland output(s)",
+            wayland_surfaces.len()
+        );
+        Ok(())
+    }
+
+    fn start_due_sessions(&mut self) {
+        let now = Instant::now();
+        let due: Vec<u32> = self
+            .outputs
+            .iter()
+            .filter_map(|(name, entry)| {
+                (entry.session.is_none() && entry.binding.is_some() && entry.reconnect_at <= now)
+                    .then_some(*name)
+            })
+            .collect();
+        for output_name in due {
+            let Some(binding) = self
+                .outputs
+                .get(&output_name)
+                .and_then(|entry| entry.binding.as_ref())
+                .cloned()
+            else {
+                continue;
+            };
+            match start_display_session(&self.uds_sock, &binding) {
+                Ok(session) => {
+                    if let Some(entry) = self.outputs.get_mut(&output_name) {
+                        entry.session = Some(session);
+                        log::debug!(
+                            "output {output_name}: display session started for '{}'",
+                            binding.display_name
+                        );
+                    }
+                }
+                Err(error) => {
+                    log::warn!(
+                        "[{}] display session start failed: {error:#}",
+                        binding.display_name
+                    );
+                    self.schedule_reconnect(output_name, Duration::ZERO);
+                }
+            }
+        }
+    }
+
+    fn schedule_reconnect(&mut self, output_name: u32, lived: Duration) {
         let Some(entry) = self.outputs.get_mut(&output_name) else {
             return;
         };
-        if entry.worker_started {
-            return;
+        if lived >= STABLE_SESSION_TIME {
+            entry.reconnect_delay = INITIAL_RECONNECT_DELAY;
         }
-        let Some(binding) = entry.binding.as_ref() else {
+        let delay = entry.reconnect_delay;
+        entry.reconnect_at = Instant::now() + delay;
+        entry.reconnect_delay = std::cmp::min(delay * 2, MAX_RECONNECT_DELAY);
+        if let Some(binding) = entry.binding.as_ref() {
+            log::debug!(
+                "[{}] session lived {:?}; reconnecting in {:?}",
+                binding.display_name,
+                lived,
+                delay
+            );
+        }
+    }
+
+    fn finish_session(&mut self, output_name: u32, error: &anyhow::Error) {
+        let Some(entry) = self.outputs.get_mut(&output_name) else {
             return;
         };
-        if binding.configured_size.lock().unwrap().is_none() {
+        let Some(session) = entry.session.as_mut() else {
             return;
+        };
+        if let Some(binding) = entry.binding.as_ref() {
+            log::warn!(
+                "[{}] display session error: {error:#}",
+                binding.display_name
+            );
+            binding.registered.store(false, Ordering::SeqCst);
+            binding.pending_present.store(false, Ordering::SeqCst);
+            binding.last_pushed_metrics.lock().unwrap().take();
         }
-        entry.worker_started = true;
-        let binding = Arc::clone(binding);
-        let sock = self.uds_sock.clone();
-        log::info!(
-            "output {output_name}: spawning UDS worker ('{}')",
-            binding.display_name
-        );
-        thread::spawn(move || uds_worker_loop(sock, binding));
+        session.state = DisplaySessionState::Retiring;
+    }
+
+    fn retire_finished_sessions(&mut self) {
+        let ready: Vec<u32> = self
+            .outputs
+            .iter()
+            .filter_map(|(name, entry)| {
+                let session = entry.session.as_ref()?;
+                if !matches!(session.state, DisplaySessionState::Retiring) {
+                    return None;
+                }
+                let binding = entry.binding.as_ref()?;
+                match binding.presenter.lock().unwrap().frames_idle() {
+                    Ok(true) => Some(*name),
+                    Ok(false) => None,
+                    Err(error) => {
+                        log::warn!(
+                            "[{}] query retiring frame fences failed: {error:#}",
+                            binding.display_name
+                        );
+                        Some(*name)
+                    }
+                }
+            })
+            .collect();
+        for output_name in ready {
+            let Some(entry) = self.outputs.get_mut(&output_name) else {
+                continue;
+            };
+            let Some(session) = entry.session.take() else {
+                continue;
+            };
+            let lived = session.started.elapsed();
+            if let Some(binding) = entry.binding.as_ref() {
+                shutdown_display_session(binding, session);
+            }
+            self.schedule_reconnect(output_name, lived);
+        }
+    }
+
+    fn display_poll_sources(&self) -> Vec<(u32, libc::pollfd)> {
+        self.outputs
+            .iter()
+            .filter_map(|(name, entry)| {
+                let session = entry.session.as_ref()?;
+                if matches!(session.state, DisplaySessionState::Retiring) {
+                    return None;
+                }
+                let fd = unsafe { sys::waywallen_display_get_fd(session.display.0) };
+                (fd >= 0).then_some((
+                    *name,
+                    libc::pollfd {
+                        fd,
+                        events: session.poll_events(),
+                        revents: 0,
+                    },
+                ))
+            })
+            .collect()
+    }
+
+    fn process_display_poll(&mut self, output_name: u32, revents: i16) {
+        let result = (|| -> Result<()> {
+            let entry = self
+                .outputs
+                .get_mut(&output_name)
+                .ok_or_else(|| anyhow!("poll result for removed output {output_name}"))?;
+            let binding = entry
+                .binding
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| anyhow!("display session without output binding"))?;
+            let session = entry
+                .session
+                .as_mut()
+                .ok_or_else(|| anyhow!("poll result without display session"))?;
+            process_display_event(&binding, session, revents)
+        })();
+        if let Err(error) = result {
+            self.finish_session(output_name, &error);
+        }
+    }
+
+    fn drain_watcher_commands(&mut self) {
+        for command in self.watcher_commands.drain() {
+            match command {
+                watcher::Command::WindowState {
+                    display_name,
+                    flags,
+                } => {
+                    let target = self.outputs.values().find_map(|entry| {
+                        let binding = entry.binding.as_ref()?;
+                        let session = entry.session.as_ref()?;
+                        (binding.display_name == display_name
+                            && !matches!(session.state, DisplaySessionState::Retiring))
+                        .then_some((binding, session))
+                    });
+                    let Some((binding, session)) = target else {
+                        continue;
+                    };
+                    let rc = unsafe {
+                        sys::waywallen_display_set_window_state(session.display.0, flags)
+                    };
+                    if rc >= 0 {
+                        log::debug!(
+                            "watcher: [{}] window_state flags=0x{flags:x}",
+                            binding.display_name
+                        );
+                    } else {
+                        log::warn!(
+                            "watcher: [{}] send window_state failed: {rc}",
+                            binding.display_name
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn poll_timeout_ms(&self) -> i32 {
+        if self.outputs.values().any(|entry| {
+            entry
+                .session
+                .as_ref()
+                .is_some_and(|session| matches!(session.state, DisplaySessionState::Retiring))
+                || entry
+                    .binding
+                    .as_ref()
+                    .is_some_and(|binding| binding.pending_present.load(Ordering::SeqCst))
+        }) {
+            return 8;
+        }
+        let now = Instant::now();
+        let until_reconnect = self
+            .outputs
+            .values()
+            .filter(|entry| entry.session.is_none() && entry.binding.is_some())
+            .map(|entry| entry.reconnect_at.saturating_duration_since(now))
+            .min()
+            .unwrap_or(Duration::from_millis(500));
+        i32::try_from(until_reconnect.min(Duration::from_millis(500)).as_millis()).unwrap_or(500)
+    }
+
+    fn pump_presenters(&mut self) {
+        let pending = self
+            .outputs
+            .iter()
+            .filter_map(|(name, entry)| {
+                let binding = entry.binding.as_ref()?;
+                binding
+                    .pending_present
+                    .load(Ordering::SeqCst)
+                    .then_some((*name, Rc::clone(binding)))
+            })
+            .collect::<Vec<_>>();
+        for (output_name, binding) in pending {
+            if let Err(error) = present_latest(&binding) {
+                binding.pending_present.store(false, Ordering::SeqCst);
+                log::warn!(
+                    "[{}] present pending frame failed: {error:#}",
+                    binding.display_name
+                );
+                self.finish_session(output_name, &error);
+            }
+        }
+    }
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        let outputs = std::mem::take(&mut self.outputs);
+        for mut entry in outputs.into_values() {
+            if let (Some(binding), Some(session)) = (entry.binding.as_ref(), entry.session.take()) {
+                shutdown_display_session(binding, session);
+            } else if entry.binding.is_none() {
+                if let (Some(runtime), Some(surface)) =
+                    (self.vulkan.as_ref(), entry.vk_surface.take())
+                {
+                    runtime.destroy_surface(surface);
+                }
+            }
+        }
     }
 }
 
@@ -297,10 +672,14 @@ impl Dispatch<WlRegistry, GlobalListContents> for App {
                             layer_surface: None,
                             viewport: None,
                             binding: None,
-                            worker_started: false,
+                            session: None,
+                            reconnect_at: Instant::now(),
+                            reconnect_delay: INITIAL_RECONNECT_DELAY,
                             scale: 1,
                             fractional_scale: None,
                             fractional_scale_120: 0,
+                            vk_surface: None,
+                            configured_size: None,
                             refresh_mhz: 60_000,
                             output_name_str: None,
                             output_description: None,
@@ -309,7 +688,14 @@ impl Dispatch<WlRegistry, GlobalListContents> for App {
                         },
                     );
                     log::info!("hot-plug: wl_output name={name} added; bringing up surface");
-                    state.bring_up_surface(name, qh);
+                    if state.bring_up_surface(name, _conn, qh) {
+                        if let Err(error) = state.rebuild_vulkan_runtime(_conn) {
+                            log::error!(
+                                "hot-plug: no shared Vulkan runtime for output {name}; \
+                                 existing outputs preserved: {error:#}"
+                            );
+                        }
+                    }
                 } else if interface == "wl_seat" {
                     registry.bind::<WlSeat, _, _>(name, version.min(5), qh, name);
                     log::info!("hot-plug: wl_seat name={name} added");
@@ -323,14 +709,17 @@ impl Dispatch<WlRegistry, GlobalListContents> for App {
                 if let Some(entry) = state.outputs.remove(&name) {
                     log::info!("hot-unplug: wl_output name={name} removed");
                     if let Some(binding) = entry.binding.as_ref() {
-                        binding.closed.store(true, Ordering::SeqCst);
                         state
                             .binding_registry
                             .lock()
                             .unwrap()
                             .remove(binding.display_name());
+                    } else if let (Some(runtime), Some(surface)) =
+                        (state.vulkan.as_ref(), entry.vk_surface)
+                    {
+                        runtime.destroy_surface(surface);
                     }
-                    drop(entry);
+                    shutdown_output_entry(entry);
                 }
             }
             _ => {}
@@ -533,35 +922,42 @@ fn layer_instance_id(entry: &OutputEntry, output_name: u32) -> String {
     format!("layer-{:x}", hasher.finalize())
 }
 
-fn wl_transform(value: u32) -> Transform {
-    match value {
-        1 => Transform::_90,
-        2 => Transform::_180,
-        3 => Transform::_270,
-        4 => Transform::Flipped,
-        5 => Transform::Flipped90,
-        6 => Transform::Flipped180,
-        7 => Transform::Flipped270,
-        _ => Transform::Normal,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn maps_config_transform_to_wayland_transform() {
-        assert_eq!(wl_transform(0), Transform::Normal);
-        assert_eq!(wl_transform(1), Transform::_90);
-        assert_eq!(wl_transform(2), Transform::_180);
-        assert_eq!(wl_transform(3), Transform::_270);
-        assert_eq!(wl_transform(4), Transform::Flipped);
-        assert_eq!(wl_transform(5), Transform::Flipped90);
-        assert_eq!(wl_transform(6), Transform::Flipped180);
-        assert_eq!(wl_transform(7), Transform::Flipped270);
-        assert_eq!(wl_transform(8), Transform::Normal);
-    }
+fn make_output_binding(
+    name_prefix: &str,
+    entry: &OutputEntry,
+    output_name: u32,
+    runtime: Arc<vulkan::VulkanRuntime>,
+    presenter: vulkan::WsiPresenter,
+    physical: (u32, u32),
+    existing_watcher: Option<Arc<watcher::OutputInfo>>,
+) -> Rc<OutputBinding> {
+    let display_name = match entry.output_name_str.as_deref() {
+        Some(name) if !name.is_empty() => name.to_string(),
+        _ => format!("{name_prefix}-{output_name}"),
+    };
+    let instance_id = layer_instance_id(entry, output_name);
+    let watcher = existing_watcher
+        .unwrap_or_else(|| Arc::new(watcher::OutputInfo::new(display_name.clone())));
+    log::info!(
+        "output {output_name}: identity '{}' -> instance_id={instance_id}",
+        output_identity_key(entry, output_name)
+    );
+    Rc::new(OutputBinding {
+        display_name,
+        instance_id,
+        configured_size: Mutex::new(Some(physical)),
+        scale: std::sync::atomic::AtomicI32::new(entry.scale.max(1)),
+        fractional_scale_120: AtomicU32::new(entry.fractional_scale_120),
+        refresh_mhz: AtomicU32::new(entry.refresh_mhz),
+        display: Mutex::new(None),
+        registered: AtomicBool::new(false),
+        last_pushed_metrics: Mutex::new(None),
+        config: Mutex::new(FrameConfig::default()),
+        runtime,
+        presenter: Mutex::new(presenter),
+        pending_present: AtomicBool::new(false),
+        watcher,
+    })
 }
 
 fn logical_to_physical(state: &App, output_name: u32, lx: f64, ly: f64) -> (f32, f32) {
@@ -580,6 +976,26 @@ fn logical_to_physical(state: &App, output_name: u32, lx: f64, ly: f64) -> (f32,
     ((lx * s) as f32, (ly * s) as f32)
 }
 
+fn physical_output_size(
+    logical: (u32, u32),
+    integer_scale: i32,
+    fractional_scale_120: u32,
+    has_viewport: bool,
+) -> (u32, u32) {
+    if fractional_scale_120 > 0 && has_viewport {
+        let scale = fractional_scale_120 as u64;
+        return (
+            ((logical.0 as u64 * scale + 60) / 120) as u32,
+            ((logical.1 as u64 * scale + 60) / 120) as u32,
+        );
+    }
+    let scale = integer_scale.max(1) as u32;
+    (
+        logical.0.saturating_mul(scale),
+        logical.1.saturating_mul(scale),
+    )
+}
+
 fn send_pointer_motion(state: &App, output_name: u32, x: f32, y: f32, timestamp_us: u64) {
     let Some(entry) = state.outputs.get(&output_name) else {
         return;
@@ -587,19 +1003,17 @@ fn send_pointer_motion(state: &App, output_name: u32, x: f32, y: f32, timestamp_
     let Some(binding) = entry.binding.as_ref() else {
         return;
     };
-    if !binding.registered.load(Ordering::Relaxed) {
+    let Some(session) = entry.session.as_ref().filter(|session| session.is_ready()) else {
         return;
-    }
-    let rc = binding.with_display(|d| unsafe {
-        sys::waywallen_display_send_pointer_motion(d, x, y, timestamp_us, 0)
-    });
-    if let Some(rc) = rc {
-        if rc < 0 {
-            log::debug!(
-                "[{}] send pointer_motion failed: {rc}",
-                binding.display_name
-            );
-        }
+    };
+    let rc = unsafe {
+        sys::waywallen_display_send_pointer_motion(session.display.0, x, y, timestamp_us, 0)
+    };
+    if rc < 0 {
+        log::debug!(
+            "[{}] send pointer_motion failed: {rc}",
+            binding.display_name
+        );
     }
 }
 
@@ -619,24 +1033,35 @@ fn send_pointer_button(
     else {
         return;
     };
-    if !binding.registered.load(Ordering::Relaxed) {
+    let Some(session) = state
+        .outputs
+        .get(&output_name)
+        .and_then(|entry| entry.session.as_ref())
+        .filter(|session| session.is_ready())
+    else {
         return;
-    }
+    };
     let button_state = if state_u32 == 1 {
         sys::WAYWALLEN_POINTER_BUTTON_STATE_PRESSED
     } else {
         sys::WAYWALLEN_POINTER_BUTTON_STATE_RELEASED
     };
-    let rc = binding.with_display(|d| unsafe {
-        sys::waywallen_display_send_pointer_button(d, x, y, button, button_state, timestamp_us, 0)
-    });
-    if let Some(rc) = rc {
-        if rc < 0 {
-            log::debug!(
-                "[{}] send pointer_button failed: {rc}",
-                binding.display_name
-            );
-        }
+    let rc = unsafe {
+        sys::waywallen_display_send_pointer_button(
+            session.display.0,
+            x,
+            y,
+            button,
+            button_state,
+            timestamp_us,
+            0,
+        )
+    };
+    if rc < 0 {
+        log::debug!(
+            "[{}] send pointer_button failed: {rc}",
+            binding.display_name
+        );
     }
 }
 
@@ -657,62 +1082,33 @@ fn send_pointer_axis(
     else {
         return;
     };
-    if !binding.registered.load(Ordering::Relaxed) {
+    let Some(session) = state
+        .outputs
+        .get(&output_name)
+        .and_then(|entry| entry.session.as_ref())
+        .filter(|session| session.is_ready())
+    else {
         return;
-    }
+    };
     let source = match source {
         1 => sys::WAYWALLEN_POINTER_AXIS_SOURCE_FINGER,
         2 => sys::WAYWALLEN_POINTER_AXIS_SOURCE_CONTINUOUS,
         _ => sys::WAYWALLEN_POINTER_AXIS_SOURCE_WHEEL,
     };
-    let rc = binding.with_display(|d| unsafe {
-        sys::waywallen_display_send_pointer_axis(d, x, y, delta_x, delta_y, source, timestamp_us, 0)
-    });
-    if let Some(rc) = rc {
-        if rc < 0 {
-            log::debug!("[{}] send pointer_axis failed: {rc}", binding.display_name);
-        }
-    }
-}
-
-impl Dispatch<WlBuffer, (u32, u32)> for App {
-    fn event(
-        _state: &mut Self,
-        buffer: &WlBuffer,
-        event: wayland_client::protocol::wl_buffer::Event,
-        data: &(u32, u32),
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-    ) {
-        let (output_name, buffer_index) = *data;
-        if let wayland_client::protocol::wl_buffer::Event::Release = event {
-            log::trace!(
-                "wl_buffer {} (out={output_name} idx={buffer_index}) released",
-                buffer.id()
-            );
-        }
-    }
-}
-
-impl Dispatch<WlCallback, u32> for App {
-    fn event(
-        state: &mut Self,
-        _cb: &WlCallback,
-        event: wl_callback::Event,
-        data: &u32,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-    ) {
-        if let wl_callback::Event::Done { .. } = event {
-            let output_name = *data;
-            if let Some(binding) = state
-                .outputs
-                .get(&output_name)
-                .and_then(|e| e.binding.as_ref())
-            {
-                binding.frame_pending.store(false, Ordering::SeqCst);
-            }
-        }
+    let rc = unsafe {
+        sys::waywallen_display_send_pointer_axis(
+            session.display.0,
+            x,
+            y,
+            delta_x,
+            delta_y,
+            source,
+            timestamp_us,
+            0,
+        )
+    };
+    if rc < 0 {
+        log::debug!("[{}] send pointer_axis failed: {rc}", binding.display_name);
     }
 }
 
@@ -732,6 +1128,28 @@ impl Dispatch<WlOutput, u32> for App {
                     entry.scale = factor.max(1);
                     if let Some(binding) = entry.binding.as_ref() {
                         binding.scale.store(factor.max(1), Ordering::SeqCst);
+                        if entry.fractional_scale_120 == 0 {
+                            if let Some((width, height)) = binding.watcher.logical_size() {
+                                let physical = (
+                                    width.saturating_mul(factor.max(1) as u32),
+                                    height.saturating_mul(factor.max(1) as u32),
+                                );
+                                *binding.configured_size.lock().unwrap() = Some(physical);
+                                if let Some(surface) = entry.surface.as_ref() {
+                                    surface.set_buffer_scale(factor.max(1));
+                                }
+                                binding
+                                    .presenter
+                                    .lock()
+                                    .unwrap()
+                                    .request_resize(physical.0, physical.1);
+                                if let Err(error) = push_resize_if_registered(binding, physical) {
+                                    log::warn!(
+                                        "output {output_name}: push display metrics failed: {error}"
+                                    );
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -893,25 +1311,29 @@ impl Dispatch<WpFractionalScaleV1, u32> for App {
                 return;
             };
             binding.fractional_scale_120.store(scale, Ordering::SeqCst);
-            let logical = *binding.logical_size.lock().unwrap();
+            let logical = binding.watcher.logical_size();
             let Some((lw, lh)) = logical else {
                 return;
             };
-            let physical = if entry.viewport.is_some() {
-                let f = scale as u64;
-                (
-                    ((lw as u64 * f + 60) / 120) as u32,
-                    ((lh as u64 * f + 60) / 120) as u32,
-                )
-            } else {
-                let s = entry.scale.max(1) as u32;
-                (lw.saturating_mul(s), lh.saturating_mul(s))
-            };
+            let physical =
+                physical_output_size((lw, lh), entry.scale, scale, entry.viewport.is_some());
             let prev = *binding.configured_size.lock().unwrap();
             if prev == Some(physical) {
                 return;
             }
+            entry.configured_size = Some(physical);
             *binding.configured_size.lock().unwrap() = Some(physical);
+            if let Some(surface) = entry.surface.as_ref() {
+                surface.set_buffer_scale(1);
+            }
+            if let Some(viewport) = entry.viewport.as_ref() {
+                viewport.set_destination(lw as i32, lh as i32);
+            }
+            binding
+                .presenter
+                .lock()
+                .unwrap()
+                .request_resize(physical.0, physical.1);
             log::info!(
                 "output {output_name}: preferred_scale={scale}/120 → physical {}x{}",
                 physical.0,
@@ -943,8 +1365,8 @@ impl Dispatch<ZwlrLayerSurfaceV1, u32> for App {
         layer_surface: &ZwlrLayerSurfaceV1,
         event: zwlr_layer_surface_v1::Event,
         data: &u32,
-        conn: &Connection,
-        qh: &QueueHandle<Self>,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
     ) {
         let output_name = *data;
         match event {
@@ -955,73 +1377,73 @@ impl Dispatch<ZwlrLayerSurfaceV1, u32> for App {
             } => {
                 layer_surface.ack_configure(serial);
                 log::info!("output {output_name}: layer_surface configure {width}x{height}");
+                let name_prefix = state.name_prefix.clone();
                 let Some(entry) = state.outputs.get_mut(&output_name) else {
                     log::warn!("configure for unknown output_name={output_name}");
                     return;
                 };
+                let scale = entry.scale.max(1);
+                let f120 = entry.fractional_scale_120;
+                let physical =
+                    physical_output_size((width, height), scale, f120, entry.viewport.is_some());
+                if let Some(surface) = entry.surface.as_ref() {
+                    if f120 > 0 && entry.viewport.is_some() {
+                        surface.set_buffer_scale(1);
+                        if let Some(viewport) = entry.viewport.as_ref() {
+                            viewport.set_destination(width as i32, height as i32);
+                        }
+                    } else {
+                        surface.set_buffer_scale(scale);
+                        if let Some(viewport) = entry.viewport.as_ref() {
+                            viewport.set_destination(-1, -1);
+                        }
+                    }
+                }
                 if entry.binding.is_none() {
-                    let surface = entry
-                        .surface
-                        .clone()
-                        .expect("configure before surface created");
-                    let dmabuf = state.dmabuf.clone().expect("configure before dmabuf bind");
-                    let display_name = match entry.output_name_str.as_deref() {
-                        Some(n) if !n.is_empty() => n.to_string(),
-                        _ => format!("{}-{}", state.name_prefix, output_name),
+                    let Some(runtime) = state.vulkan.as_ref().cloned() else {
+                        log::error!("output {output_name}: configure before Vulkan initialization");
+                        return;
                     };
-                    let instance_id = layer_instance_id(entry, output_name);
-                    let refresh_mhz = entry.refresh_mhz;
-                    log::info!(
-                        "output {output_name}: identity '{}' -> instance_id={instance_id}",
-                        output_identity_key(entry, output_name)
-                    );
-                    entry.binding = Some(Arc::new(OutputBinding {
-                        display_name,
-                        instance_id,
-                        surface,
-                        dmabuf,
-                        conn: conn.clone(),
-                        qh: qh.clone(),
+                    let Some(vk_surface) = entry.vk_surface.take() else {
+                        log::error!("output {output_name}: configure without Vulkan surface");
+                        return;
+                    };
+                    let presenter =
+                        match vulkan::WsiPresenter::new(Arc::clone(&runtime), vk_surface, physical)
+                        {
+                            Ok(presenter) => presenter,
+                            Err(error) => {
+                                log::error!(
+                                "output {output_name}: initialize WSI presenter failed: {error:#}"
+                            );
+                                return;
+                            }
+                        };
+                    entry.binding = Some(make_output_binding(
+                        &name_prefix,
+                        entry,
                         output_name,
-                        configured_size: Mutex::new(None),
-                        logical_size: Mutex::new(None),
-                        scale: std::sync::atomic::AtomicI32::new(entry.scale.max(1)),
-                        fractional_scale_120: AtomicU32::new(entry.fractional_scale_120),
-                        refresh_mhz: AtomicU32::new(refresh_mhz),
-                        viewport: entry.viewport.clone(),
-                        closed: AtomicBool::new(false),
-                        display: Mutex::new(None),
-                        frame_pending: AtomicBool::new(false),
-                        registered: AtomicBool::new(false),
-                        last_pushed_metrics: Mutex::new(None),
-                        layer_buffer: Mutex::new(None),
-                        config: Mutex::new(FrameConfig::default()),
-                        window_flags: AtomicU32::new(0),
-                    }));
+                        runtime,
+                        presenter,
+                        physical,
+                        None,
+                    ));
                 }
                 let binding = entry.binding.as_ref().expect("binding just created");
                 {
                     let mut reg = state.binding_registry.lock().unwrap();
-                    reg.insert(binding.display_name().to_string(), binding.clone());
+                    reg.insert(binding.display_name().to_string(), binding.watcher.clone());
                 }
-                let scale = entry.scale.max(1);
                 binding.scale.store(scale, Ordering::SeqCst);
-                let f120 = entry.fractional_scale_120;
                 binding.fractional_scale_120.store(f120, Ordering::SeqCst);
-                let physical = if f120 > 0 && entry.viewport.is_some() {
-                    let f = f120 as u64;
-                    (
-                        ((width as u64 * f + 60) / 120) as u32,
-                        ((height as u64 * f + 60) / 120) as u32,
-                    )
-                } else {
-                    (
-                        width.saturating_mul(scale as u32),
-                        height.saturating_mul(scale as u32),
-                    )
-                };
-                *binding.logical_size.lock().unwrap() = Some((width, height));
+                binding.watcher.set_logical_size((width, height));
+                entry.configured_size = Some(physical);
                 *binding.configured_size.lock().unwrap() = Some(physical);
+                binding
+                    .presenter
+                    .lock()
+                    .unwrap()
+                    .request_resize(physical.0, physical.1);
                 if physical != (width, height) {
                     log::info!(
                         "output {output_name}: logical {width}x{height} → physical {}x{} \
@@ -1034,15 +1456,29 @@ impl Dispatch<ZwlrLayerSurfaceV1, u32> for App {
                 if let Err(e) = push_resize_if_registered(&arc_binding, physical) {
                     log::warn!("output {output_name}: push display metrics failed: {e}");
                 }
-                state.maybe_spawn_worker(output_name);
             }
             zwlr_layer_surface_v1::Event::Closed => {
                 log::warn!("output {output_name}: layer_surface closed by compositor");
                 if let Some(entry) = state.outputs.get_mut(&output_name) {
+                    if let Some(binding) = entry.binding.as_ref() {
+                        state
+                            .binding_registry
+                            .lock()
+                            .unwrap()
+                            .remove(binding.display_name());
+                    } else if let (Some(runtime), Some(surface)) =
+                        (state.vulkan.as_ref(), entry.vk_surface.take())
+                    {
+                        runtime.destroy_surface(surface);
+                    }
+                    if let Some(session) = entry.session.take() {
+                        if let Some(binding) = entry.binding.as_ref() {
+                            shutdown_display_session(binding, session);
+                        }
+                    }
                     entry.surface = None;
                     entry.layer_surface = None;
                     entry.binding = None;
-                    entry.worker_started = false;
                     entry.fractional_scale = None;
                     entry.fractional_scale_120 = 0;
                 }
@@ -1065,21 +1501,6 @@ impl Dispatch<ZwpLinuxDmabufV1, ()> for App {
             zwp_linux_dmabuf_v1::Event::Format { .. }
             | zwp_linux_dmabuf_v1::Event::Modifier { .. } => {}
             _ => {}
-        }
-    }
-}
-
-impl Dispatch<ZwpLinuxBufferParamsV1, ()> for App {
-    fn event(
-        _state: &mut Self,
-        _p: &ZwpLinuxBufferParamsV1,
-        event: zwp_linux_buffer_params_v1::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-    ) {
-        if let zwp_linux_buffer_params_v1::Event::Failed = event {
-            log::error!("zwp_linux_buffer_params_v1 Failed: dmabuf import rejected");
         }
     }
 }
@@ -1108,49 +1529,7 @@ impl Dispatch<WpViewport, u32> for App {
     }
 }
 
-fn uds_worker_loop(sock: PathBuf, binding: Arc<OutputBinding>) {
-    const INITIAL: Duration = Duration::from_secs(2);
-    const MAX: Duration = Duration::from_secs(30);
-    const STABLE_RESET: Duration = Duration::from_secs(20);
-    let mut delay = INITIAL;
-    loop {
-        if binding.closed.load(Ordering::SeqCst) {
-            log::info!("[{}] output closed; worker exiting", binding.display_name);
-            return;
-        }
-        let started = std::time::Instant::now();
-        let res = run_uds_session(&sock, &binding);
-        let lived = started.elapsed();
-        binding.registered.store(false, Ordering::SeqCst);
-        binding.last_pushed_metrics.lock().unwrap().take();
-        binding.layer_buffer.lock().unwrap().take();
-        binding.display.lock().unwrap().take();
-        match res {
-            Ok(()) => log::info!("[{}] display session ended cleanly", binding.display_name),
-            Err(e) => log::warn!("[{}] display session error: {e:#}", binding.display_name),
-        }
-        if binding.closed.load(Ordering::SeqCst) {
-            log::info!(
-                "[{}] output closed; worker exiting after session end",
-                binding.display_name
-            );
-            return;
-        }
-        if lived >= STABLE_RESET {
-            delay = INITIAL;
-        }
-        log::debug!(
-            "[{}] session lived {:?}; reconnecting in {:?}",
-            binding.display_name,
-            lived,
-            delay
-        );
-        thread::sleep(delay);
-        delay = std::cmp::min(delay * 2, MAX);
-    }
-}
-
-fn push_resize_if_registered(binding: &Arc<OutputBinding>, physical: (u32, u32)) -> Result<()> {
+fn push_resize_if_registered(binding: &Rc<OutputBinding>, physical: (u32, u32)) -> Result<()> {
     if !binding.registered.load(Ordering::SeqCst) {
         return Ok(());
     }
@@ -1186,12 +1565,12 @@ fn push_resize_if_registered(binding: &Arc<OutputBinding>, physical: (u32, u32))
     Ok(())
 }
 
-fn run_uds_session(sock: &Path, binding: &Arc<OutputBinding>) -> Result<()> {
+fn start_display_session(sock: &Path, binding: &Rc<OutputBinding>) -> Result<DisplaySession> {
     let (width, height) = binding
         .configured_size
         .lock()
         .unwrap()
-        .expect("worker started before configure");
+        .expect("display session started before configure");
     let display_name = CString::new(binding.display_name.as_str()).context("display name")?;
     let instance_id = CString::new(binding.instance_id.as_str()).context("instance id")?;
     let socket_path = CString::new(sock.as_os_str().as_encoded_bytes()).context("socket path")?;
@@ -1204,7 +1583,7 @@ fn run_uds_session(sock: &Path, binding: &Arc<OutputBinding>) -> Result<()> {
         on_presentation_snapshot: None,
         on_presentation_state: None,
         on_disconnected: Some(on_disconnected),
-        user_data: Arc::as_ptr(binding) as *mut c_void,
+        user_data: Rc::as_ptr(binding) as *mut c_void,
     };
 
     let display = unsafe { sys::waywallen_display_new(&callbacks) };
@@ -1214,13 +1593,13 @@ fn run_uds_session(sock: &Path, binding: &Arc<OutputBinding>) -> Result<()> {
     {
         *binding.display.lock().unwrap() = Some(DisplayPtr(display));
     }
-
-    let run = (|| -> Result<()> {
-        let rc = unsafe { sys::waywallen_display_bind_dmabuf_relay(display) };
+    let start = (|| -> Result<DisplaySession> {
+        let context = binding.runtime.display_context();
+        let rc = unsafe { sys::waywallen_display_bind_vulkan(display, &context) };
         if rc < 0 {
-            bail!("waywallen_display_bind_dmabuf_relay failed: {rc}");
+            bail!("waywallen_display_bind_vulkan failed: {rc}");
         }
-        let flags = binding.window_flags.load(Ordering::SeqCst);
+        let flags = binding.watcher.window_flags();
         let rc = unsafe { sys::waywallen_display_set_window_state(display, flags) };
         if rc < 0 {
             bail!("waywallen_display_set_window_state failed: {rc}");
@@ -1232,7 +1611,7 @@ fn run_uds_session(sock: &Path, binding: &Arc<OutputBinding>) -> Result<()> {
             refresh_mhz,
         };
         let rc = unsafe {
-            sys::waywallen_display_connect(
+            sys::waywallen_display_begin_connect(
                 display,
                 socket_path.as_ptr(),
                 display_name.as_ptr(),
@@ -1241,76 +1620,147 @@ fn run_uds_session(sock: &Path, binding: &Arc<OutputBinding>) -> Result<()> {
             )
         };
         if rc < 0 {
-            bail!("waywallen_display_connect failed: {rc}");
+            bail!("waywallen_display_begin_connect failed: {rc}");
         }
-        *binding.last_pushed_metrics.lock().unwrap() = Some((width, height, refresh_mhz));
-        binding.registered.store(true, Ordering::SeqCst);
-
-        let display_id = unsafe { sys::waywallen_display_get_display_id(display) };
-        log::info!(
-            "[{}] registered as display_id={display_id} instance_id={} ({width}x{height}@{}mHz)",
-            binding.display_name,
-            binding.instance_id,
-            binding.refresh_mhz.load(Ordering::SeqCst)
-        );
-
-        if let Some(latest) = *binding.configured_size.lock().unwrap() {
-            if latest != (width, height) {
-                push_resize_if_registered(binding, latest)?;
-            }
+        let mut session = DisplaySession {
+            display: DisplayPtr(display),
+            state: DisplaySessionState::Handshake {
+                events: libc::POLLIN | libc::POLLOUT,
+            },
+            started: Instant::now(),
+            _binding: Rc::clone(binding),
+        };
+        advance_display_handshake(binding, &mut session)?;
+        if unsafe { sys::waywallen_display_get_fd(display) } < 0 {
+            bail!("display session has no pollable fd after begin_connect");
         }
-        dispatch_display_loop(display, binding)
+        Ok(session)
     })();
-
-    unsafe {
-        sys::waywallen_display_shutdown(display);
+    if start.is_err() {
+        binding.display.lock().unwrap().take();
+        unsafe { sys::waywallen_display_shutdown(display) };
     }
-    run
+    start
 }
 
-fn dispatch_display_loop(
-    display: *mut sys::waywallen_display_t,
-    binding: &OutputBinding,
+fn advance_display_handshake(
+    binding: &Rc<OutputBinding>,
+    session: &mut DisplaySession,
 ) -> Result<()> {
     loop {
-        if binding.closed.load(Ordering::SeqCst) {
-            return Ok(());
+        let rc = unsafe { sys::waywallen_display_advance_handshake(session.display.0) };
+        match rc {
+            sys::WAYWALLEN_HS_DONE => {
+                session.state = DisplaySessionState::Ready;
+                binding.registered.store(true, Ordering::SeqCst);
+                if let Some((width, height)) = *binding.configured_size.lock().unwrap() {
+                    let refresh_mhz = binding.refresh_mhz.load(Ordering::SeqCst);
+                    *binding.last_pushed_metrics.lock().unwrap() =
+                        Some((width, height, refresh_mhz));
+                    let display_id =
+                        unsafe { sys::waywallen_display_get_display_id(session.display.0) };
+                    log::info!(
+                        "[{}] registered as display_id={display_id} instance_id={} \
+                         ({width}x{height}@{refresh_mhz}mHz)",
+                        binding.display_name,
+                        binding.instance_id,
+                    );
+                }
+                return Ok(());
+            }
+            sys::WAYWALLEN_HS_NEED_READ => {
+                session.state = DisplaySessionState::Handshake {
+                    events: libc::POLLIN,
+                };
+                return Ok(());
+            }
+            sys::WAYWALLEN_HS_NEED_WRITE => {
+                session.state = DisplaySessionState::Handshake {
+                    events: libc::POLLOUT,
+                };
+                return Ok(());
+            }
+            sys::WAYWALLEN_HS_PROGRESS => continue,
+            error if error < 0 => bail!("display handshake failed: {error}"),
+            other => bail!("display handshake returned unexpected action: {other}"),
         }
-        let fd = unsafe { sys::waywallen_display_get_fd(display) };
-        if fd < 0 {
-            return Ok(());
+    }
+}
+
+fn process_display_event(
+    binding: &Rc<OutputBinding>,
+    session: &mut DisplaySession,
+    revents: i16,
+) -> Result<()> {
+    if !session.is_ready() {
+        advance_display_handshake(binding, session)?;
+        if revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 && !session.is_ready() {
+            bail!("display socket closed during handshake (poll revents=0x{revents:x})");
         }
-        let mut pfd = libc::pollfd {
-            fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        if unsafe { sys::waywallen_display_wants_writable(display) } {
-            pfd.events |= libc::POLLOUT;
-        }
-        let rc = unsafe { libc::poll(&mut pfd, 1, 500) };
+        return Ok(());
+    }
+    if revents & libc::POLLOUT != 0 {
+        let rc = unsafe { sys::waywallen_display_handle_writable(session.display.0) };
         if rc < 0 {
-            let err = std::io::Error::last_os_error();
-            if err.kind() == std::io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(err).context("poll display fd");
+            bail!("waywallen_display_handle_writable failed: {rc}");
         }
-        if rc == 0 {
-            continue;
+    }
+    if revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP) != 0 {
+        let rc = unsafe { sys::waywallen_display_dispatch(session.display.0) };
+        if rc < 0 {
+            bail!("waywallen_display_dispatch failed: {rc}");
         }
-        if pfd.revents & libc::POLLOUT != 0 {
-            let r = unsafe { sys::waywallen_display_handle_writable(display) };
-            if r < 0 {
-                bail!("waywallen_display_handle_writable failed: {r}");
-            }
-        }
-        if pfd.revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP) != 0 {
-            let r = unsafe { sys::waywallen_display_dispatch(display) };
-            if r < 0 {
-                bail!("waywallen_display_dispatch failed: {r}");
+        while unsafe { sys::waywallen_display_drain(session.display.0) } > 0 {}
+        if unsafe { sys::waywallen_display_wants_writable(session.display.0) } {
+            let rc = unsafe { sys::waywallen_display_handle_writable(session.display.0) };
+            if rc < 0 {
+                bail!("waywallen_display_handle_writable failed: {rc}");
             }
         }
+    }
+    if revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+        bail!("display socket closed (poll revents=0x{revents:x})");
+    }
+    Ok(())
+}
+
+fn shutdown_display_session(binding: &Rc<OutputBinding>, session: DisplaySession) {
+    binding.registered.store(false, Ordering::SeqCst);
+    binding.pending_present.store(false, Ordering::SeqCst);
+    binding.last_pushed_metrics.lock().unwrap().take();
+    let cleared = binding.presenter.lock().unwrap().clear_sampled_frame();
+    match cleared {
+        Ok(true) => {}
+        Ok(false) => {
+            log::error!(
+                "[{}] display session retired before its WSI frames completed",
+                binding.display_name
+            );
+            binding
+                .presenter
+                .lock()
+                .unwrap()
+                .force_clear_sampled_frame();
+        }
+        Err(error) => {
+            log::error!(
+                "[{}] query WSI frame completion failed: {error:#}",
+                binding.display_name
+            );
+            binding
+                .presenter
+                .lock()
+                .unwrap()
+                .force_clear_sampled_frame();
+        }
+    }
+    unsafe { sys::waywallen_display_shutdown(session.display.0) };
+    binding.display.lock().unwrap().take();
+}
+
+fn shutdown_output_entry(mut entry: OutputEntry) {
+    if let (Some(binding), Some(session)) = (entry.binding.as_ref(), entry.session.take()) {
+        shutdown_display_session(binding, session);
     }
 }
 
@@ -1324,52 +1774,47 @@ unsafe extern "C" fn on_binding_ready(
     }
     let ready = &*raw_binding;
     let t = &ready.textures;
-    if t.backend != sys::WAYWALLEN_BACKEND_DMABUF_RELAY || t.shadow_dmabuf_fd < 0 {
+    if t.backend != sys::WAYWALLEN_BACKEND_VULKAN || t.vk_images.is_null() {
         log::warn!(
-            "[{}] binding_ready without dmabuf relay shadow fd",
+            "[{}] binding_ready without Vulkan images",
             binding.display_name
         );
         return;
     }
-    match import_shadow_dmabuf(binding, t) {
-        Ok(buffer) => {
-            *binding.layer_buffer.lock().unwrap() = Some(buffer);
-            log::info!(
-                "[{}] imported relay shadow wl_buffer {}x{} fourcc=0x{:08x}",
-                binding.display_name,
-                t.tex_width,
-                t.tex_height,
-                t.fourcc
-            );
-        }
-        Err(e) => log::warn!(
-            "[{}] import relay shadow failed: {e:#}",
-            binding.display_name
-        ),
-    }
+    log::info!(
+        "[{}] Vulkan producer binding ready: generation={} count={} {}x{} fourcc=0x{:08x}",
+        binding.display_name,
+        t.buffer_generation,
+        t.count,
+        t.tex_width,
+        t.tex_height,
+        t.fourcc
+    );
     apply_composition_config(binding, &ready.config);
 }
 
 unsafe extern "C" fn on_textures_releasing(
-    user_data: *mut c_void,
+    _user_data: *mut c_void,
     _t: *const sys::waywallen_textures_t,
 ) {
-    let binding = binding_from_user_data(user_data);
-    binding.layer_buffer.lock().unwrap().take();
 }
 
 fn apply_composition_config(binding: &OutputBinding, c: &sys::waywallen_composition_config_t) {
     let mut cfg = binding.config.lock().unwrap();
-    cfg.source = Some((
+    cfg.source = [
         c.source_rect.x,
         c.source_rect.y,
         c.source_rect.w,
         c.source_rect.h,
-    ));
-    if cfg.transform != c.transform {
-        cfg.transform = c.transform;
-        cfg.transform_dirty = true;
-    }
+    ];
+    cfg.destination = [c.dest_rect.x, c.dest_rect.y, c.dest_rect.w, c.dest_rect.h];
+    cfg.transform = c.transform;
+    cfg.clear = [
+        c.clear_color.r,
+        c.clear_color.g,
+        c.clear_color.b,
+        c.clear_color.a,
+    ];
 }
 
 unsafe extern "C" fn on_composition_config(
@@ -1389,29 +1834,50 @@ unsafe extern "C" fn on_frame_ready(user_data: *mut c_void, f: *const sys::waywa
         return;
     }
     let f = &*f;
-    if f.release_syncobj_fd >= 0 {
-        if sys::waywallen_display_signal_release_syncobj(f.release_syncobj_fd) == sys::WAYWALLEN_OK
-        {
-            let rc = binding.with_display(|display| {
-                sys::waywallen_display_frame_release_armed(display, f.buffer_generation, f.seq)
-            });
-            if let Some(rc) = rc {
-                if rc < 0 {
-                    log::warn!(
-                        "[{}] frame_release_armed failed: {rc}",
-                        binding.display_name
-                    );
-                }
-            }
-        }
-    }
-    if let Err(e) = present_shadow(binding) {
+    let display = {
+        let guard = binding.display.lock().unwrap();
+        let Some(display) = guard.as_ref() else {
+            return;
+        };
+        display.0
+    };
+    let mut sampled = sys::waywallen_vk_sampled_frame_t::default();
+    let rc = sys::waywallen_display_vulkan_consume_frame(display, f, &mut sampled);
+    if rc != sys::WAYWALLEN_OK {
         log::warn!(
-            "[{}] present frame seq={} failed: {e:#}",
+            "[{}] consume Vulkan frame seq={} failed: {rc}",
             binding.display_name,
             f.seq
         );
+        return;
     }
+    let mut presenter = binding.presenter.lock().unwrap();
+    if let Err(error) = presenter.install_sampled_frame(display, &sampled) {
+        log::warn!(
+            "[{}] install frame seq={} failed: {error:#}",
+            binding.display_name,
+            f.seq
+        );
+        return;
+    }
+    drop(presenter);
+    binding.pending_present.store(true, Ordering::SeqCst);
+}
+
+fn present_latest(binding: &OutputBinding) -> Result<()> {
+    let config = *binding.config.lock().unwrap();
+    let composition = vulkan::Composition {
+        source: config.source,
+        destination: config.destination,
+        transform: config.transform,
+        clear: config.clear,
+    };
+    let mut presenter = binding.presenter.lock().unwrap();
+    match presenter.present(&composition)? {
+        vulkan::PresentResult::Presented => binding.pending_present.store(false, Ordering::SeqCst),
+        vulkan::PresentResult::Pending => binding.pending_present.store(true, Ordering::SeqCst),
+    }
+    Ok(())
 }
 
 unsafe extern "C" fn on_disconnected(user_data: *mut c_void, err: i32, msg: *const c_char) {
@@ -1426,89 +1892,6 @@ unsafe extern "C" fn on_disconnected(user_data: *mut c_void, err: i32, msg: *con
 
 unsafe fn binding_from_user_data<'a>(user_data: *mut c_void) -> &'a OutputBinding {
     &*(user_data as *const OutputBinding)
-}
-
-fn import_shadow_dmabuf(
-    binding: &OutputBinding,
-    t: &sys::waywallen_textures_t,
-) -> Result<LayerBuffer> {
-    let fd = unsafe { libc::dup(t.shadow_dmabuf_fd) };
-    if fd < 0 {
-        return Err(std::io::Error::last_os_error()).context("dup shadow dmabuf fd");
-    }
-    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-    let params = binding.dmabuf.create_params(&binding.qh, ());
-    let modifier = t.shadow_modifier;
-    let mod_hi = (modifier >> 32) as u32;
-    let mod_lo = (modifier & 0xffff_ffff) as u32;
-    let n_planes = t.shadow_n_planes.min(4);
-    for plane in 0..n_planes {
-        params.add(
-            fd.as_fd(),
-            plane,
-            t.shadow_offsets[plane as usize] as u32,
-            t.shadow_strides[plane as usize],
-            mod_hi,
-            mod_lo,
-        );
-    }
-    let wl_buffer = params.create_immed(
-        t.tex_width as i32,
-        t.tex_height as i32,
-        t.fourcc,
-        zwp_linux_buffer_params_v1::Flags::empty(),
-        &binding.qh,
-        (binding.output_name, 0),
-    );
-    Ok(LayerBuffer {
-        wl_buffer,
-        width: t.tex_width,
-        height: t.tex_height,
-    })
-}
-
-fn present_shadow(binding: &OutputBinding) -> Result<()> {
-    let mut cfg = binding.config.lock().unwrap();
-    let guard = binding.layer_buffer.lock().unwrap();
-    let Some(buffer) = guard.as_ref() else {
-        return Ok(());
-    };
-
-    binding.surface.attach(Some(&buffer.wl_buffer), 0, 0);
-    let src = cfg
-        .source
-        .unwrap_or((0.0, 0.0, buffer.width as f32, buffer.height as f32));
-    let logical = binding
-        .logical_size
-        .lock()
-        .unwrap()
-        .unwrap_or((buffer.width, buffer.height));
-
-    if let Some(vp) = binding.viewport.as_ref() {
-        vp.set_source(src.0 as f64, src.1 as f64, src.2 as f64, src.3 as f64);
-        vp.set_destination(logical.0 as i32, logical.1 as i32);
-    } else {
-        let scale = binding.scale.load(Ordering::SeqCst);
-        if scale > 1 {
-            binding.surface.set_buffer_scale(scale);
-        }
-    }
-
-    if cfg.transform_dirty {
-        binding
-            .surface
-            .set_buffer_transform(wl_transform(cfg.transform));
-        cfg.transform_dirty = false;
-    }
-
-    binding
-        .surface
-        .damage_buffer(0, 0, buffer.width as i32, buffer.height as i32);
-    binding.surface.frame(&binding.qh, binding.output_name);
-    binding.frame_pending.store(true, Ordering::SeqCst);
-    binding.surface.commit();
-    binding.conn.flush().context("wayland flush")?;
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1606,11 +1989,13 @@ fn run(socket: PathBuf, name_prefix: String) -> Result<()> {
     let (globals, mut queue) = registry_queue_init::<App>(&conn).context("registry init")?;
     let qh: QueueHandle<App> = queue.handle();
 
-    let mut app = App::new(socket, name_prefix);
+    let (watcher_sender, watcher_commands) =
+        watcher::command_channel().context("create watcher command channel")?;
+    let mut app = App::new(socket, name_prefix, watcher_commands);
 
-    watcher::hyprland::spawn(app.binding_registry.clone());
-    watcher::niri::spawn(app.binding_registry.clone());
-    watcher::wayfire::spawn(app.binding_registry.clone());
+    watcher::hyprland::spawn(app.binding_registry.clone(), watcher_sender.clone());
+    watcher::niri::spawn(app.binding_registry.clone(), watcher_sender.clone());
+    watcher::wayfire::spawn(app.binding_registry.clone(), watcher_sender);
 
     for g in globals.contents().clone_list() {
         match g.interface.as_str() {
@@ -1674,10 +2059,14 @@ fn run(socket: PathBuf, name_prefix: String) -> Result<()> {
                         layer_surface: None,
                         viewport: None,
                         binding: None,
-                        worker_started: false,
+                        session: None,
+                        reconnect_at: Instant::now(),
+                        reconnect_delay: INITIAL_RECONNECT_DELAY,
                         scale: 1,
                         fractional_scale: None,
                         fractional_scale_120: 0,
+                        vk_surface: None,
+                        configured_size: None,
                         refresh_mhz: 60_000,
                         output_name_str: None,
                         output_description: None,
@@ -1705,11 +2094,6 @@ fn run(socket: PathBuf, name_prefix: String) -> Result<()> {
             "compositor does not expose zwlr_layer_shell_v1 — try a different compositor (Hyprland/Sway/KWin/new Mutter)"
         ));
     }
-    if app.dmabuf.is_none() {
-        bail!(gettextrs::gettext(
-            "compositor does not expose zwp_linux_dmabuf_v1"
-        ));
-    }
     if app.outputs.is_empty() {
         bail!(gettextrs::gettext("no wl_output available"));
     }
@@ -1729,13 +2113,105 @@ fn run(socket: PathBuf, name_prefix: String) -> Result<()> {
 
     let output_keys: Vec<u32> = app.outputs.keys().copied().collect();
     for name in output_keys {
-        app.bring_up_surface(name, &qh);
+        let _ = app.bring_up_surface(name, &conn, &qh);
     }
 
-    loop {
-        if let Err(e) = queue.blocking_dispatch(&mut app) {
-            log::error!("wayland dispatch error: {e}");
-            return Err(e.into());
+    let wayland_surfaces: Vec<_> = app
+        .outputs
+        .iter()
+        .filter_map(|(name, entry)| entry.surface.clone().map(|surface| (*name, surface)))
+        .collect();
+    let (runtime, vk_surfaces) = vulkan::VulkanRuntime::new(
+        &conn,
+        &wayland_surfaces,
+        (app.compositor_drm_major, app.compositor_drm_minor),
+    )?;
+    for (name, surface) in vk_surfaces {
+        if let Some(entry) = app.outputs.get_mut(&name) {
+            entry.vk_surface = Some(surface);
+        } else {
+            runtime.destroy_surface(surface);
         }
+    }
+    app.vulkan = Some(runtime);
+
+    loop {
+        queue
+            .dispatch_pending(&mut app)
+            .context("dispatch pending Wayland events")?;
+        app.drain_watcher_commands();
+        app.retire_finished_sessions();
+        app.start_due_sessions();
+        app.pump_presenters();
+        queue.flush().context("flush Wayland requests")?;
+
+        let Some(read_guard) = queue.prepare_read() else {
+            continue;
+        };
+        let display_sources = app.display_poll_sources();
+        let mut poll_fds = Vec::with_capacity(2 + display_sources.len());
+        poll_fds.push(libc::pollfd {
+            fd: read_guard.connection_fd().as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        });
+        poll_fds.push(libc::pollfd {
+            fd: app.watcher_commands.fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        });
+        poll_fds.extend(display_sources.iter().map(|(_, poll_fd)| *poll_fd));
+
+        let poll_result = unsafe {
+            libc::poll(
+                poll_fds.as_mut_ptr(),
+                poll_fds.len() as libc::nfds_t,
+                app.poll_timeout_ms(),
+            )
+        };
+        if poll_result < 0 {
+            let error = std::io::Error::last_os_error();
+            drop(read_guard);
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error).context("poll layer-shell event sources");
+        }
+
+        let wayland_events = poll_fds[0].revents;
+        if wayland_events & (libc::POLLIN | libc::POLLERR | libc::POLLHUP) != 0 {
+            read_guard.read().context("read Wayland events")?;
+        } else {
+            drop(read_guard);
+        }
+
+        if poll_fds[1].revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP) != 0 {
+            app.drain_watcher_commands();
+        }
+        for ((output_name, _), poll_fd) in display_sources
+            .into_iter()
+            .zip(poll_fds.into_iter().skip(2))
+        {
+            if poll_fd.revents != 0 {
+                app.process_display_poll(output_name, poll_fd.revents);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::physical_output_size;
+
+    #[test]
+    fn fractional_output_size_rounds_to_nearest_physical_pixel() {
+        assert_eq!(
+            physical_output_size((1001, 801), 2, 150, true),
+            (1251, 1001)
+        );
+        assert_eq!(
+            physical_output_size((1001, 801), 2, 150, false),
+            (2002, 1602)
+        );
     }
 }

@@ -10,6 +10,7 @@
  *   VK_EXT_queue_family_foreign
  *   VK_EXT_image_drm_format_modifier
  *   VK_KHR_external_semaphore_fd
+ *   VK_KHR_image_format_list
  *
  * All Vulkan entry points are resolved at runtime: the loader prefers a
  * host-provided vkGetInstanceProcAddr callback when available, and
@@ -34,6 +35,9 @@ extern "C" {
 #    endif
 
 #    define WW_VK_MAX_PLANES 4
+
+extern const char* const ww_vk_required_device_extensions[];
+extern const uint32_t    ww_vk_required_device_extension_count;
 
 typedef struct ww_vk_backend {
     /* Resolved from the host's vkGetInstanceProcAddr. */
@@ -190,8 +194,8 @@ int ww_vk_query_supports_device_local(const ww_vk_backend_t* backend, int* out_h
 /* Minimal lib-owned instance + device + queue suitable for the
  * DMABUF_RELAY backend. Picks the first physical device that exposes
  * VK_EXT_external_memory_dma_buf, VK_EXT_queue_family_foreign,
- * VK_EXT_image_drm_format_modifier and VK_KHR_external_memory_fd plus a
- * transfer-capable queue family.
+ * VK_EXT_image_drm_format_modifier, VK_KHR_external_memory_fd and their
+ * required device extensions plus a transfer-capable queue family.
  *
  * Output handles are owned by the caller — destroy via
  * `ww_vk_destroy_owned`. */

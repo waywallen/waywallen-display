@@ -116,7 +116,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            gcc gettext pkg-config libegl-dev libgles-dev libvulkan-dev
+            gcc gettext pkg-config glslang-tools libegl-dev libgles-dev libvulkan-dev
 
       - name: Build waywallen-layer-shell
         run: cargo build --bin waywallen-layer-shell --release --locked

@@ -1408,6 +1408,27 @@ static void test_configured_backend_import_failure_is_reported(void) {
     printf("  ok test_configured_backend_import_failure_is_reported\n");
 }
 
+static void test_vulkan_requirements_are_complete(void) {
+    waywallen_vk_requirements_t requirements = { 0 };
+    int                         rc           = waywallen_display_vulkan_requirements(&requirements);
+    if (rc == WAYWALLEN_ERR_NOT_IMPL) return;
+    assert(rc == WAYWALLEN_OK);
+    assert(requirements.api_version != 0);
+    assert(requirements.imported_image_usage != 0);
+    assert(requirements.imported_image_layout != 0);
+    assert(requirements.device_extensions != NULL);
+
+    int has_image_format_list = 0;
+    for (uint32_t i = 0; i < requirements.device_extension_count; ++i) {
+        assert(requirements.device_extensions[i] != NULL);
+        if (strcmp(requirements.device_extensions[i], "VK_KHR_image_format_list") == 0) {
+            has_image_format_list = 1;
+        }
+    }
+    assert(has_image_format_list);
+    printf("  ok test_vulkan_requirements_are_complete\n");
+}
+
 static void test_outbox_prioritizes_lifecycle_and_replaces_state(void) {
     struct test_state ts;
     ts_init(&ts);
@@ -1553,6 +1574,7 @@ int main(void) {
     test_set_composition_while_idle_is_protocol_error();
     test_unbind_is_valid_for_atomic_binding();
     test_configured_backend_import_failure_is_reported();
+    test_vulkan_requirements_are_complete();
     test_outbox_prioritizes_lifecycle_and_replaces_state();
     test_buffer_generation_restarts_on_new_connection();
     test_frame_release_armed_round_trip();

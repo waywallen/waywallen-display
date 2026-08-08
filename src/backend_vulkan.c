@@ -25,6 +25,15 @@
 #    include <string.h>
 #    include <unistd.h>
 
+const char* const ww_vk_required_device_extensions[] = {
+    "VK_EXT_external_memory_dma_buf",   "VK_EXT_queue_family_foreign",
+    "VK_EXT_image_drm_format_modifier", "VK_KHR_external_memory_fd",
+    "VK_KHR_external_semaphore_fd",     "VK_KHR_image_format_list",
+};
+const uint32_t ww_vk_required_device_extension_count =
+    (uint32_t)(sizeof(ww_vk_required_device_extensions) /
+               sizeof(ww_vk_required_device_extensions[0]));
+
 /* ------------------------------------------------------------------ */
 /*  Diagnostics helpers                                                */
 /* ------------------------------------------------------------------ */
@@ -937,13 +946,6 @@ int ww_vk_create_owned(ww_vk_owned_t* out) {
     }
     vkEnumeratePhysicalDevices(out->instance, &pd_count, pds);
 
-    const char* want[] = {
-        "VK_EXT_external_memory_dma_buf",   "VK_EXT_queue_family_foreign",
-        "VK_EXT_image_drm_format_modifier", "VK_KHR_external_memory_fd",
-        "VK_KHR_external_semaphore_fd",
-    };
-    const uint32_t want_n = (uint32_t)(sizeof(want) / sizeof(want[0]));
-
     int      picked_pd  = -1;
     uint32_t picked_qfi = 0;
     for (uint32_t i = 0; i < pd_count; i++) {
@@ -955,8 +957,8 @@ int ww_vk_create_owned(ww_vk_owned_t* out) {
         vkEnumerateDeviceExtensionProperties(pds[i], NULL, &ec, eprops);
 
         bool all = true;
-        for (uint32_t w = 0; w < want_n; w++) {
-            if (! ext_present(eprops, ec, want[w])) {
+        for (uint32_t w = 0; w < ww_vk_required_device_extension_count; w++) {
+            if (! ext_present(eprops, ec, ww_vk_required_device_extensions[w])) {
                 all = false;
                 break;
             }
@@ -1012,8 +1014,8 @@ int ww_vk_create_owned(ww_vk_owned_t* out) {
         .sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         .queueCreateInfoCount    = 1,
         .pQueueCreateInfos       = &qci,
-        .enabledExtensionCount   = want_n,
-        .ppEnabledExtensionNames = want,
+        .enabledExtensionCount   = ww_vk_required_device_extension_count,
+        .ppEnabledExtensionNames = ww_vk_required_device_extensions,
     };
     vr = vkCreateDevice(out->physical_device, &dci, NULL, &out->device);
     if (vr != VK_SUCCESS) {

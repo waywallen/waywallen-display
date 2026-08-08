@@ -1,5 +1,7 @@
+use std::fmt::Write;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 fn main() {
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
@@ -31,6 +33,11 @@ fn main() {
 
     let egl = cfg!(feature = "egl");
     let vulkan = cfg!(feature = "vulkan");
+    let layer_shell = cfg!(feature = "layer-shell");
+
+    if layer_shell {
+        compile_layer_shell_shaders(&manifest_dir, &out_dir);
+    }
 
     let mut build = cc::Build::new();
     build
@@ -92,6 +99,85 @@ fn main() {
     ] {
         println!("cargo:rerun-if-changed={f}");
     }
+}
+
+fn compile_layer_shell_shaders(manifest_dir: &Path, out_dir: &Path) {
+    let shader_dir = manifest_dir.join("src/bin/layer_shell/shaders");
+    let vertex_path = shader_dir.join("layer_shell.vert");
+    let fragment_path = shader_dir.join("layer_shell.frag");
+    let vertex = compile_shader(&vertex_path, "vert", out_dir);
+    let fragment = compile_shader(&fragment_path, "frag", out_dir);
+    let mut generated = String::new();
+    write_shader_words(&mut generated, "VERTEX_SHADER", &vertex);
+    write_shader_words(&mut generated, "FRAGMENT_SHADER", &fragment);
+    fs::write(out_dir.join("layer_shell_shaders.rs"), generated)
+        .expect("write generated layer-shell shaders");
+
+    println!("cargo:rerun-if-changed={}", vertex_path.display());
+    println!("cargo:rerun-if-changed={}", fragment_path.display());
+    println!("cargo:rerun-if-env-changed=GLSLANG_VALIDATOR");
+}
+
+fn compile_shader(input: &Path, stage: &str, out_dir: &Path) -> Vec<u32> {
+    let compiler =
+        std::env::var_os("GLSLANG_VALIDATOR").unwrap_or_else(|| "glslangValidator".into());
+    let output_path = out_dir.join(format!("layer_shell.{stage}.spv"));
+    let output = Command::new(&compiler)
+        .arg("-V")
+        .arg("--target-env")
+        .arg("vulkan1.1")
+        .arg("-S")
+        .arg(stage)
+        .arg("-o")
+        .arg(&output_path)
+        .arg(input)
+        .output()
+        .unwrap_or_else(|error| {
+            panic!(
+                "run {} for {}: {error}",
+                Path::new(&compiler).display(),
+                input.display()
+            )
+        });
+    if !output.status.success() {
+        panic!(
+            "{} failed for {}:\n{}{}",
+            Path::new(&compiler).display(),
+            input.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let bytes = fs::read(&output_path).expect("read compiled layer-shell shader");
+    assert!(
+        bytes.len() % 4 == 0,
+        "{} produced a malformed SPIR-V module",
+        input.display()
+    );
+    let words = bytes
+        .chunks_exact(4)
+        .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        words.first().copied(),
+        Some(0x0723_0203),
+        "{} produced a SPIR-V module with an invalid magic word",
+        input.display()
+    );
+    words
+}
+
+fn write_shader_words(output: &mut String, name: &str, words: &[u32]) {
+    writeln!(output, "const {name}: &[u32] = &[").unwrap();
+    for chunk in words.chunks(6) {
+        output.push_str("    ");
+        for word in chunk {
+            write!(output, "0x{word:08x}, ").unwrap();
+        }
+        output.push('\n');
+    }
+    output.push_str("];\n\n");
 }
 
 /// Probe pkg-config for header include dirs only — these libraries are

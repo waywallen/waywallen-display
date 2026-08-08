@@ -74,7 +74,6 @@ static int resolve_cmd_fns(ww_vk_blitter_t* b) {
     RESOLVE(vkResetFences, PFN_vkResetFences, "vkResetFences");
     RESOLVE(vkWaitForFences, PFN_vkWaitForFences, "vkWaitForFences");
     RESOLVE(vkQueueSubmit, PFN_vkQueueSubmit, "vkQueueSubmit");
-    RESOLVE(vkQueueWaitIdle, PFN_vkQueueWaitIdle, "vkQueueWaitIdle");
 
 #    undef RESOLVE
     return 0;
@@ -948,16 +947,6 @@ VkResult ww_vk_blitter_commit_candidate(ww_vk_blitter_t* b) {
     if (! b || ! b->initialized || b->candidate_image == VK_NULL_HANDLE ||
         ! b->candidate_has_content) {
         return VK_ERROR_INITIALIZATION_FAILED;
-    }
-
-    if (b->shadow_image != VK_NULL_HANDLE) {
-        VkResult vr = b->vkQueueWaitIdle(b->queue);
-        if (vr != VK_SUCCESS) {
-            ww_log(WAYWALLEN_LOG_ERROR,
-                   "vk blitter: vkQueueWaitIdle before shadow retirement failed: %s",
-                   ww_vk_result_str(vr));
-            return vr;
-        }
     }
 
     destroy_shadow_handles(b, b->shadow_image, b->shadow_mem);

@@ -1,5 +1,4 @@
-use crate::watcher::BindingRegistry;
-use crate::OutputBinding;
+use crate::watcher::{BindingRegistry, Command, CommandSender, OutputInfo};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
@@ -246,7 +245,7 @@ pub struct Resolution {
     height: f64,
 }
 
-pub fn spawn(registry: BindingRegistry) {
+pub fn spawn(registry: BindingRegistry, commands: CommandSender) {
     let Some(sock) = detect_socket() else {
         return;
     };
@@ -279,7 +278,7 @@ pub fn spawn(registry: BindingRegistry) {
                     if resp.result != "ok" {
                         log::error!("wayfire_watcher: compositor result: {}", resp.result)
                     } else {
-                        thread::spawn(move || run_loop(event_socket, registry));
+                        thread::spawn(move || run_loop(event_socket, registry, commands));
                     }
                 })
                 .unwrap_or_else(|error| log::error!("wayfire_watcher: read watch: {error}"));
@@ -308,7 +307,11 @@ fn get_output(event_socket: &mut WFSocket<impl Read + Write>, id: u32) -> Result
     event_socket.receive_response()
 }
 
-fn run_loop(mut event_socket: WFSocket<impl Read + Write>, registry: BindingRegistry) {
+fn run_loop(
+    mut event_socket: WFSocket<impl Read + Write>,
+    registry: BindingRegistry,
+    commands: CommandSender,
+) {
     loop {
         event_socket
             .receive_event()
@@ -319,13 +322,11 @@ fn run_loop(mut event_socket: WFSocket<impl Read + Write>, registry: BindingRegi
                             .lock()
                             .map(|registry| {
                                 let mut output_cache: HashMap<u32, Output> = HashMap::new();
-                                let mut display_flags: HashMap<
-                                    &String,
-                                    (u32, &Arc<OutputBinding>),
-                                > = registry
-                                    .iter()
-                                    .map(|(display_name, output)| (display_name, (0, output)))
-                                    .collect();
+                                let mut display_flags: HashMap<&String, (u32, &Arc<OutputInfo>)> =
+                                    registry
+                                        .iter()
+                                        .map(|(display_name, output)| (display_name, (0, output)))
+                                        .collect();
                                 for view in views {
                                     if view.minimized || !view.toplevel || !view.mapped {
                                         continue;
@@ -369,15 +370,12 @@ fn run_loop(mut event_socket: WFSocket<impl Read + Write>, registry: BindingRegi
                                     }
                                 }
                                 for (flags, output) in display_flags.values() {
-                                    output.with_display(|display| unsafe {
-                                        log::debug!(
-                                            "wayfire_watcher: layout {}: {flags} sent to server",
-                                            output.display_name
-                                        );
-                                        waywallen_display::waywallen_display_set_window_state(
-                                            display, *flags,
-                                        )
-                                    });
+                                    if output.replace_window_flags(*flags) {
+                                        commands.send(Command::WindowState {
+                                            display_name: output.display_name().to_string(),
+                                            flags: *flags,
+                                        });
+                                    }
                                 }
                             })
                             .unwrap_or_else(|error| {
