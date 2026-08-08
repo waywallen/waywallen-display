@@ -239,6 +239,7 @@ struct waywallen_display {
 #endif
 #ifdef WW_HAVE_VULKAN
     ww_vk_backend_t         vk_backend;
+    VkQueue                 vk_host_queue;
     uint32_t                vk_import_count;
     ww_vk_imported_image_t* vk_images;     /* length = vk_import_count */
     VkSemaphore*            vk_semaphores; /* one per buffer slot */
@@ -316,6 +317,10 @@ static waywallen_presentation_snapshot_t presentation_reset_snapshot(void) {
 }
 
 static void outbox_reset_queue(waywallen_display_t* d);
+static int  acknowledge_frame_release(waywallen_display_t* d, uint64_t buffer_generation,
+                                      uint64_t seq);
+static int resolve_frame_without_gpu(waywallen_display_t* d, int release_syncobj_fd,
+                                     uint64_t buffer_generation, uint64_t seq, const char* context);
 
 static bool presentation_snapshot_valid(const waywallen_presentation_snapshot_t* presentation) {
     if (! presentation) return false;
@@ -645,7 +650,6 @@ static int enc_ack_unbind(const void* m, ww_buf_t* out) {
 /* Consumer capability bits mirrored from the daemon's public v8 schema. */
 #define WW_MEM_HINT_DEVICE_LOCAL (1u << 0)
 #define WW_MEM_HINT_HOST_VISIBLE (1u << 1)
-#define WW_MEM_HINT_LINEAR_ONLY  (1u << 4)
 #define WW_SYNC_SYNCOBJ_BINARY   (1u << 1)
 #define WW_SYNC_SYNCOBJ_TIMELINE (1u << 2)
 #define WW_COLOR_ENC_SRGB        (1u << 0)
@@ -788,14 +792,8 @@ static int build_consumer_caps(waywallen_display_t* d, ww_consumer_caps_storage_
     case WAYWALLEN_BACKEND_VULKAN:
     case WAYWALLEN_BACKEND_DMABUF_RELAY:
         if (d->vk_backend.loaded) {
-            /* Consumer's blit-out path imports the dma-buf as
-             * TRANSFER_SRC and samples from a host-owned shadow image,
-             * so the modifier must support both feature bits. SAMPLED
-             * stays in the mask because some drivers only return the
-             * right modifier sub-layout when both bits are present.
-             * DMABUF_RELAY uses the same import path internally — its
-             * vk_backend is loaded against the library's owned device,
-             * so the same probe applies. */
+            /* Both the direct-sampling and blit-out paths use this
+             * modifier contract. */
             const uint32_t want_features =
                 VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT;
             probe_rc =
@@ -853,21 +851,6 @@ static int build_consumer_caps(waywallen_display_t* d, ww_consumer_caps_storage_
         memcpy(&storage->driver_uuid[i], drv_uuid_bytes + i * 4, 4);
     }
 
-    /* LINEAR_ONLY: every advertised modifier is DRM_FORMAT_MOD_LINEAR.
-     * Covers both the probe-failed fallback (we just emitted ABGR/XRGB
-     * + LINEAR above) and the case where the driver only reports
-     * LINEAR for the formats it advertises. Telling the daemon
-     * up-front avoids a failed import and renegotiation round-trip when the producer
-     * happens to live on the same vendor and would otherwise have
-     * tried a tile modifier. */
-    bool linear_only = (buf->n > 0);
-    for (size_t i = 0; i < buf->n; ++i) {
-        if (buf->modifiers[i] != WW_DRM_FORMAT_MOD_LINEAR) {
-            linear_only = false;
-            break;
-        }
-    }
-
     waywallen_consumer_capabilities_t* caps = &storage->caps;
     caps->fourccs.count                     = (uint32_t)grp_n;
     caps->fourccs.data                      = storage->grouped_fourccs;
@@ -883,9 +866,8 @@ static int build_consumer_caps(waywallen_display_t* d, ww_consumer_caps_storage_
     caps->driver_uuid.data                  = storage->driver_uuid;
     caps->drm_render_major                  = d->hs_drm_render_major;
     caps->drm_render_minor                  = d->hs_drm_render_minor;
-    caps->mem_hints = WW_MEM_HINT_HOST_VISIBLE |
-                      (advertise_device_local ? WW_MEM_HINT_DEVICE_LOCAL : 0u) |
-                      (linear_only ? WW_MEM_HINT_LINEAR_ONLY : 0u);
+    caps->mem_hints =
+        WW_MEM_HINT_HOST_VISIBLE | (advertise_device_local ? WW_MEM_HINT_DEVICE_LOCAL : 0u);
     /* sync_caps: consumer-side release/wait always lands on the kernel
      * drm_syncobj ioctl path (`waywallen_display_signal_release_syncobj`
      * + `vk/egl_wait_sync_fd`); both BINARY and TIMELINE are always
@@ -1071,12 +1053,37 @@ int waywallen_display_bind_vulkan(waywallen_display_t* d, const waywallen_vk_ctx
                                 (VkDevice)ctx->device,
                                 ctx->queue_family_index,
                                 (ww_vk_get_instance_proc_addr_fn)ctx->vk_get_instance_proc_addr,
-                                true);
+                                false);
     if (rc != 0) {
         ww_log(WAYWALLEN_LOG_WARN, "vk backend load failed: %d", rc);
         memset(&d->vk_backend, 0, sizeof(d->vk_backend));
     } else {
-        ww_log(WAYWALLEN_LOG_INFO, "vk backend loaded");
+        ww_log(WAYWALLEN_LOG_INFO,
+               "vk backend loaded (instance=%p physical_device=%p device=%p qfi=%u)",
+               ctx->instance,
+               ctx->physical_device,
+               ctx->device,
+               ctx->queue_family_index);
+        PFN_vkGetDeviceQueue get_device_queue =
+            (PFN_vkGetDeviceQueue)d->vk_backend.vkGetDeviceProcAddr((VkDevice)ctx->device,
+                                                                    "vkGetDeviceQueue");
+        if (! get_device_queue) {
+            ww_log(WAYWALLEN_LOG_WARN, "vkGetDeviceQueue unavailable");
+            ww_vk_backend_unload(&d->vk_backend);
+            memset(&d->vk_backend, 0, sizeof(d->vk_backend));
+            d->backend = WAYWALLEN_BACKEND_NONE;
+            memset(&d->vk, 0, sizeof(d->vk));
+            return WAYWALLEN_ERR_NOT_IMPL;
+        }
+        get_device_queue((VkDevice)ctx->device, ctx->queue_family_index, 0, &d->vk_host_queue);
+        if (d->vk_host_queue == VK_NULL_HANDLE) {
+            ww_log(WAYWALLEN_LOG_WARN, "vkGetDeviceQueue returned NULL");
+            ww_vk_backend_unload(&d->vk_backend);
+            memset(&d->vk_backend, 0, sizeof(d->vk_backend));
+            d->backend = WAYWALLEN_BACKEND_NONE;
+            memset(&d->vk, 0, sizeof(d->vk));
+            return WAYWALLEN_ERR_STATE;
+        }
         if (d->hs_drm_render_major == 0 && d->hs_drm_render_minor == 0) {
             uint32_t major = 0, minor = 0;
             int      qrc = ww_vk_query_drm_render_node(&d->vk_backend, &major, &minor);
@@ -1093,6 +1100,160 @@ int waywallen_display_bind_vulkan(waywallen_display_t* d, const waywallen_vk_ctx
     }
 #endif
     return WAYWALLEN_OK;
+}
+
+int waywallen_display_vulkan_requirements(waywallen_vk_requirements_t* out) {
+    if (! out) return WAYWALLEN_ERR_INVAL;
+#ifdef WW_HAVE_VULKAN
+    *out = (waywallen_vk_requirements_t) {
+        .api_version            = VK_API_VERSION_1_1,
+        .device_extensions      = ww_vk_required_device_extensions,
+        .device_extension_count = ww_vk_required_device_extension_count,
+        .imported_image_usage =
+            (uint32_t)(VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT),
+        .imported_image_layout       = (uint32_t)VK_IMAGE_LAYOUT_GENERAL,
+        .external_queue_family_index = VK_QUEUE_FAMILY_FOREIGN_EXT,
+    };
+    return WAYWALLEN_OK;
+#else
+    memset(out, 0, sizeof(*out));
+    return WAYWALLEN_ERR_NOT_IMPL;
+#endif
+}
+
+int waywallen_display_vulkan_direct_frame(waywallen_display_t* d, const waywallen_frame_t* frame,
+                                          waywallen_vk_direct_frame_t* out) {
+    if (! d || ! frame || ! out) return WAYWALLEN_ERR_INVAL;
+    memset(out, 0, sizeof(*out));
+#ifdef WW_HAVE_VULKAN
+    if (d->backend != WAYWALLEN_BACKEND_VULKAN || ! d->vk_backend.loaded || ! d->bound.valid ||
+        frame->buffer_generation != d->bound.generation ||
+        frame->buffer_index >= d->vk_import_count || ! d->vk_images ||
+        d->vk_images[frame->buffer_index].image == VK_NULL_HANDLE ||
+        frame->vk_acquire_semaphore == NULL) {
+        return WAYWALLEN_ERR_STATE;
+    }
+    const waywallen_textures_t* textures = &d->bound.binding.textures;
+    out->image                           = (void*)d->vk_images[frame->buffer_index].image;
+    out->format                          = (uint32_t)ww_fourcc_to_vk_format(textures->fourcc);
+    out->width                           = textures->tex_width;
+    out->height                          = textures->tex_height;
+    out->layout                          = (uint32_t)VK_IMAGE_LAYOUT_GENERAL;
+    out->external_queue_family_index     = VK_QUEUE_FAMILY_FOREIGN_EXT;
+    if (out->format == (uint32_t)VK_FORMAT_UNDEFINED) {
+        memset(out, 0, sizeof(*out));
+        return WAYWALLEN_ERR_NOT_IMPL;
+    }
+    return WAYWALLEN_OK;
+#else
+    (void)d;
+    (void)frame;
+    return WAYWALLEN_ERR_NOT_IMPL;
+#endif
+}
+
+int waywallen_display_vulkan_consume_frame(waywallen_display_t* d, const waywallen_frame_t* frame,
+                                           waywallen_vk_sampled_frame_t* out) {
+    if (! d || ! frame || ! out) return WAYWALLEN_ERR_INVAL;
+    memset(out, 0, sizeof(*out));
+#ifdef WW_HAVE_VULKAN
+    if (d->backend != WAYWALLEN_BACKEND_VULKAN || ! d->vk_backend.loaded ||
+        d->vk_host_queue == VK_NULL_HANDLE || ! d->bound.valid ||
+        frame->buffer_generation != d->bound.generation ||
+        frame->buffer_index >= d->vk_import_count || ! d->vk_images ||
+        frame->vk_acquire_semaphore == NULL) {
+        if (frame->release_syncobj_fd >= 0) {
+            (void)resolve_frame_without_gpu(d,
+                                            frame->release_syncobj_fd,
+                                            frame->buffer_generation,
+                                            frame->seq,
+                                            "invalid Vulkan frame release failed");
+        }
+        return WAYWALLEN_ERR_STATE;
+    }
+    if (! ww_vk_blitter_initialized(&d->vk_blitter)) {
+        int init_rc =
+            ww_vk_blitter_init(&d->vk_blitter,
+                               (VkInstance)d->vk.instance,
+                               (VkPhysicalDevice)d->vk.physical_device,
+                               (VkDevice)d->vk.device,
+                               d->vk.queue_family_index,
+                               d->vk_host_queue,
+                               (ww_vk_get_instance_proc_addr_fn)d->vk.vk_get_instance_proc_addr);
+        if (init_rc != 0) {
+            if (frame->release_syncobj_fd >= 0) {
+                (void)resolve_frame_without_gpu(d,
+                                                frame->release_syncobj_fd,
+                                                frame->buffer_generation,
+                                                frame->seq,
+                                                "Vulkan blitter init release failed");
+            }
+            return WAYWALLEN_ERR_NOT_IMPL;
+        }
+    }
+
+    const waywallen_textures_t* textures        = &d->bound.binding.textures;
+    bool                        candidate_ready = false;
+    bool                        release_armed   = false;
+    int                         rc = ww_vk_blitter_prepare(&d->vk_blitter,
+                                                           d->vk_images[frame->buffer_index].image,
+                                                           textures->tex_width,
+                                                           textures->tex_height,
+                                                           textures->fourcc,
+                                                           false,
+                                                           (VkSemaphore)frame->vk_acquire_semaphore,
+                                                           frame->release_syncobj_fd,
+                                                           &candidate_ready,
+                                                           &release_armed);
+    if (release_armed &&
+        acknowledge_frame_release(d, frame->buffer_generation, frame->seq) != WAYWALLEN_OK) {
+        if (candidate_ready) (void)ww_vk_blitter_discard_candidate(&d->vk_blitter);
+        return WAYWALLEN_ERR_IO;
+    }
+    if (rc != 0) {
+        if (candidate_ready) (void)ww_vk_blitter_discard_candidate(&d->vk_blitter);
+        return WAYWALLEN_ERR_IO;
+    }
+    out->image     = (void*)(candidate_ready ? ww_vk_blitter_candidate(&d->vk_blitter)
+                                             : ww_vk_blitter_shadow(&d->vk_blitter));
+    out->format    = (uint32_t)ww_fourcc_to_vk_format(textures->fourcc);
+    out->width     = textures->tex_width;
+    out->height    = textures->tex_height;
+    out->layout    = (uint32_t)ww_vk_blitter_shadow_layout(&d->vk_blitter);
+    out->candidate = candidate_ready;
+    return out->image != NULL ? WAYWALLEN_OK : WAYWALLEN_ERR_IO;
+#else
+    (void)d;
+    (void)frame;
+    return WAYWALLEN_ERR_NOT_IMPL;
+#endif
+}
+
+int waywallen_display_vulkan_commit_sampled_frame(waywallen_display_t* d) {
+#ifdef WW_HAVE_VULKAN
+    if (! d || d->backend != WAYWALLEN_BACKEND_VULKAN ||
+        ! ww_vk_blitter_initialized(&d->vk_blitter)) {
+        return WAYWALLEN_ERR_STATE;
+    }
+    return ww_vk_blitter_commit_candidate(&d->vk_blitter) == VK_SUCCESS ? WAYWALLEN_OK
+                                                                        : WAYWALLEN_ERR_IO;
+#else
+    (void)d;
+    return WAYWALLEN_ERR_NOT_IMPL;
+#endif
+}
+
+int waywallen_display_vulkan_discard_sampled_frame(waywallen_display_t* d) {
+#ifdef WW_HAVE_VULKAN
+    if (! d || d->backend != WAYWALLEN_BACKEND_VULKAN ||
+        ! ww_vk_blitter_initialized(&d->vk_blitter)) {
+        return WAYWALLEN_ERR_STATE;
+    }
+    return ww_vk_blitter_discard_candidate(&d->vk_blitter) == 0 ? WAYWALLEN_OK : WAYWALLEN_ERR_IO;
+#else
+    (void)d;
+    return WAYWALLEN_ERR_NOT_IMPL;
+#endif
 }
 
 int waywallen_display_bind_dmabuf_relay(waywallen_display_t* d) {
@@ -2903,9 +3064,10 @@ void waywallen_display_close(waywallen_display_t* d) {
     }
     fire_textures_releasing_if_any(d);
 #ifdef WW_HAVE_VULKAN
-    /* DMABUF_RELAY: tear down the lib-owned VK stack here while we
-     * still hold the only thread that's been touching it. Order:
-     * blitter (uses vk_backend) → vk_backend unload → owned destroy. */
+    if (d->backend == WAYWALLEN_BACKEND_VULKAN && ww_vk_blitter_initialized(&d->vk_blitter)) {
+        ww_vk_blitter_shutdown(&d->vk_blitter);
+    }
+    /* DMABUF_RELAY owns the complete Vulkan stack. */
     if (d->backend == WAYWALLEN_BACKEND_DMABUF_RELAY) {
         ww_vk_blitter_shutdown(&d->vk_blitter);
         ww_vk_backend_unload(&d->vk_backend);

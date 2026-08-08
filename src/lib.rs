@@ -106,6 +106,17 @@ pub struct waywallen_vk_ctx_t {
         Option<unsafe extern "C" fn(instance: *mut c_void, name: *const c_char) -> *mut c_void>,
 }
 
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct waywallen_vk_requirements_t {
+    pub api_version: u32,
+    pub device_extensions: *const *const c_char,
+    pub device_extension_count: u32,
+    pub imported_image_usage: u32,
+    pub imported_image_layout: u32,
+    pub external_queue_family_index: u32,
+}
+
 // -----------------------------------------------------------------------------
 // Callback payloads
 // -----------------------------------------------------------------------------
@@ -182,6 +193,28 @@ pub struct waywallen_frame_t {
     pub vk_acquire_semaphore: *mut c_void,
     pub release_syncobj_fd: c_int,
     pub buffer_generation: u64,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default)]
+pub struct waywallen_vk_sampled_frame_t {
+    pub image: *mut c_void,
+    pub format: u32,
+    pub width: u32,
+    pub height: u32,
+    pub layout: u32,
+    pub candidate: bool,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default)]
+pub struct waywallen_vk_direct_frame_t {
+    pub image: *mut c_void,
+    pub format: u32,
+    pub width: u32,
+    pub height: u32,
+    pub layout: u32,
+    pub external_queue_family_index: u32,
 }
 
 #[repr(C)]
@@ -346,6 +379,19 @@ extern "C" {
         d: *mut waywallen_display_t,
         ctx: *const waywallen_vk_ctx_t,
     ) -> c_int;
+    pub fn waywallen_display_vulkan_requirements(out: *mut waywallen_vk_requirements_t) -> c_int;
+    pub fn waywallen_display_vulkan_direct_frame(
+        d: *mut waywallen_display_t,
+        frame: *const waywallen_frame_t,
+        out: *mut waywallen_vk_direct_frame_t,
+    ) -> c_int;
+    pub fn waywallen_display_vulkan_consume_frame(
+        d: *mut waywallen_display_t,
+        frame: *const waywallen_frame_t,
+        out: *mut waywallen_vk_sampled_frame_t,
+    ) -> c_int;
+    pub fn waywallen_display_vulkan_commit_sampled_frame(d: *mut waywallen_display_t) -> c_int;
+    pub fn waywallen_display_vulkan_discard_sampled_frame(d: *mut waywallen_display_t) -> c_int;
     pub fn waywallen_display_bind_dmabuf_relay(d: *mut waywallen_display_t) -> c_int;
 
     pub fn waywallen_display_set_drm_render_node(

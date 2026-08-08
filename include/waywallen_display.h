@@ -187,15 +187,24 @@ typedef struct waywallen_egl_ctx {
 } waywallen_egl_ctx_t;
 
 typedef struct waywallen_vk_ctx {
-    void*    instance;        /* VkInstance */
-    void*    physical_device; /* VkPhysicalDevice */
-    void*    device;          /* VkDevice */
-    uint32_t queue_family_index;
+    void*    instance;           /* VkInstance */
+    void*    physical_device;    /* VkPhysicalDevice */
+    void*    device;             /* VkDevice */
+    uint32_t queue_family_index; /* consume_frame submits to queue index 0 */
     /* PFN_vkGetInstanceProcAddr. May be NULL — the backend will then
      * dlopen("libvulkan.so.1") and resolve vkGetInstanceProcAddr from
      * there. The library never links libvulkan.so directly. */
     void* (*vk_get_instance_proc_addr)(void* instance, const char* name);
 } waywallen_vk_ctx_t;
+
+typedef struct waywallen_vk_requirements {
+    uint32_t           api_version;
+    const char* const* device_extensions;
+    uint32_t           device_extension_count;
+    uint32_t           imported_image_usage;
+    uint32_t           imported_image_layout;
+    uint32_t           external_queue_family_index;
+} waywallen_vk_requirements_t;
 
 /* -------------------------------------------------------------------------
  * Callback payloads
@@ -269,6 +278,24 @@ typedef struct waywallen_frame {
     int      release_syncobj_fd;
     uint64_t buffer_generation;
 } waywallen_frame_t;
+
+typedef struct waywallen_vk_sampled_frame {
+    void*    image; /* VkImage, owned by the display session */
+    uint32_t format;
+    uint32_t width;
+    uint32_t height;
+    uint32_t layout;
+    bool     candidate;
+} waywallen_vk_sampled_frame_t;
+
+typedef struct waywallen_vk_direct_frame {
+    void*    image; /* Imported VkImage, owned by the display session */
+    uint32_t format;
+    uint32_t width;
+    uint32_t height;
+    uint32_t layout;
+    uint32_t external_queue_family_index;
+} waywallen_vk_direct_frame_t;
 
 /* -------------------------------------------------------------------------
  * Callback table
@@ -344,6 +371,35 @@ void waywallen_display_shutdown(waywallen_display_t* d);
 
 int waywallen_display_bind_egl(waywallen_display_t* d, const waywallen_egl_ctx_t* ctx);
 int waywallen_display_bind_vulkan(waywallen_display_t* d, const waywallen_vk_ctx_t* ctx);
+
+/* Requirements for a host-owned Vulkan device used by bind_vulkan.
+ * The returned extension array is immutable and library-owned. Vulkan
+ * enum values are exposed as uint32_t so this header stays loader-only. */
+int waywallen_display_vulkan_requirements(waywallen_vk_requirements_t* out);
+
+/* Resolve a frame to its imported image for direct sampling. The host waits
+ * frame.vk_acquire_semaphore, acquires the image from the returned external
+ * queue family/layout, draws it, returns ownership/layout, and only then
+ * resolves frame.release_syncobj_fd and acknowledges the frame release.
+ * This query never consumes frame.release_syncobj_fd. */
+int waywallen_display_vulkan_direct_frame(waywallen_display_t* d, const waywallen_frame_t* frame,
+                                          waywallen_vk_direct_frame_t* out);
+
+/* Consume a Vulkan frame into a sampler-friendly optimal image. This
+ * function waits for the producer acquire semaphore, performs the copy,
+ * arms the daemon release syncobj, and consumes frame.release_syncobj_fd.
+ * The returned image stays owned by the display session. A candidate remains
+ * valid until commit/discard; a committed image remains valid until a later
+ * candidate is committed or the display shuts down. Queue access is
+ * externally synchronized by the host. */
+int waywallen_display_vulkan_consume_frame(waywallen_display_t* d, const waywallen_frame_t* frame,
+                                           waywallen_vk_sampled_frame_t* out);
+
+/* Complete or discard a candidate returned by consume_frame. Before commit,
+ * the host waits for submissions referencing the previous image, creates the
+ * replacement image view, then releases every view of the previous image. */
+int waywallen_display_vulkan_commit_sampled_frame(waywallen_display_t* d);
+int waywallen_display_vulkan_discard_sampled_frame(waywallen_display_t* d);
 
 /*
  * Library creates+owns a private Vulkan instance/device/queue,
@@ -516,10 +572,10 @@ int waywallen_display_dispatch(waywallen_display_t* d);
  * waiting on this fd; signaling it lets the producer reuse the
  * buffer slot.
  *
- * Hosts with a Vulkan release fence should NOT call this — instead
- * import `release_syncobj_fd` as a binary VkSemaphore via
- * `vkImportSemaphoreFdKHR(VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT)`
- * and add it to the signal-semaphore list of the consume submit.
+ * Hosts with a Vulkan release fence should NOT call this. Signal an
+ * exportable SYNC_FD semaphore from the consume submit, export its
+ * sync_file, and pass both descriptors to
+ * waywallen_display_release_after_sync_file().
  *
  * `fd` ownership transfers in: closed on every return path.
  * Returns 0 on success or a negative `waywallen_err_t` on failure

@@ -16,6 +16,7 @@ default = ["egl", "vulkan", "layer-shell"]
 egl = []
 vulkan = []
 layer-shell = [
+    "dep:ash",
     "dep:anyhow",
     "dep:thiserror",
     "dep:env_logger",
@@ -32,6 +33,7 @@ layer-shell = [
 ]
 
 [dependencies]
+ash = { version = "0.38", optional = true }
 anyhow = { version = "1.0", optional = true }
 thiserror = { version = "2.0.18", optional = true }
 env_logger = { version = "0.10", optional = true }
@@ -40,7 +42,7 @@ libc = { version = "0.2", optional = true }
 log = { version = "0.4", optional = true }
 serde = { version = "1.0", features = ["derive"], optional = true }
 serde_json = { version = "1.0", optional = true }
-wayland-client = { version = "0.31", optional = true }
+wayland-client = { version = "0.31", features = ["system"], optional = true }
 wayland-protocols = { version = "0.32", features = ["client", "unstable", "staging"], optional = true }
 wayland-protocols-wlr = { version = "0.3", features = ["client"], optional = true }
 niri-ipc = { version = "26.4.0", optional = true }

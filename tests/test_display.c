@@ -1103,10 +1103,9 @@ static void test_unknown_pause_effect_kind_is_protocol_error(void) {
 /* No backend bound → consumer_caps probe falls through to the
  * hardcoded ABGR/XRGB + LINEAR fallback. The library should:
  *   - set HOST_VISIBLE in mem_hints (always)
- *   - set LINEAR_ONLY in mem_hints (every advertised modifier is LINEAR)
  *   - leave DEVICE_LOCAL clear (no Vulkan probe ran)
  *   - advertise both BINARY+TIMELINE in sync_caps unconditionally */
-static void test_consumer_caps_signals_linear_only_when_no_backend(void) {
+static void test_consumer_caps_without_backend(void) {
     struct test_state ts;
     ts_init(&ts);
     pthread_t srv = spawn_server(&ts, handler_full_handshake_capture_caps);
@@ -1123,14 +1122,11 @@ static void test_consumer_caps_signals_linear_only_when_no_backend(void) {
 
     const uint32_t WW_MEM_HINT_DEVICE_LOCAL = 1u << 0;
     const uint32_t WW_MEM_HINT_HOST_VISIBLE = 1u << 1;
-    const uint32_t WW_MEM_HINT_LINEAR_ONLY  = 1u << 4;
     const uint32_t WW_SYNC_SYNCOBJ_BINARY   = 1u << 1;
     const uint32_t WW_SYNC_SYNCOBJ_TIMELINE = 1u << 2;
 
     assert((ts.consumer_caps_mem_hints & WW_MEM_HINT_HOST_VISIBLE) != 0 &&
            "expected HOST_VISIBLE in mem_hints");
-    assert((ts.consumer_caps_mem_hints & WW_MEM_HINT_LINEAR_ONLY) != 0 &&
-           "expected LINEAR_ONLY in mem_hints (no backend → fallback)");
     assert((ts.consumer_caps_mem_hints & WW_MEM_HINT_DEVICE_LOCAL) == 0 &&
            "DEVICE_LOCAL must not be advertised without Vulkan probe");
     assert((ts.consumer_caps_sync_caps & (WW_SYNC_SYNCOBJ_BINARY | WW_SYNC_SYNCOBJ_TIMELINE)) ==
@@ -1140,7 +1136,7 @@ static void test_consumer_caps_signals_linear_only_when_no_backend(void) {
     waywallen_display_close(d);
     waywallen_display_free(d);
     ts_teardown(&ts);
-    printf("  ok test_consumer_caps_signals_linear_only_when_no_backend "
+    printf("  ok test_consumer_caps_without_backend "
            "(mem_hints=0x%x sync_caps=0x%x)\n",
            ts.consumer_caps_mem_hints,
            ts.consumer_caps_sync_caps);
@@ -1408,6 +1404,27 @@ static void test_configured_backend_import_failure_is_reported(void) {
     printf("  ok test_configured_backend_import_failure_is_reported\n");
 }
 
+static void test_vulkan_requirements_are_complete(void) {
+    waywallen_vk_requirements_t requirements = { 0 };
+    int                         rc           = waywallen_display_vulkan_requirements(&requirements);
+    if (rc == WAYWALLEN_ERR_NOT_IMPL) return;
+    assert(rc == WAYWALLEN_OK);
+    assert(requirements.api_version != 0);
+    assert(requirements.imported_image_usage != 0);
+    assert(requirements.imported_image_layout != 0);
+    assert(requirements.device_extensions != NULL);
+
+    int has_image_format_list = 0;
+    for (uint32_t i = 0; i < requirements.device_extension_count; ++i) {
+        assert(requirements.device_extensions[i] != NULL);
+        if (strcmp(requirements.device_extensions[i], "VK_KHR_image_format_list") == 0) {
+            has_image_format_list = 1;
+        }
+    }
+    assert(has_image_format_list);
+    printf("  ok test_vulkan_requirements_are_complete\n");
+}
+
 static void test_outbox_prioritizes_lifecycle_and_replaces_state(void) {
     struct test_state ts;
     ts_init(&ts);
@@ -1541,7 +1558,7 @@ int main(void) {
     test_cross_generation_state_is_protocol_error();
     test_invalid_presentation_radius_is_protocol_error();
     test_unknown_pause_effect_kind_is_protocol_error();
-    test_consumer_caps_signals_linear_only_when_no_backend();
+    test_consumer_caps_without_backend();
     test_partial_welcome();
     test_server_closes_during_welcome_wait();
     test_server_sends_error_event();
@@ -1553,6 +1570,7 @@ int main(void) {
     test_set_composition_while_idle_is_protocol_error();
     test_unbind_is_valid_for_atomic_binding();
     test_configured_backend_import_failure_is_reported();
+    test_vulkan_requirements_are_complete();
     test_outbox_prioritizes_lifecycle_and_replaces_state();
     test_buffer_generation_restarts_on_new_connection();
     test_frame_release_armed_round_trip();

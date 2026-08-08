@@ -3,13 +3,11 @@ use std::io::{BufRead, BufReader};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use crate::watcher::{handle_return_code, BindingRegistry};
-use crate::OutputBinding;
+use crate::watcher::{BindingRegistry, Command as WatcherCommand, CommandSender, OutputInfo};
 use waywallen_display::{
     WAYWALLEN_WIN_HAS_ACTIVE, WAYWALLEN_WIN_HAS_FULLSCREEN, WAYWALLEN_WIN_HAS_MAXIMIZED,
     WAYWALLEN_WIN_HAS_NON_MINIMIZED,
@@ -29,23 +27,23 @@ pub fn detect_socket() -> Option<PathBuf> {
     }
 }
 
-pub fn spawn(registry: BindingRegistry) {
+pub fn spawn(registry: BindingRegistry, commands: CommandSender) {
     let Some(sock) = detect_socket() else {
         return;
     };
     log::info!("hyprland_watcher: enabled (socket={})", sock.display());
-    thread::spawn(move || run_loop(sock, registry));
+    thread::spawn(move || run_loop(sock, registry, commands));
 }
 
-fn run_loop(socket_path: PathBuf, registry: BindingRegistry) {
+fn run_loop(socket_path: PathBuf, registry: BindingRegistry, commands: CommandSender) {
     loop {
         match UnixStream::connect(&socket_path) {
             Ok(stream) => {
-                push_state(&registry);
+                push_state(&registry, &commands);
                 let reader = BufReader::new(stream);
                 for line in reader.lines() {
                     match line {
-                        Ok(_) => push_state(&registry),
+                        Ok(_) => push_state(&registry, &commands),
                         Err(e) => {
                             log::warn!("hyprland_watcher: read error: {e}");
                             break;
@@ -59,7 +57,7 @@ fn run_loop(socket_path: PathBuf, registry: BindingRegistry) {
     }
 }
 
-fn push_state(registry: &BindingRegistry) {
+fn push_state(registry: &BindingRegistry, commands: &CommandSender) {
     let snapshot = match hyprctl_snapshot() {
         Ok(v) => v,
         Err(e) => {
@@ -68,22 +66,16 @@ fn push_state(registry: &BindingRegistry) {
         }
     };
     let by_output = aggregate_flags(&snapshot);
-    let bindings: Vec<Arc<OutputBinding>> = registry.lock().unwrap().values().cloned().collect();
+    let bindings: Vec<Arc<OutputInfo>> = registry.lock().unwrap().values().cloned().collect();
     for binding in bindings {
         let flags = by_output.get(binding.display_name()).copied().unwrap_or(0);
-        let prev = binding.window_flags().swap(flags, Ordering::SeqCst);
-        if prev == flags {
+        if !binding.replace_window_flags(flags) {
             continue;
         }
-        if !binding.is_registered() {
-            continue;
-        }
-        let rc = binding.with_display(|d| unsafe {
-            waywallen_display::waywallen_display_set_window_state(d, flags)
+        commands.send(WatcherCommand::WindowState {
+            display_name: binding.display_name().to_string(),
+            flags,
         });
-        if let Some(rc) = rc {
-            handle_return_code("hyprland_watcher", rc, flags, &binding);
-        }
     }
 }
 

@@ -49,7 +49,6 @@ typedef struct ww_vk_blitter {
     PFN_vkResetFences            vkResetFences;
     PFN_vkWaitForFences          vkWaitForFences;
     PFN_vkQueueSubmit            vkQueueSubmit;
-    PFN_vkQueueWaitIdle          vkQueueWaitIdle;
 
     /* Resolved lazily on first ensure_shadow_exportable; NULL when the
      * relay path was never used. Required only for DMABUF_RELAY. */
@@ -177,9 +176,8 @@ int ww_vk_blitter_prepare(ww_vk_blitter_t* b, VkImage imported, uint32_t w, uint
                           int release_syncobj_fd, bool* out_candidate_ready,
                           bool* out_release_armed);
 
-/* Promote a prepared candidate after the host has rebound its native
- * texture wrapper. Waits for the exact host graphics queue to become
- * idle before destroying the previous image and allocation. */
+/* Promote a prepared candidate after the host has completed submissions
+ * referencing the previous image and released its image views. */
 VkResult ww_vk_blitter_commit_candidate(ww_vk_blitter_t* b);
 
 /* Destroy a prepared candidate without changing the current shadow.
