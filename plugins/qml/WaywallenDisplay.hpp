@@ -224,12 +224,8 @@ private:
     void                                    setupDBusWatcher();
     void                                    flushPendingRelease();
     void                                    handleDisconnect(int errCode, const char* msg);
-    // Single-shot backoff fallback for when the DBus NameOwnerChanged /
-    // Ready signals are missed (e.g. the daemon was already up and
-    // Ready before setupDBusWatcher subscribed). No-op if already
-    // connected/handshaking, auto-reconnect is off, or a retry is
-    // already pending. Delay doubles up to a cap each time it fires;
-    // resets once a connection succeeds.
+    // Backoff fallback for missed NameOwnerChanged / Ready signals
+    // (e.g. daemon already up before setupDBusWatcher subscribed).
     void                                    scheduleReconnectBackoff();
     void     applyPresentationSnapshot(const waywallen_presentation_snapshot_t& presentation);
     void     applyPresentationState(const waywallen_presentation_state_t& state);
@@ -328,8 +324,6 @@ private:
     uint32_t m_lastPushedRefreshMhz { 0 };
 
     // Backoff fallback for reconnect (see scheduleReconnectBackoff).
-    // Single-shot; delay doubles on each failure up to a cap and
-    // resets to the initial value once connected.
     QTimer m_reconnectTimer;
     int    m_reconnectDelayMs { 2000 };
 

@@ -32,12 +32,9 @@
 Q_LOGGING_CATEGORY(lcWD, "waywallen.display")
 
 namespace {
-// Backoff bounds for the reconnect fallback timer (see
-// WaywallenDisplay::scheduleReconnectBackoff). Mirrors the layer-shell
-// client's reconnect schedule (src/bin/layer_shell/main.rs).
 constexpr int kReconnectInitialDelayMs = 2000;
 constexpr int kReconnectMaxDelayMs     = 30000;
-} // namespace
+}
 
 class RenderSessionResources {
 public:
@@ -958,10 +955,6 @@ void WaywallenDisplay::setConnState(ConnState s) {
     m_connState = s;
     emit connStateChanged();
     if (s == Connected) {
-        // A healthy connection means any prior backoff was
-        // pessimistic; drop the pending timer (if any) and reset the
-        // delay so the next disconnect starts fast again instead of
-        // inheriting a stretched-out delay from an old outage.
         m_reconnectTimer.stop();
         m_reconnectDelayMs = kReconnectInitialDelayMs;
     }
