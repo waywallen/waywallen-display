@@ -7,7 +7,7 @@ static constexpr int kMaxMs     = 30000;
 
 static int advance(int& delay) {
     const int d = delay;
-    delay        = std::min(d * 2, kMaxMs);
+    delay       = std::min(d * 2, kMaxMs);
     return d;
 }
 

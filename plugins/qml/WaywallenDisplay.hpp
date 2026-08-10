@@ -226,7 +226,7 @@ private:
     void                                    handleDisconnect(int errCode, const char* msg);
     // Backoff fallback for missed NameOwnerChanged / Ready signals
     // (e.g. daemon already up before setupDBusWatcher subscribed).
-    void                                    scheduleReconnectBackoff();
+    void     scheduleReconnectBackoff();
     void     applyPresentationSnapshot(const waywallen_presentation_snapshot_t& presentation);
     void     applyPresentationState(const waywallen_presentation_state_t& state);
     void     resetPresentation();

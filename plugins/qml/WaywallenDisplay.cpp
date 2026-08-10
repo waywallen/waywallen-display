@@ -31,10 +31,11 @@
 
 Q_LOGGING_CATEGORY(lcWD, "waywallen.display")
 
-namespace {
+namespace
+{
 constexpr int kReconnectInitialDelayMs = 2000;
 constexpr int kReconnectMaxDelayMs     = 30000;
-}
+} // namespace
 
 class RenderSessionResources {
 public:
@@ -1690,10 +1691,7 @@ void WaywallenDisplay::releaseEglFrame(int releaseSyncobjFd, bool afterGpuWork, 
 }
 
 void WaywallenDisplay::handleDisconnect(int errCode, const char* msg) {
-    qCWarning(lcWD,
-              "disconnected (err=%d msg=%s) — will retry",
-              errCode,
-              msg ? msg : "(null)");
+    qCWarning(lcWD, "disconnected (err=%d msg=%s) — will retry", errCode, msg ? msg : "(null)");
     cleanup();
     setConnState(Disconnected);
     setStreamState(Inactive);
