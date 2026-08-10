@@ -170,9 +170,8 @@ public:
 
     // Attempt to connect now. No-op when already Connected. Triggered
     // automatically by the DBus NameOwnerChanged / Daemon Ready signals
-    // (see setupDBusWatcher); also exposed for tests and manual cues.
-    // There is no internal retry timer — recovery relies entirely on
-    // DBus signals fired when the daemon re-appears.
+    // (see setupDBusWatcher) and by the internal backoff timer (see
+    // scheduleReconnectBackoff); also exposed for tests and manual cues.
     Q_INVOKABLE void requestReconnect();
 
     bool eventFilter(QObject* obj, QEvent* event) override;
@@ -210,6 +209,7 @@ private slots:
     void onDaemonNameOwnerChanged(const QString& name, const QString& oldOwner,
                                   const QString& newOwner);
     void onDaemonReadySignal();
+    void onReconnectTimer();
     void pushSizeUpdate();
 
 private:
@@ -224,6 +224,13 @@ private:
     void                                    setupDBusWatcher();
     void                                    flushPendingRelease();
     void                                    handleDisconnect(int errCode, const char* msg);
+    // Single-shot backoff fallback for when the DBus NameOwnerChanged /
+    // Ready signals are missed (e.g. the daemon was already up and
+    // Ready before setupDBusWatcher subscribed). No-op if already
+    // connected/handshaking, auto-reconnect is off, or a retry is
+    // already pending. Delay doubles up to a cap each time it fires;
+    // resets once a connection succeeds.
+    void                                    scheduleReconnectBackoff();
     void     applyPresentationSnapshot(const waywallen_presentation_snapshot_t& presentation);
     void     applyPresentationState(const waywallen_presentation_state_t& state);
     void     resetPresentation();
@@ -319,6 +326,12 @@ private:
     int      m_lastPushedWidth { -1 };
     int      m_lastPushedHeight { -1 };
     uint32_t m_lastPushedRefreshMhz { 0 };
+
+    // Backoff fallback for reconnect (see scheduleReconnectBackoff).
+    // Single-shot; delay doubles on each failure up to a cap and
+    // resets to the initial value once connected.
+    QTimer m_reconnectTimer;
+    int    m_reconnectDelayMs { 2000 };
 
     // Backend detected from Qt's scene graph.
     enum ActiveBackend

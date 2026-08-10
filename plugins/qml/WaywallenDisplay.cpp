@@ -31,6 +31,14 @@
 
 Q_LOGGING_CATEGORY(lcWD, "waywallen.display")
 
+namespace {
+// Backoff bounds for the reconnect fallback timer (see
+// WaywallenDisplay::scheduleReconnectBackoff). Mirrors the layer-shell
+// client's reconnect schedule (src/bin/layer_shell/main.rs).
+constexpr int kReconnectInitialDelayMs = 2000;
+constexpr int kReconnectMaxDelayMs     = 30000;
+} // namespace
+
 class RenderSessionResources {
 public:
     ~RenderSessionResources() {
@@ -529,6 +537,9 @@ WaywallenDisplay::WaywallenDisplay(QQuickItem* parent): QQuickItem(parent) {
     m_updateSizeTimer.setSingleShot(true);
     m_updateSizeTimer.setInterval(100);
     connect(&m_updateSizeTimer, &QTimer::timeout, this, &WaywallenDisplay::pushSizeUpdate);
+
+    m_reconnectTimer.setSingleShot(true);
+    connect(&m_reconnectTimer, &QTimer::timeout, this, &WaywallenDisplay::onReconnectTimer);
 }
 
 WaywallenDisplay::~WaywallenDisplay() { cleanup(); }
@@ -610,6 +621,12 @@ void WaywallenDisplay::cleanup() {
     m_updateSizeTimer.stop();
     m_lastPushedWidth  = -1;
     m_lastPushedHeight = -1;
+
+    // Reconnect backoff is rearmed explicitly by callers that still
+    // want it (tryConnect failure, handleDisconnect); stopping it here
+    // covers destruction and any other cleanup() caller so no timeout
+    // fires after teardown.
+    m_reconnectTimer.stop();
 
     m_eglImagesValid    = false;
     m_glTexturesCreated = false;
@@ -940,6 +957,14 @@ void WaywallenDisplay::setConnState(ConnState s) {
     if (m_connState == s) return;
     m_connState = s;
     emit connStateChanged();
+    if (s == Connected) {
+        // A healthy connection means any prior backoff was
+        // pessimistic; drop the pending timer (if any) and reset the
+        // delay so the next disconnect starts fast again instead of
+        // inheriting a stretched-out delay from an old outage.
+        m_reconnectTimer.stop();
+        m_reconnectDelayMs = kReconnectInitialDelayMs;
+    }
     // Re-send any post-handshake state that's only valid against a
     // Connected daemon: window_state (autopause reporter) carries the
     // most recent QML-visible bitmask, which the lib does not
@@ -1195,7 +1220,26 @@ void WaywallenDisplay::onDaemonReadySignal() {
 void WaywallenDisplay::requestReconnect() {
     if (m_connState == Connected || m_connState == Handshaking) return;
     if (! m_autoReconnect) return;
+    // Cancel any pending backoff tick so the DBus fast-path and the
+    // timer never race into two overlapping tryConnect() calls.
+    m_reconnectTimer.stop();
     tryConnect();
+}
+
+void WaywallenDisplay::onReconnectTimer() {
+    if (m_connState == Connected || m_connState == Handshaking) return;
+    if (! m_autoReconnect) return;
+    tryConnect();
+}
+
+void WaywallenDisplay::scheduleReconnectBackoff() {
+    if (! m_autoReconnect) return;
+    if (m_connState == Connected || m_connState == Handshaking) return;
+    if (m_reconnectTimer.isActive()) return;
+    const int delay = m_reconnectDelayMs;
+    m_reconnectTimer.start(delay);
+    m_reconnectDelayMs = qMin(delay * 2, kReconnectMaxDelayMs);
+    qCInfo(lcWD, "reconnect backoff scheduled in %d ms", delay);
 }
 
 void WaywallenDisplay::onWindowReady() {
@@ -1401,12 +1445,13 @@ void WaywallenDisplay::tryConnect() {
                                         &metrics);
 
     if (rc != WAYWALLEN_OK) {
-        qCWarning(lcWD, "begin_connect failed: %d (waiting for daemon DBus signal)", rc);
+        qCWarning(lcWD, "begin_connect failed: %d (will retry)", rc);
         waywallen_display_free(display);
         resources->display = nullptr;
         QMutexLocker lock(&m_resourcesMutex);
         if (m_renderResources == resources) m_renderResources.reset();
         setConnState(Disconnected);
+        scheduleReconnectBackoff();
         return;
     }
 
@@ -1425,6 +1470,7 @@ void WaywallenDisplay::tryConnect() {
         QMutexLocker lock(&m_resourcesMutex);
         if (m_renderResources == resources) m_renderResources.reset();
         setConnState(Disconnected);
+        scheduleReconnectBackoff();
         return;
     }
 
@@ -1652,15 +1698,18 @@ void WaywallenDisplay::releaseEglFrame(int releaseSyncobjFd, bool afterGpuWork, 
 
 void WaywallenDisplay::handleDisconnect(int errCode, const char* msg) {
     qCWarning(lcWD,
-              "disconnected (err=%d msg=%s) — waiting for daemon DBus signal",
+              "disconnected (err=%d msg=%s) — will retry",
               errCode,
               msg ? msg : "(null)");
     cleanup();
     setConnState(Disconnected);
     setStreamState(Inactive);
     update();
-    // No retry timer — wait for org.waywallen.waywallen.Daemon NameOwnerChanged
-    // / Ready signals to drive the next attempt (see setupDBusWatcher).
+    // DBus NameOwnerChanged / Ready (see setupDBusWatcher) drive an
+    // immediate retry when the daemon reappears; the backoff timer
+    // below is the fallback for when that signal is missed or the
+    // session bus is unavailable.
+    scheduleReconnectBackoff();
 }
 
 // ---------------------------------------------------------------------------
