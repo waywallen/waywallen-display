@@ -988,6 +988,14 @@ impl WsiPresenter {
             buffer_generation: frame.buffer_generation,
             seq: frame.seq,
         });
+        log::trace!(
+            "WSI direct frame queued: surface=0x{:x} generation={} seq={} buffer={} queued={}",
+            self.surface.as_raw(),
+            frame.buffer_generation,
+            frame.seq,
+            frame.buffer_index,
+            self.direct_frames.len()
+        );
         Ok(())
     }
 
@@ -1168,8 +1176,26 @@ impl WsiPresenter {
         if !unsafe { self.runtime.device.get_fence_status(frame.fence) }
             .context("query WSI frame fence")?
         {
+            log::trace!(
+                "WSI frame context busy: surface=0x{:x} frame={} pending_release={:?}",
+                self.surface.as_raw(),
+                frame_index,
+                frame
+                    .pending_release
+                    .as_ref()
+                    .map(|release| (release.buffer_generation, release.seq))
+            );
             return Ok(PresentResult::Pending);
         }
+        log::trace!(
+            "vkAcquireNextImageKHR enter: surface=0x{:x} frame={} direct={:?} queued={}",
+            self.surface.as_raw(),
+            frame_index,
+            self.direct_frames
+                .front()
+                .map(|direct| (direct.buffer_generation, direct.seq)),
+            self.direct_frames.len()
+        );
         let acquired = unsafe {
             self.runtime.swapchain_loader.acquire_next_image(
                 self.swapchain,
@@ -1178,6 +1204,11 @@ impl WsiPresenter {
                 vk::Fence::null(),
             )
         };
+        log::trace!(
+            "vkAcquireNextImageKHR return: surface=0x{:x} frame={} result={acquired:?}",
+            self.surface.as_raw(),
+            frame_index
+        );
         let (image_index, suboptimal) = match acquired {
             Ok(result) => result,
             Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
@@ -1509,12 +1540,28 @@ impl WsiPresenter {
             .wait_dst_stage_mask(&wait_stages)
             .command_buffers(&command_buffers)
             .signal_semaphores(&signal_semaphores)];
+        log::trace!(
+            "vkQueueSubmit enter: surface=0x{:x} frame={} image={} direct={:?} waits={}",
+            self.surface.as_raw(),
+            frame_index,
+            image_index,
+            self.direct_frames
+                .front()
+                .map(|direct| (direct.buffer_generation, direct.seq)),
+            wait_semaphores.len()
+        );
         unsafe {
             self.runtime
                 .device
                 .queue_submit(self.runtime.graphics_queue, &submit, frame.fence)
         }
         .context("vkQueueSubmit WSI frame")?;
+        log::trace!(
+            "vkQueueSubmit return: surface=0x{:x} frame={} image={}",
+            self.surface.as_raw(),
+            frame_index,
+            image_index
+        );
         if scene_path {
             let resources = self.blur_resources.as_mut().unwrap();
             if pending_direct.is_some() {
@@ -1539,6 +1586,13 @@ impl WsiPresenter {
                 buffer_generation: direct.buffer_generation,
                 seq: direct.seq,
             });
+            log::trace!(
+                "WSI direct release pending: surface=0x{:x} frame={} generation={} seq={}",
+                self.surface.as_raw(),
+                frame_index,
+                direct.buffer_generation,
+                direct.seq
+            );
             release_pending = true;
         }
         let swapchains = [self.swapchain];
@@ -1548,11 +1602,27 @@ impl WsiPresenter {
             .wait_semaphores(&present_wait_semaphores)
             .swapchains(&swapchains)
             .image_indices(&image_indices);
+        log::trace!(
+            "vkQueuePresentKHR enter: surface=0x{:x} frame={} image={} pending_release={:?}",
+            self.surface.as_raw(),
+            frame_index,
+            image_index,
+            self.frames[frame_index]
+                .pending_release
+                .as_ref()
+                .map(|release| (release.buffer_generation, release.seq))
+        );
         let present = unsafe {
             self.runtime
                 .swapchain_loader
                 .queue_present(self.runtime.present_queue, &present_info)
         };
+        log::trace!(
+            "vkQueuePresentKHR return: surface=0x{:x} frame={} image={} result={present:?}",
+            self.surface.as_raw(),
+            frame_index,
+            image_index
+        );
         let presented_to_compositor = match present {
             Ok(present_suboptimal) => {
                 if suboptimal || present_suboptimal {
@@ -1784,18 +1854,37 @@ impl WsiPresenter {
         display: Option<*mut sys::waywallen_display_t>,
     ) -> Result<bool> {
         let mut first_error = None;
-        for frame in &mut self.frames {
+        for (frame_index, frame) in self.frames.iter_mut().enumerate() {
             if frame.pending_release.is_none() {
                 continue;
             }
             let ready = unsafe { self.runtime.device.get_fence_status(frame.fence) }
                 .context("query direct frame release fence")?;
+            let release = frame.pending_release.as_ref().unwrap();
+            log::trace!(
+                "WSI direct release fence: surface=0x{:x} frame={} generation={} seq={} ready={}",
+                self.surface.as_raw(),
+                frame_index,
+                release.buffer_generation,
+                release.seq,
+                ready
+            );
             if ready {
                 let release = frame.pending_release.take().unwrap();
+                let generation = release.buffer_generation;
+                let seq = release.seq;
                 if let Err(error) = resolve_direct_release(display, release) {
                     if first_error.is_none() {
                         first_error = Some(error);
                     }
+                } else {
+                    log::trace!(
+                        "WSI direct release resolved: surface=0x{:x} frame={} generation={} seq={}",
+                        self.surface.as_raw(),
+                        frame_index,
+                        generation,
+                        seq
+                    );
                 }
             }
         }
