@@ -576,10 +576,9 @@ int waywallen_display_dispatch(waywallen_display_t* d);
  * waiting on this fd; signaling it lets the producer reuse the
  * buffer slot.
  *
- * Hosts with a Vulkan release fence should NOT call this. Signal an
- * exportable SYNC_FD semaphore from the consume submit, export its
- * sync_file, and pass both descriptors to
- * waywallen_display_release_after_sync_file().
+ * Hosts may call this after their GPU completion primitive has signaled.
+ * Hosts that can export a GPU release fence should normally attach its
+ * sync_file with waywallen_display_release_after_sync_file() instead.
  *
  * `fd` ownership transfers in: closed on every return path.
  * Returns 0 on success or a negative `waywallen_err_t` on failure

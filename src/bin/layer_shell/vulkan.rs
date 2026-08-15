@@ -37,7 +37,6 @@ pub struct VulkanRuntime {
     wayland_surface_loader: ash::khr::wayland_surface::Instance,
     device: ash::Device,
     swapchain_loader: ash::khr::swapchain::Device,
-    external_semaphore_fd_loader: ash::khr::external_semaphore_fd::Device,
     physical_device: vk::PhysicalDevice,
     graphics_queue_family: u32,
     present_queue_family: u32,
@@ -173,8 +172,6 @@ impl VulkanRuntime {
         let graphics_queue = unsafe { device.get_device_queue(graphics_queue_family, 0) };
         let present_queue = unsafe { device.get_device_queue(present_queue_family, 0) };
         let swapchain_loader = ash::khr::swapchain::Device::new(&instance, &device);
-        let external_semaphore_fd_loader =
-            ash::khr::external_semaphore_fd::Device::new(&instance, &device);
         let (debug_utils, debug_messenger) = if debug_enabled {
             let loader = ash::ext::debug_utils::Instance::new(&entry, &instance);
             let info = vk::DebugUtilsMessengerCreateInfoEXT::default()
@@ -216,7 +213,6 @@ impl VulkanRuntime {
                 wayland_surface_loader,
                 device,
                 swapchain_loader,
-                external_semaphore_fd_loader,
                 physical_device,
                 graphics_queue_family,
                 present_queue_family,
@@ -540,6 +536,15 @@ fn needs_persistent_scene(
             || (blur.finished && scene_exists))
 }
 
+fn needs_scene_redraw(
+    scene_path: bool,
+    scene_valid: bool,
+    blur: &BlurSample,
+    swapchain_recreated: bool,
+) -> bool {
+    scene_path && scene_valid && (blur.animating || blur.finished || swapchain_recreated)
+}
+
 impl BlurTransition {
     fn set_target(&mut self, target: f32, now: Instant, animate: bool) -> bool {
         let current = self.value_at(now);
@@ -659,11 +664,9 @@ struct FrameContext {
     command_pool: vk::CommandPool,
     command_buffer: vk::CommandBuffer,
     image_available: vk::Semaphore,
-    release_finished: vk::Semaphore,
     fence: vk::Fence,
     descriptor_set: vk::DescriptorSet,
-    cpu_release_fallback: Option<DirectRelease>,
-    recreate_release_semaphore: bool,
+    pending_release: Option<DirectRelease>,
 }
 
 struct RetiredSwapchain {
@@ -867,11 +870,9 @@ impl WsiPresenter {
                 command_pool: vk::CommandPool::null(),
                 command_buffer: vk::CommandBuffer::null(),
                 image_available: vk::Semaphore::null(),
-                release_finished: vk::Semaphore::null(),
                 fence: vk::Fence::null(),
                 descriptor_set,
-                cpu_release_fallback: None,
-                recreate_release_semaphore: false,
+                pending_release: None,
             });
             let frame = self.frames.last_mut().unwrap();
             let pool_info = vk::CommandPoolCreateInfo::default()
@@ -891,7 +892,6 @@ impl WsiPresenter {
             frame.image_available =
                 unsafe { self.runtime.device.create_semaphore(&semaphore_info, None) }
                     .context("create image-available semaphore")?;
-            frame.release_finished = create_release_semaphore(&self.runtime.device)?;
             let fence_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
             frame.fence = unsafe { self.runtime.device.create_fence(&fence_info, None) }
                 .context("vkCreateFence")?;
@@ -1026,7 +1026,7 @@ impl WsiPresenter {
             unsafe { self.runtime.device.device_wait_idle() }
                 .context("wait for shared Vulkan device before retiring direct binding")?;
         }
-        let release_result = self.drain_cpu_release_fallbacks(display);
+        let release_result = self.drain_completed_releases(display);
         if let Some(binding) = self.direct_binding.take() {
             unsafe {
                 for view in binding.views {
@@ -1100,7 +1100,7 @@ impl WsiPresenter {
         composition: &Composition,
         now: Instant,
     ) -> Result<PresentResult> {
-        let mut release_pending = self.drain_cpu_release_fallbacks(display)?;
+        let mut release_pending = self.drain_completed_releases(display)?;
         let blur = self.blur_transition.sample(now);
         let scene_path = needs_persistent_scene(
             self.pause_blur_available,
@@ -1114,23 +1114,20 @@ impl WsiPresenter {
             }
             self.destroy_current_blur_resources();
         }
+        let mut swapchain_recreated = false;
         if let Some(extent) = self.recreate_extent {
             if !self.frames_idle()? {
                 return Ok(PresentResult::Pending);
             }
             self.recreate_extent = None;
             self.recreate_swapchain(extent)?;
+            swapchain_recreated = true;
         }
 
         let blank_pending = self.blank_state == BlankState::Pending;
         let pending_direct = (!blank_pending)
             .then(|| self.direct_frames.front().map(direct_frame_handles))
             .flatten();
-        let direct_display = pending_direct
-            .is_some()
-            .then(|| display.ok_or_else(|| anyhow!("direct frame present without live display")))
-            .transpose()?;
-
         if scene_path && pending_direct.is_some() {
             let extent_mismatch = self
                 .blur_resources
@@ -1159,7 +1156,8 @@ impl WsiPresenter {
             .blur_resources
             .as_ref()
             .is_some_and(|resources| resources.base_valid);
-        if pending_direct.is_none() && !(scene_path && scene_valid) && !blank_pending {
+        let scene_redraw = needs_scene_redraw(scene_path, scene_valid, &blur, swapchain_recreated);
+        if pending_direct.is_none() && !scene_redraw && !blank_pending {
             return Ok(PresentResult::Presented {
                 redraw: release_pending,
             });
@@ -1505,10 +1503,7 @@ impl WsiPresenter {
         }
         let command_buffers = [frame.command_buffer];
         let present_ready = self.present_ready[image_index as usize];
-        let mut signal_semaphores = vec![present_ready];
-        if pending_direct.is_some() {
-            signal_semaphores.push(frame.release_finished);
-        }
+        let signal_semaphores = [present_ready];
         let submit = [vk::SubmitInfo::default()
             .wait_semaphores(&wait_semaphores)
             .wait_dst_stage_mask(&wait_stages)
@@ -1532,23 +1527,20 @@ impl WsiPresenter {
                 resources.pyramid_dirty = false;
             }
         }
-        let release_arm = if pending_direct.is_some() {
+        if pending_direct.is_some() {
             let direct = self
                 .direct_frames
                 .pop_front()
                 .expect("submitted direct source must remain queued");
-            Some(self.arm_direct_release(
-                direct_display.expect("direct display validated before submit"),
-                frame_index,
-                DirectRelease {
-                    release_syncobj_fd: direct.release_syncobj_fd,
-                    buffer_generation: direct.buffer_generation,
-                    seq: direct.seq,
-                },
-            ))
-        } else {
-            None
-        };
+            // Ack only after this submission's fence signals. Earlier release lets the
+            // producer race the acquire semaphore's pending queue wait.
+            self.frames[frame_index].pending_release = Some(DirectRelease {
+                release_syncobj_fd: direct.release_syncobj_fd,
+                buffer_generation: direct.buffer_generation,
+                seq: direct.seq,
+            });
+            release_pending = true;
+        }
         let swapchains = [self.swapchain];
         let image_indices = [image_index];
         let present_wait_semaphores = [present_ready];
@@ -1578,9 +1570,6 @@ impl WsiPresenter {
             if blank_pending || pending_direct.is_some() {
                 self.blank_state.presented(blank_pending);
             }
-        }
-        if let Some(result) = release_arm {
-            release_pending |= result?;
         }
         self.frame_cursor = (self.frame_cursor + 1) % self.frames.len();
         let cleanup_pending =
@@ -1790,41 +1779,22 @@ impl WsiPresenter {
         Ok(true)
     }
 
-    fn drain_cpu_release_fallbacks(
+    fn drain_completed_releases(
         &mut self,
         display: Option<*mut sys::waywallen_display_t>,
     ) -> Result<bool> {
         let mut first_error = None;
         for frame in &mut self.frames {
-            if frame.cpu_release_fallback.is_none() {
+            if frame.pending_release.is_none() {
                 continue;
             }
             let ready = unsafe { self.runtime.device.get_fence_status(frame.fence) }
                 .context("query direct frame release fence")?;
             if ready {
-                let release = frame.cpu_release_fallback.take().unwrap();
+                let release = frame.pending_release.take().unwrap();
                 if let Err(error) = resolve_direct_release(display, release) {
                     if first_error.is_none() {
                         first_error = Some(error);
-                    }
-                }
-                if frame.recreate_release_semaphore {
-                    unsafe {
-                        self.runtime
-                            .device
-                            .destroy_semaphore(frame.release_finished, None)
-                    };
-                    match create_release_semaphore(&self.runtime.device) {
-                        Ok(semaphore) => {
-                            frame.release_finished = semaphore;
-                            frame.recreate_release_semaphore = false;
-                        }
-                        Err(error) => {
-                            frame.release_finished = vk::Semaphore::null();
-                            if first_error.is_none() {
-                                first_error = Some(error);
-                            }
-                        }
                     }
                 }
             }
@@ -1835,75 +1805,7 @@ impl WsiPresenter {
         Ok(self
             .frames
             .iter()
-            .any(|frame| frame.cpu_release_fallback.is_some()))
-    }
-
-    fn arm_direct_release(
-        &mut self,
-        display: *mut sys::waywallen_display_t,
-        frame_index: usize,
-        release: DirectRelease,
-    ) -> Result<bool> {
-        let semaphore = self.frames[frame_index].release_finished;
-        let get_info = vk::SemaphoreGetFdInfoKHR::default()
-            .semaphore(semaphore)
-            .handle_type(vk::ExternalSemaphoreHandleTypeFlags::SYNC_FD);
-        let sync_file_fd = match unsafe {
-            self.runtime
-                .external_semaphore_fd_loader
-                .get_semaphore_fd(&get_info)
-        } {
-            Ok(fd) if fd >= 0 => fd,
-            Ok(_) => {
-                self.frames[frame_index].cpu_release_fallback = Some(release);
-                return Ok(true);
-            }
-            Err(error) => {
-                log::warn!(
-                    "export direct draw completion sync_file failed: {error:?}; using WSI fence"
-                );
-                self.frames[frame_index].cpu_release_fallback = Some(release);
-                self.frames[frame_index].recreate_release_semaphore = true;
-                return Ok(true);
-            }
-        };
-        let fallback_fd = unsafe { libc::dup(release.release_syncobj_fd) };
-        if fallback_fd < 0 {
-            let error = std::io::Error::last_os_error();
-            log::warn!("duplicate release syncobj failed: {error}; using WSI fence");
-            unsafe { libc::close(sync_file_fd) };
-            self.frames[frame_index].cpu_release_fallback = Some(release);
-            return Ok(true);
-        }
-        let rc = unsafe {
-            sys::waywallen_display_release_after_sync_file(release.release_syncobj_fd, sync_file_fd)
-        };
-        if rc != sys::WAYWALLEN_OK {
-            log::warn!(
-                "attach direct draw sync_file to release syncobj failed: {rc}; using WSI fence"
-            );
-            self.frames[frame_index].cpu_release_fallback = Some(DirectRelease {
-                release_syncobj_fd: fallback_fd,
-                ..release
-            });
-            return Ok(true);
-        }
-        unsafe { libc::close(fallback_fd) };
-        let rc = unsafe {
-            sys::waywallen_display_frame_release_armed(
-                display,
-                release.buffer_generation,
-                release.seq,
-            )
-        };
-        if rc != sys::WAYWALLEN_OK {
-            bail!(
-                "acknowledge GPU-linked direct release generation={} seq={} failed: {rc}",
-                release.buffer_generation,
-                release.seq
-            );
-        }
-        Ok(false)
+            .any(|frame| frame.pending_release.is_some()))
     }
 
     fn wait_frames_idle(&self) -> Result<()> {
@@ -2528,16 +2430,11 @@ impl Drop for WsiPresenter {
                 }
             }
             for frame in self.frames.drain(..) {
-                if let Some(release) = frame.cpu_release_fallback {
+                if let Some(release) = frame.pending_release {
                     libc::close(release.release_syncobj_fd);
                 }
                 if frame.fence != vk::Fence::null() {
                     self.runtime.device.destroy_fence(frame.fence, None);
-                }
-                if frame.release_finished != vk::Semaphore::null() {
-                    self.runtime
-                        .device
-                        .destroy_semaphore(frame.release_finished, None);
                 }
                 if frame.image_available != vk::Semaphore::null() {
                     self.runtime
@@ -2713,14 +2610,6 @@ fn blur_weights(radius: f32, mip_levels: u32) -> [f32; 8] {
         weights[level] = 0.0;
     }
     weights
-}
-
-fn create_release_semaphore(device: &ash::Device) -> Result<vk::Semaphore> {
-    let mut export_info = vk::ExportSemaphoreCreateInfo::default()
-        .handle_types(vk::ExternalSemaphoreHandleTypeFlags::SYNC_FD);
-    let info = vk::SemaphoreCreateInfo::default().push_next(&mut export_info);
-    unsafe { device.create_semaphore(&info, None) }
-        .context("create direct release export semaphore")
 }
 
 fn choose_surface_format(formats: &[vk::SurfaceFormatKHR]) -> vk::SurfaceFormatKHR {
@@ -2951,6 +2840,24 @@ mod tests {
             &idle,
             true
         ));
+    }
+
+    #[test]
+    fn steady_persistent_scene_does_not_redraw_for_release_polling() {
+        let idle = BlurSample {
+            radius: 0.0,
+            animating: false,
+            finished: false,
+        };
+        assert!(!needs_scene_redraw(true, true, &idle, false));
+
+        let animating = BlurSample {
+            radius: 0.0,
+            animating: true,
+            finished: false,
+        };
+        assert!(needs_scene_redraw(true, true, &animating, false));
+        assert!(needs_scene_redraw(true, true, &idle, true));
     }
 
     #[test]
