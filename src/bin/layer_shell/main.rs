@@ -473,9 +473,9 @@ impl App {
             binding.next_redraw.lock().unwrap().take();
             binding.last_pushed_metrics.lock().unwrap().take();
             let mut presenter = binding.presenter.lock().unwrap();
-            if let Err(release_error) = presenter.discard_direct_frames(None) {
+            if let Err(release_error) = presenter.discard_pending_direct_frame(None) {
                 log::warn!(
-                    "[{}] release queued frames after disconnect failed: {release_error:#}",
+                    "[{}] release pending frame after disconnect failed: {release_error:#}",
                     binding.display_name
                 );
             }
@@ -2065,7 +2065,7 @@ unsafe extern "C" fn on_frame_ready(user_data: *mut c_void, f: *const sys::waywa
         );
         return;
     }
-    if let Err(error) = presenter.enqueue_direct_frame(f, &direct) {
+    if let Err(error) = presenter.replace_pending_direct_frame(display, f, &direct) {
         if let Err(release_error) = vulkan::discard_direct_frame(display, f) {
             log::warn!(
                 "[{}] discard rejected direct frame seq={} failed: {release_error:#}",
@@ -2074,7 +2074,7 @@ unsafe extern "C" fn on_frame_ready(user_data: *mut c_void, f: *const sys::waywa
             );
         }
         log::warn!(
-            "[{}] queue direct frame seq={} failed: {error:#}",
+            "[{}] replace pending direct frame seq={} failed: {error:#}",
             binding.display_name,
             f.seq
         );

@@ -1,4 +1,4 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -17,6 +17,7 @@ const BLUR_PUSH_CONSTANT_SIZE: u32 = 8 * 4;
 const BLUR_PUSH_CONSTANT_OFFSET: u32 = COMPOSITION_PUSH_CONSTANT_SIZE;
 const TOTAL_PUSH_CONSTANT_SIZE: u32 = BLUR_PUSH_CONSTANT_OFFSET + BLUR_PUSH_CONSTANT_SIZE;
 const RESOURCE_RETIRE_TIMEOUT_NS: u64 = 2_000_000_000;
+const SWAPCHAIN_ACQUIRE_TIMEOUT_NS: u64 = 1_000_000;
 const BLUR_TRANSITION_DURATION: Duration = Duration::from_millis(180);
 const _: () = assert!(COMPOSITION_PUSH_CONSTANT_SIZE == 48);
 const _: () = assert!(TOTAL_PUSH_CONSTANT_SIZE <= 128);
@@ -733,7 +734,7 @@ pub struct WsiPresenter {
     blur_resources: Option<BlurResources>,
     pause_blur_available: bool,
     direct_binding: Option<DirectBinding>,
-    direct_frames: VecDeque<DirectFrame>,
+    pending_direct_frame: Option<DirectFrame>,
     blank_state: BlankState,
     recreate_extent: Option<vk::Extent2D>,
     retired_swapchains: Vec<RetiredSwapchain>,
@@ -774,7 +775,7 @@ impl WsiPresenter {
             blur_resources: None,
             pause_blur_available: true,
             direct_binding: None,
-            direct_frames: VecDeque::new(),
+            pending_direct_frame: None,
             blank_state: BlankState::Inactive,
             recreate_extent: None,
             retired_swapchains: Vec::new(),
@@ -938,8 +939,9 @@ impl WsiPresenter {
         Ok(())
     }
 
-    pub fn enqueue_direct_frame(
+    pub fn replace_pending_direct_frame(
         &mut self,
+        display: *mut sys::waywallen_display_t,
         frame: &sys::waywallen_frame_t,
         direct: &sys::waywallen_vk_direct_frame_t,
     ) -> Result<()> {
@@ -960,9 +962,6 @@ impl WsiPresenter {
         if frame.vk_acquire_semaphore.is_null() || frame.release_syncobj_fd < 0 {
             bail!("direct frame is missing acquire or release synchronization");
         }
-        if self.direct_frames.len() >= binding.images.len() {
-            bail!("direct frame queue exhausted the imported buffer pool");
-        }
         if binding.format == vk::Format::UNDEFINED {
             binding.format = format;
         } else if binding.format != format {
@@ -977,7 +976,7 @@ impl WsiPresenter {
             binding.views[index] = unsafe { self.runtime.device.create_image_view(&info, None) }
                 .context("create direct imported image view")?;
         }
-        self.direct_frames.push_back(DirectFrame {
+        let incoming = DirectFrame {
             image: binding.images[index],
             view: binding.views[index],
             extent: binding.extent,
@@ -987,48 +986,58 @@ impl WsiPresenter {
             release_syncobj_fd: frame.release_syncobj_fd,
             buffer_generation: frame.buffer_generation,
             seq: frame.seq,
-        });
+        };
+        if let Some(superseded) = self.pending_direct_frame.take() {
+            log::trace!(
+                "WSI direct frame superseded: surface=0x{:x} generation={} seq={} by generation={} seq={}",
+                self.surface.as_raw(),
+                superseded.buffer_generation,
+                superseded.seq,
+                incoming.buffer_generation,
+                incoming.seq
+            );
+            resolve_direct_release(
+                Some(display),
+                DirectRelease {
+                    release_syncobj_fd: superseded.release_syncobj_fd,
+                    buffer_generation: superseded.buffer_generation,
+                    seq: superseded.seq,
+                },
+            )?;
+        }
+        self.pending_direct_frame = Some(incoming);
         log::trace!(
-            "WSI direct frame queued: surface=0x{:x} generation={} seq={} buffer={} queued={}",
+            "WSI direct frame pending: surface=0x{:x} generation={} seq={} buffer={}",
             self.surface.as_raw(),
             frame.buffer_generation,
             frame.seq,
-            frame.buffer_index,
-            self.direct_frames.len()
+            frame.buffer_index
         );
         Ok(())
     }
 
-    pub fn discard_direct_frames(
+    pub fn discard_pending_direct_frame(
         &mut self,
         display: Option<*mut sys::waywallen_display_t>,
     ) -> Result<()> {
-        let mut first_error = None;
-        while let Some(frame) = self.direct_frames.pop_front() {
-            if let Err(error) = resolve_direct_release(
-                display,
-                DirectRelease {
-                    release_syncobj_fd: frame.release_syncobj_fd,
-                    buffer_generation: frame.buffer_generation,
-                    seq: frame.seq,
-                },
-            ) {
-                if first_error.is_none() {
-                    first_error = Some(error);
-                }
-            }
-        }
-        if let Some(error) = first_error {
-            return Err(error);
-        }
-        Ok(())
+        let Some(frame) = self.pending_direct_frame.take() else {
+            return Ok(());
+        };
+        resolve_direct_release(
+            display,
+            DirectRelease {
+                release_syncobj_fd: frame.release_syncobj_fd,
+                buffer_generation: frame.buffer_generation,
+                seq: frame.seq,
+            },
+        )
     }
 
     pub fn retire_direct_binding(
         &mut self,
         display: Option<*mut sys::waywallen_display_t>,
     ) -> Result<()> {
-        let discard_result = self.discard_direct_frames(display);
+        let discard_result = self.discard_pending_direct_frame(display);
         if let Err(error) = self.wait_frames_idle() {
             log::warn!("timed Vulkan retirement failed, waiting for the shared device: {error:#}");
             unsafe { self.runtime.device.device_wait_idle() }
@@ -1134,7 +1143,7 @@ impl WsiPresenter {
 
         let blank_pending = self.blank_state == BlankState::Pending;
         let pending_direct = (!blank_pending)
-            .then(|| self.direct_frames.front().map(direct_frame_handles))
+            .then(|| self.pending_direct_frame.as_ref().map(direct_frame_handles))
             .flatten();
         if scene_path && pending_direct.is_some() {
             let extent_mismatch = self
@@ -1188,18 +1197,17 @@ impl WsiPresenter {
             return Ok(PresentResult::Pending);
         }
         log::trace!(
-            "vkAcquireNextImageKHR enter: surface=0x{:x} frame={} direct={:?} queued={}",
+            "vkAcquireNextImageKHR enter: surface=0x{:x} frame={} direct={:?}",
             self.surface.as_raw(),
             frame_index,
-            self.direct_frames
-                .front()
-                .map(|direct| (direct.buffer_generation, direct.seq)),
-            self.direct_frames.len()
+            self.pending_direct_frame
+                .as_ref()
+                .map(|direct| (direct.buffer_generation, direct.seq))
         );
         let acquired = unsafe {
             self.runtime.swapchain_loader.acquire_next_image(
                 self.swapchain,
-                0,
+                SWAPCHAIN_ACQUIRE_TIMEOUT_NS,
                 frame.image_available,
                 vk::Fence::null(),
             )
@@ -1545,8 +1553,8 @@ impl WsiPresenter {
             self.surface.as_raw(),
             frame_index,
             image_index,
-            self.direct_frames
-                .front()
+            self.pending_direct_frame
+                .as_ref()
                 .map(|direct| (direct.buffer_generation, direct.seq)),
             wait_semaphores.len()
         );
@@ -1576,9 +1584,9 @@ impl WsiPresenter {
         }
         if pending_direct.is_some() {
             let direct = self
-                .direct_frames
-                .pop_front()
-                .expect("submitted direct source must remain queued");
+                .pending_direct_frame
+                .take()
+                .expect("submitted direct source must remain pending");
             // Ack only after this submission's fence signals. Earlier release lets the
             // producer race the acquire semaphore's pending queue wait.
             self.frames[frame_index].pending_release = Some(DirectRelease {
@@ -1650,7 +1658,7 @@ impl WsiPresenter {
                 || release_pending
                 || self.blank_state == BlankState::Pending
                 || self.recreate_extent.is_some()
-                || !self.direct_frames.is_empty(),
+                || self.pending_direct_frame.is_some(),
         })
     }
 
@@ -2487,7 +2495,7 @@ impl Drop for WsiPresenter {
         unsafe {
             let _ = self.runtime.device.device_wait_idle();
         }
-        for direct in self.direct_frames.drain(..) {
+        if let Some(direct) = self.pending_direct_frame.take() {
             unsafe { libc::close(direct.release_syncobj_fd) };
         }
         if let Some(binding) = self.direct_binding.take() {
