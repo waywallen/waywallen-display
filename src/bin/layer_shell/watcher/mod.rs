@@ -98,18 +98,22 @@ impl CommandSender {
 pub struct CommandReceiver {
     receiver: Receiver<Command>,
     wake: UnixStream,
+    closed: bool,
 }
 
 impl CommandReceiver {
-    pub fn fd(&self) -> RawFd {
-        self.wake.as_raw_fd()
+    pub fn fd(&self) -> Option<RawFd> {
+        (!self.closed).then(|| self.wake.as_raw_fd())
     }
 
     pub fn drain(&mut self) -> Vec<Command> {
         let mut bytes = [0u8; 128];
         loop {
             match self.wake.read(&mut bytes) {
-                Ok(0) => break,
+                Ok(0) => {
+                    self.closed = true;
+                    break;
+                }
                 Ok(_) => {}
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
                 Err(error) => {
@@ -135,6 +139,21 @@ pub fn command_channel() -> io::Result<(CommandSender, CommandReceiver)> {
         CommandReceiver {
             receiver,
             wake: read,
+            closed: false,
         },
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::command_channel;
+
+    #[test]
+    fn closed_sender_removes_the_wake_fd() {
+        let (sender, mut receiver) = command_channel().unwrap();
+        drop(sender);
+
+        assert!(receiver.drain().is_empty());
+        assert!(receiver.fd().is_none());
+    }
 }
