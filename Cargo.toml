@@ -1,6 +1,6 @@
 [package]
 name = "waywallen-display"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 license = "MIT"
 description = "Low-level FFI bindings for libwaywallen_display"

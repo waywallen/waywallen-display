@@ -1,3 +1,17 @@
+<release version="0.3.2" date="2026-08-15">
+  <description>
+    <p>Added:</p>
+    <ul>
+      <li>Add a --version CLI option to the layer-shell display.</li>
+    </ul>
+    <p>Fixed:</p>
+    <ul>
+      <li>Reconnect Plasma display clients when daemon startup signals are missed. #37 by @barrence01</li>
+      <li>Prevent NVIDIA Vulkan frame release stalls. #39</li>
+      <li>Stop polling closed watcher channels after the selected watcher exits.</li>
+    </ul>
+  </description>
+</release>
 <release version="0.3.1" date="2026-08-08">
   <description>
     <p>Added:</p>
