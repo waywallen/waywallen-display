@@ -1,3 +1,15 @@
+<release version="0.3.3" date="2026-08-16">
+  <description>
+    <p>Added:</p>
+    <ul>
+      <li>Add trace logging for layer-shell Vulkan presentation.</li>
+    </ul>
+    <p>Fixed:</p>
+    <ul>
+      <li>Fix NVIDIA Vulkan presentation stalls in the layer-shell display. #39</li>
+    </ul>
+  </description>
+</release>
 <release version="0.3.2" date="2026-08-15">
   <description>
     <p>Added:</p>
