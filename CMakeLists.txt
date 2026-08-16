@@ -329,6 +329,15 @@ if(WAYWALLEN_DISPLAY_BUILD_TESTS)
             -Wall -Wextra -Wpedantic)
         add_test(NAME test_presentation_state COMMAND test_presentation_state)
 
+        add_executable(test_screen_identity tests/test_screen_identity.cpp)
+        target_link_libraries(test_screen_identity PRIVATE Qt6::Gui)
+        target_include_directories(test_screen_identity PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/plugins/qml)
+        target_compile_features(test_screen_identity PRIVATE cxx_std_17)
+        target_compile_options(test_screen_identity PRIVATE
+            -Wall -Wextra -Wpedantic)
+        add_test(NAME test_screen_identity COMMAND test_screen_identity)
+
         add_executable(test_reconnect_backoff tests/test_reconnect_backoff.cpp)
         target_compile_features(test_reconnect_backoff PRIVATE cxx_std_17)
         target_compile_options(test_reconnect_backoff PRIVATE

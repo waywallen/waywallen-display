@@ -167,6 +167,7 @@ WallpaperItem {
                     let s = i18nd("plasma_wallpaper_org.waywallen.kde", "name:") + "   " + d.displayName
                     s += "  " + i18nd("plasma_wallpaper_org.waywallen.kde", "id:") + " " + (d.displayId === 0 ? "—" : d.displayId)
                     s += "\n" + i18nd("plasma_wallpaper_org.waywallen.kde", "inst:") + "   " + (d.instanceId.length > 0 ? d.instanceId : "—")
+                    s += "  " + i18nd("plasma_wallpaper_org.waywallen.kde", "source:") + " " + (d.instanceIdSource.length > 0 ? d.instanceIdSource : "—")
                     s += "\n" + i18nd("plasma_wallpaper_org.waywallen.kde", "screen:") + " " + Screen.name + screenVendor()
                     s += "\n  " + i18nd("plasma_wallpaper_org.waywallen.kde", "geom:") + "  " + Screen.width + "x" + Screen.height
                           + " @ (" + Screen.virtualX + "," + Screen.virtualY + ")"
