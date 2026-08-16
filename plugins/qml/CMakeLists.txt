@@ -31,6 +31,7 @@ qt_add_qml_module(waywallen-display-qml
     PLUGIN_TARGET waywallen-display-qml
     SOURCES
         PresentationState.hpp
+        ScreenIdentity.hpp
         WaywallenDisplay.hpp
         WaywallenDisplay.cpp
         PluginInfo.hpp
