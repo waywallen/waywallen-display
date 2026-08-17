@@ -51,6 +51,7 @@ md-5 = { version = "0.10", optional = true }
 [build-dependencies]
 cc = "1"
 pkg-config = "0.3"
+resvg = { version = "0.45", default-features = false }
 
 [[bin]]
 name = "waywallen-layer-shell"

@@ -23,7 +23,55 @@ WallpaperItem {
     // daemon doesn't flash the desktop wallpaper through.
     Rectangle {
         anchors.fill: parent
-        color: "black"
+        color: emptyPlaceholder.visible ? "#D85A30" : "black"
+    }
+
+    // Shown when there is nothing to present: first run, or the daemon
+    // has gone away (quit / crash). Connected idle with a last frame
+    // keeps that frame — overlay stays off.
+    Column {
+        id: emptyPlaceholder
+        anchors.centerIn: parent
+        spacing: Kirigami.Units.largeSpacing
+        width: Math.min(parent.width, parent.height) * 0.5
+        visible: {
+            if (surfaceLoader.status === Loader.Error)
+                return false;
+            const d = surfaceLoader.item ? surfaceLoader.item.display : null;
+            if (!d)
+                return true;
+            // WaywallenDisplay::ConnState::Connected == 3
+            return d.framesReceived === 0 || d.connState !== 3;
+        }
+
+        Image {
+            anchors.horizontalCenter: parent.horizontalCenter
+            width: Math.min(root.width, root.height) * 0.22
+            height: width
+            fillMode: Image.PreserveAspectFit
+            source: Qt.resolvedUrl("../images/waywallen.svg")
+            sourceSize.width: width * Screen.devicePixelRatio
+            sourceSize.height: height * Screen.devicePixelRatio
+        }
+        Text {
+            anchors.horizontalCenter: parent.horizontalCenter
+            width: parent.width
+            color: "white"
+            font.pixelSize: 22
+            font.weight: Font.DemiBold
+            wrapMode: Text.WordWrap
+            horizontalAlignment: Text.AlignHCenter
+            text: "No wallpaper selected"
+        }
+        Text {
+            anchors.horizontalCenter: parent.horizontalCenter
+            width: parent.width
+            color: "#cdd6f4"
+            font.pixelSize: 16
+            wrapMode: Text.WordWrap
+            horizontalAlignment: Text.AlignHCenter
+            text: "Open Waywallen and select a wallpaper."
+        }
     }
 
     property bool _initDone: false

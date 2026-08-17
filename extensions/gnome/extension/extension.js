@@ -54,7 +54,7 @@ export default class WaywallenExtension extends Extension {
             this._settings.apply();
         }
 
-        this._override = new GnomeShellOverride(this._settings);
+        this._override = new GnomeShellOverride(this._settings, this.path);
 
         // Defer renderer spawn + override install until shell startup
         // animation is past, so we don't fight Main.layoutManager's

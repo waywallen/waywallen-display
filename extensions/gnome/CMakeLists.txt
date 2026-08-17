@@ -50,6 +50,9 @@ add_custom_target(waywallen-gnome-translations ALL DEPENDS ${_ww_gnome_mo_files}
 
 # --- Component install (cpack zip) ----------------------------------------
 
+set(_ww_icon
+    "${CMAKE_SOURCE_DIR}/data/icons/hicolor/scalable/apps/waywallen.svg")
+
 set(_ext_files
     ${CMAKE_CURRENT_BINARY_DIR}/metadata.json
     extension/extension.js
@@ -65,6 +68,10 @@ set(_ext_files
 )
 
 install(FILES ${_ext_files}
+    DESTINATION "."
+    COMPONENT gnome_extension
+    EXCLUDE_FROM_ALL)
+install(FILES ${_ww_icon}
     DESTINATION "."
     COMPONENT gnome_extension
     EXCLUDE_FROM_ALL)
@@ -130,6 +137,8 @@ install(FILES extension/schemas/${WW_GNOME_SCHEMA_ID}.gschema.xml
     DESTINATION ${CMAKE_INSTALL_DATADIR}/glib-2.0/schemas)
 
 install(FILES ${_ext_files}
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/gnome-shell/extensions/${WW_GNOME_UUID})
+install(FILES ${_ww_icon}
     DESTINATION ${CMAKE_INSTALL_DATADIR}/gnome-shell/extensions/${WW_GNOME_UUID})
 install(FILES extension/schemas/${WW_GNOME_SCHEMA_ID}.gschema.xml
     DESTINATION ${CMAKE_INSTALL_DATADIR}/gnome-shell/extensions/${WW_GNOME_UUID}/schemas)
