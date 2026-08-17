@@ -127,6 +127,7 @@ class MonitorRenderer {
         this._destroyed = false;
         this._presentation = null;
         this._presentationReady = false;
+        this._hasFrame = false;
     }
 
     build(app) {
@@ -378,6 +379,10 @@ class MonitorRenderer {
             Waywallen.Display.close_fd(fd);
         this._frames = (this._frames ?? 0) + 1;
         this._paintable?.refresh();
+        if (!this._hasFrame) {
+            this._hasFrame = true;
+            this._updateWindowTitle();
+        }
     }
 
     _controlGeometry() {
@@ -452,6 +457,7 @@ class MonitorRenderer {
             keepPosition: true,
             position: [geometry.x, geometry.y],
             presentationReady: this._presentationReady,
+            hasFrame: this._hasFrame,
         });
         this._window.set_title(`@${APP_ID}!${hint}|${this._index}`);
     }

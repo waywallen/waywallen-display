@@ -39,6 +39,16 @@ target_compile_options(waywallen-gobject PRIVATE -Wall -Wextra)
 
 find_program(G_IR_SCANNER g-ir-scanner)
 find_program(G_IR_COMPILER g-ir-compiler)
+# g-ir-scanner's shebang is `#!/usr/bin/env python3`. If conda/miniconda is
+# first on PATH, that python cannot import the distro giscanner._giscanner
+# (built for the system ABI). Drive the scanner with /usr/bin/python3 when
+# it exists.
+find_program(WW_SYSTEM_PYTHON3 python3 PATHS /usr/bin NO_DEFAULT_PATH)
+if(WW_SYSTEM_PYTHON3)
+    set(WW_GIR_SCANNER ${WW_SYSTEM_PYTHON3} ${G_IR_SCANNER})
+else()
+    set(WW_GIR_SCANNER ${G_IR_SCANNER})
+endif()
 
 if(G_IR_SCANNER AND G_IR_COMPILER)
     set(WW_GIR_NAMESPACE "Waywallen")
@@ -52,7 +62,7 @@ if(G_IR_SCANNER AND G_IR_COMPILER)
 
     add_custom_command(
         OUTPUT  ${WW_GIR_FILE}
-        COMMAND ${G_IR_SCANNER}
+        COMMAND ${WW_GIR_SCANNER}
                 --warn-all
                 --no-libtool
                 --namespace=${WW_GIR_NAMESPACE}

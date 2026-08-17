@@ -4,6 +4,7 @@
 // corners (in workspace overview) and lifetime automatically.
 
 import Clutter from 'gi://Clutter';
+import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
 import St from 'gi://St';
@@ -20,16 +21,24 @@ export const WallpaperRole = Object.freeze({
     Other: 'other',
 });
 
-export function rendererPresentationReady(actor) {
+export function rendererTitleHint(actor) {
     const title = actor?.meta_window?.title;
     if (!title?.startsWith(TITLE_PREFIX))
-        return false;
+        return null;
     const payload = title.slice(TITLE_PREFIX.length).split('|', 1)[0];
     try {
-        return JSON.parse(payload).presentationReady === true;
+        return JSON.parse(payload);
     } catch (_e) {
-        return false;
+        return null;
     }
+}
+
+export function rendererPresentationReady(actor) {
+    return rendererTitleHint(actor)?.presentationReady === true;
+}
+
+export function rendererHasFrame(actor) {
+    return rendererTitleHint(actor)?.hasFrame === true;
 }
 
 const FADE_IN_MS = 800;
@@ -37,7 +46,7 @@ const FADE_IN_MS = 800;
 export const LiveWallpaper = GObject.registerClass(
 class LiveWallpaper extends St.Widget {
     _init(backgroundActor, role = WallpaperRole.Other, rendererAvailable = false,
-        rendererLauncher = null) {
+        rendererLauncher = null, extensionPath = '') {
         super._init({
             // FixedLayout: we position the clone ourselves in vfunc_allocate
             // (top-left origin, scaled to fill). BinLayout centered the
@@ -69,9 +78,15 @@ class LiveWallpaper extends St.Widget {
         this._sourceActor = null;
         this._sourceDestroyId = 0;
         this._pollId = 0;
+        this._placeholder = null;
+        this._placeholderIcon = null;
+        this._extensionPath = extensionPath;
+        this._titleNotifyId = 0;
         if (this._role === WallpaperRole.Desktop)
-            this.set_style('background-color: black;');
+            this.set_style('background-color: #D85A30;');
+        this._ensurePlaceholder();
         this._tryAttach();
+        this._syncPlaceholder();
     }
 
     // Report no preferred size: the clone's natural (monitor) size would
@@ -100,6 +115,23 @@ class LiveWallpaper extends St.Widget {
                 Math.abs((clone.scale_y ?? 1) - sy) > 0.001)
                 clone.set_scale(sx, sy);
         }
+        const placeholder = this._placeholder;
+        if (placeholder && placeholder.visible) {
+            const iconSize = Math.max(64,
+                Math.round(Math.min(box.get_width(), box.get_height()) * 0.22));
+            if (this._placeholderIcon && this._placeholderIcon.icon_size !== iconSize)
+                this._placeholderIcon.icon_size = iconSize;
+            const [, natWidth] = placeholder.get_preferred_width(-1);
+            const [, natHeight] = placeholder.get_preferred_height(-1);
+            const x = Math.round((box.get_width() - natWidth) / 2);
+            const y = Math.round((box.get_height() - natHeight) / 2);
+            placeholder.allocate(new Clutter.ActorBox({
+                x1: x,
+                y1: y,
+                x2: x + natWidth,
+                y2: y + natHeight,
+            }));
+        }
     }
 
     _tryAttach() {
@@ -121,6 +153,7 @@ class LiveWallpaper extends St.Widget {
             this._sourceDestroyId = renderer.connect('destroy',
                 () => this._onSourceDestroyed());
             this.add_child(this._cloneActor);
+            this._connectTitleNotify(renderer);
             if (this._role === WallpaperRole.Desktop) {
                 this._blurController = new BlurController(
                     this._cloneActor, 'waywallen-desktop-blur');
@@ -134,10 +167,10 @@ class LiveWallpaper extends St.Widget {
             });
             // Black out the gsettings placeholder behind us (see _dimBackdrop).
             this._dimBackdrop(true);
-            // No redraw timer: Clutter.Clone repaints on the source's
-            // queue-redraw, i.e. exactly when the renderer commits a buffer.
+            this._syncPlaceholder();
             return;
         }
+        this._syncPlaceholder();
         this._schedulePoll();
     }
 
@@ -176,6 +209,7 @@ class LiveWallpaper extends St.Widget {
     }
 
     _onSourceDestroyed() {
+        this._disconnectTitleNotify();
         this._sourceDestroyId = 0;
         this._sourceActor = null;
         this._blurController?.destroy();
@@ -200,10 +234,82 @@ class LiveWallpaper extends St.Widget {
         if (this._role === WallpaperRole.Desktop) {
             this.opacity = 255;
             this._dimBackdrop(true);
+            this._showPlaceholder(true);
         } else {
             this.opacity = 0;
             this._dimBackdrop(false);
+            this._showPlaceholder(false);
         }
+    }
+
+    _ensurePlaceholder() {
+        if (this._placeholder || this._role !== WallpaperRole.Desktop)
+            return;
+        const iconPath = GLib.build_filenamev([this._extensionPath, 'waywallen.svg']);
+        const box = new St.BoxLayout({
+            vertical: true,
+            x_expand: false,
+            y_expand: false,
+            style: 'spacing: 12px;',
+        });
+        const file = Gio.File.new_for_path(iconPath);
+        if (file.query_exists(null)) {
+            this._placeholderIcon = new St.Icon({
+                gicon: new Gio.FileIcon({file}),
+                icon_size: 128,
+                x_align: Clutter.ActorAlign.CENTER,
+            });
+            box.add_child(this._placeholderIcon);
+        }
+        box.add_child(new St.Label({
+            text: 'No wallpaper selected',
+            x_align: Clutter.ActorAlign.CENTER,
+            style: 'color: white; font-size: 22px; font-weight: 600;',
+        }));
+        box.add_child(new St.Label({
+            text: 'Open Waywallen and select a wallpaper.',
+            x_align: Clutter.ActorAlign.CENTER,
+            style: 'color: #cdd6f4; font-size: 16px;',
+        }));
+        box.visible = false;
+        this.add_child(box);
+        this._placeholder = box;
+    }
+
+    _connectTitleNotify(renderer) {
+        this._disconnectTitleNotify();
+        const win = renderer?.meta_window;
+        if (!win)
+            return;
+        this._titleNotifyId = win.connect('notify::title', () => this._syncPlaceholder());
+    }
+
+    _disconnectTitleNotify() {
+        const win = this._sourceActor?.meta_window;
+        if (win && this._titleNotifyId) {
+            try { win.disconnect(this._titleNotifyId); } catch (_e) {}
+        }
+        this._titleNotifyId = 0;
+    }
+
+    _syncPlaceholder() {
+        if (this._role !== WallpaperRole.Desktop) {
+            this._showPlaceholder(false);
+            return;
+        }
+        const show = !this._cloneActor || !rendererHasFrame(this._sourceActor);
+        this._showPlaceholder(show);
+        if (show && this._placeholder && this._cloneActor)
+            this._placeholder.raise_top();
+    }
+
+    _showPlaceholder(show) {
+        this._ensurePlaceholder();
+        if (!this._placeholder)
+            return;
+        this._placeholder.visible = show;
+        if (show)
+            this.queue_relayout();
     }
 
     setRendererAvailable(available) {
@@ -221,6 +327,7 @@ class LiveWallpaper extends St.Widget {
                 duration: FADE_IN_MS,
                 mode: Clutter.AnimationMode.EASE_OUT_QUAD,
             });
+            this._syncPlaceholder();
             return;
         }
         this._tryAttach();
@@ -290,6 +397,7 @@ class LiveWallpaper extends St.Widget {
         if (this._sourceActor && this._sourceDestroyId) {
             try { this._sourceActor.disconnect(this._sourceDestroyId); } catch (_e) {}
         }
+        this._disconnectTitleNotify();
         this._sourceActor = null;
         this._sourceDestroyId = 0;
         this._blurController?.destroy();
@@ -299,6 +407,8 @@ class LiveWallpaper extends St.Widget {
             this._cloneDestroyId = 0;
         }
         this._cloneActor = null;
+        this._placeholder = null;
+        this._placeholderIcon = null;
         this._dimBackdrop(false);
         super.on_destroy?.();
     }

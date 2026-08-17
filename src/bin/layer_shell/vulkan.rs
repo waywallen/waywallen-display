@@ -19,10 +19,18 @@ const TOTAL_PUSH_CONSTANT_SIZE: u32 = BLUR_PUSH_CONSTANT_OFFSET + BLUR_PUSH_CONS
 const RESOURCE_RETIRE_TIMEOUT_NS: u64 = 2_000_000_000;
 const SWAPCHAIN_ACQUIRE_TIMEOUT_NS: u64 = 1_000_000;
 const BLUR_TRANSITION_DURATION: Duration = Duration::from_millis(180);
+// Empty-wallpaper fill (#D85A30).
+const EMPTY_WALLPAPER_CLEAR: [f32; 4] = [
+    0xD8 as f32 / 255.0,
+    0x5A as f32 / 255.0,
+    0x30 as f32 / 255.0,
+    1.0,
+];
 const _: () = assert!(COMPOSITION_PUSH_CONSTANT_SIZE == 48);
 const _: () = assert!(TOTAL_PUSH_CONSTANT_SIZE <= 128);
 
 include!(concat!(env!("OUT_DIR"), "/layer_shell_shaders.rs"));
+include!(concat!(env!("OUT_DIR"), "/empty_wallpaper_rgba.rs"));
 
 #[repr(C)]
 struct CompositionPushConstants {
@@ -682,6 +690,13 @@ enum BlankState {
     Committed,
 }
 
+struct PlaceholderTexture {
+    image: vk::Image,
+    memory: vk::DeviceMemory,
+    view: vk::ImageView,
+    extent: vk::Extent2D,
+}
+
 impl BlankState {
     fn request(&mut self) -> bool {
         if *self != Self::Inactive {
@@ -736,6 +751,7 @@ pub struct WsiPresenter {
     direct_binding: Option<DirectBinding>,
     pending_direct_frame: Option<DirectFrame>,
     blank_state: BlankState,
+    placeholder: Option<PlaceholderTexture>,
     recreate_extent: Option<vk::Extent2D>,
     retired_swapchains: Vec<RetiredSwapchain>,
 }
@@ -777,6 +793,7 @@ impl WsiPresenter {
             direct_binding: None,
             pending_direct_frame: None,
             blank_state: BlankState::Inactive,
+            placeholder: None,
             recreate_extent: None,
             retired_swapchains: Vec::new(),
         };
@@ -901,6 +918,13 @@ impl WsiPresenter {
             width: extent.0,
             height: extent.1,
         })?;
+        self.placeholder = match self.create_placeholder_texture() {
+            Ok(texture) => Some(texture),
+            Err(error) => {
+                log::warn!("empty wallpaper texture unavailable: {error:#}");
+                None
+            }
+        };
         Ok(())
     }
 
@@ -1141,10 +1165,8 @@ impl WsiPresenter {
             swapchain_recreated = true;
         }
 
-        let blank_pending = self.blank_state == BlankState::Pending;
-        let pending_direct = (!blank_pending)
-            .then(|| self.pending_direct_frame.as_ref().map(direct_frame_handles))
-            .flatten();
+        let pending_direct = self.pending_direct_frame.as_ref().map(direct_frame_handles);
+        let blank_pending = self.blank_state == BlankState::Pending && pending_direct.is_none();
         if scene_path && pending_direct.is_some() {
             let extent_mismatch = self
                 .blur_resources
@@ -1237,7 +1259,13 @@ impl WsiPresenter {
         }
         .context("reset WSI command pool")?;
 
-        let source_info = pending_direct.map(|(_, view, _, _, _, _)| {
+        let placeholder_view = blank_pending
+            .then(|| self.placeholder.as_ref().map(|texture| texture.view))
+            .flatten();
+        let source_view = pending_direct
+            .map(|(_, view, _, _, _, _)| view)
+            .or(placeholder_view);
+        let source_info = source_view.map(|view| {
             [vk::DescriptorImageInfo::default()
                 .sampler(self.sampler)
                 .image_view(view)
@@ -1261,7 +1289,7 @@ impl WsiPresenter {
         }
         .context("vkBeginCommandBuffer")?;
         let clear_color = if blank_pending {
-            [0.0, 0.0, 0.0, 1.0]
+            EMPTY_WALLPAPER_CLEAR
         } else {
             composition.clear
         };
@@ -1274,14 +1302,39 @@ impl WsiPresenter {
             offset: vk::Offset2D { x: 0, y: 0 },
             extent: self.extent,
         };
-        let composition_push = pending_direct.map(|(_, _, source_extent, _, _, _)| {
+        let composition_push = if let Some((_, _, source_extent, _, _, _)) = pending_direct {
             let output_extent = if scene_path {
                 self.blur_resources.as_ref().unwrap().extent
             } else {
                 self.extent
             };
-            composition_push_constants(composition, output_extent, source_extent)
-        });
+            Some(composition_push_constants(
+                composition,
+                output_extent,
+                source_extent,
+            ))
+        } else if blank_pending {
+            self.placeholder.as_ref().map(|texture| {
+                let dest = placeholder_destination(self.extent, texture.extent);
+                composition_push_constants(
+                    &Composition {
+                        source: [
+                            0.0,
+                            0.0,
+                            texture.extent.width as f32,
+                            texture.extent.height as f32,
+                        ],
+                        destination: dest,
+                        transform: 0,
+                        clear: EMPTY_WALLPAPER_CLEAR,
+                    },
+                    self.extent,
+                    texture.extent,
+                )
+            })
+        } else {
+            None
+        };
         let composition_push_bytes = composition_push.as_ref().map(|push| unsafe {
             std::slice::from_raw_parts(
                 std::ptr::from_ref(push).cast::<u8>(),
@@ -1961,6 +2014,312 @@ impl WsiPresenter {
             })
     }
 
+    fn create_placeholder_texture(&self) -> Result<PlaceholderTexture> {
+        const PIXEL_BYTES: u64 = 4;
+        let extent = vk::Extent2D {
+            width: EMPTY_WALLPAPER_WIDTH,
+            height: EMPTY_WALLPAPER_HEIGHT,
+        };
+        let pixel_count = (extent.width as u64)
+            .checked_mul(extent.height as u64)
+            .and_then(|pixels| pixels.checked_mul(PIXEL_BYTES))
+            .ok_or_else(|| anyhow!("empty wallpaper dimensions overflow"))?;
+        if EMPTY_WALLPAPER_RGBA.len() as u64 != pixel_count {
+            bail!(
+                "empty wallpaper rgba len {} does not match {pixel_count}",
+                EMPTY_WALLPAPER_RGBA.len()
+            );
+        }
+        let device = &self.runtime.device;
+        let image_info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(vk::Format::R8G8B8A8_UNORM)
+            .extent(vk::Extent3D {
+                width: extent.width,
+                height: extent.height,
+                depth: 1,
+            })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+        let image = unsafe { device.create_image(&image_info, None) }
+            .context("create empty wallpaper image")?;
+        let requirements = unsafe { device.get_image_memory_requirements(image) };
+        let memory_type = self
+            .find_memory_type(
+                requirements.memory_type_bits,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            )
+            .ok_or_else(|| anyhow!("no device-local memory for empty wallpaper image"))?;
+        let allocate = vk::MemoryAllocateInfo::default()
+            .allocation_size(requirements.size)
+            .memory_type_index(memory_type);
+        let memory = unsafe { device.allocate_memory(&allocate, None) }.map_err(|error| {
+            unsafe { device.destroy_image(image, None) };
+            anyhow!("allocate empty wallpaper image: {error:?}")
+        })?;
+        if let Err(error) = unsafe { device.bind_image_memory(image, memory, 0) } {
+            unsafe {
+                device.free_memory(memory, None);
+                device.destroy_image(image, None);
+            }
+            return Err(anyhow!("bind empty wallpaper image: {error:?}"));
+        }
+
+        let buffer_info = vk::BufferCreateInfo::default()
+            .size(pixel_count)
+            .usage(vk::BufferUsageFlags::TRANSFER_SRC)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        let staging = unsafe { device.create_buffer(&buffer_info, None) }.map_err(|error| {
+            unsafe {
+                device.free_memory(memory, None);
+                device.destroy_image(image, None);
+            }
+            anyhow!("create empty wallpaper staging buffer: {error:?}")
+        })?;
+        let staging_reqs = unsafe { device.get_buffer_memory_requirements(staging) };
+        let staging_type = self
+            .find_memory_type(
+                staging_reqs.memory_type_bits,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            )
+            .ok_or_else(|| anyhow!("no host-visible memory for empty wallpaper staging"))?;
+        let staging_alloc = vk::MemoryAllocateInfo::default()
+            .allocation_size(staging_reqs.size)
+            .memory_type_index(staging_type);
+        let staging_memory = match unsafe { device.allocate_memory(&staging_alloc, None) } {
+            Ok(staging_memory) => staging_memory,
+            Err(error) => {
+                unsafe {
+                    device.destroy_buffer(staging, None);
+                    device.free_memory(memory, None);
+                    device.destroy_image(image, None);
+                }
+                return Err(anyhow!("allocate empty wallpaper staging: {error:?}"));
+            }
+        };
+        if let Err(error) = unsafe { device.bind_buffer_memory(staging, staging_memory, 0) } {
+            unsafe {
+                device.free_memory(staging_memory, None);
+                device.destroy_buffer(staging, None);
+                device.free_memory(memory, None);
+                device.destroy_image(image, None);
+            }
+            return Err(anyhow!("bind empty wallpaper staging: {error:?}"));
+        }
+        let mapped = match unsafe {
+            device.map_memory(staging_memory, 0, pixel_count, vk::MemoryMapFlags::empty())
+        } {
+            Ok(mapped) => mapped,
+            Err(error) => {
+                unsafe {
+                    device.free_memory(staging_memory, None);
+                    device.destroy_buffer(staging, None);
+                    device.free_memory(memory, None);
+                    device.destroy_image(image, None);
+                }
+                return Err(anyhow!("map empty wallpaper staging: {error:?}"));
+            }
+        };
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                EMPTY_WALLPAPER_RGBA.as_ptr(),
+                mapped.cast::<u8>(),
+                EMPTY_WALLPAPER_RGBA.len(),
+            );
+            device.unmap_memory(staging_memory);
+        }
+
+        let pool_info = vk::CommandPoolCreateInfo::default()
+            .flags(vk::CommandPoolCreateFlags::TRANSIENT)
+            .queue_family_index(self.runtime.graphics_queue_family);
+        let command_pool =
+            unsafe { device.create_command_pool(&pool_info, None) }.map_err(|error| {
+                unsafe {
+                    device.free_memory(staging_memory, None);
+                    device.destroy_buffer(staging, None);
+                    device.free_memory(memory, None);
+                    device.destroy_image(image, None);
+                }
+                anyhow!("create empty wallpaper command pool: {error:?}")
+            })?;
+        let command_info = vk::CommandBufferAllocateInfo::default()
+            .command_pool(command_pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(1);
+        let command_buffer = match unsafe { device.allocate_command_buffers(&command_info) } {
+            Ok(buffers) => buffers[0],
+            Err(error) => {
+                unsafe {
+                    device.destroy_command_pool(command_pool, None);
+                    device.free_memory(staging_memory, None);
+                    device.destroy_buffer(staging, None);
+                    device.free_memory(memory, None);
+                    device.destroy_image(image, None);
+                }
+                return Err(anyhow!(
+                    "allocate empty wallpaper command buffer: {error:?}"
+                ));
+            }
+        };
+        let begin = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        let record = (|| -> Result<()> {
+            unsafe { device.begin_command_buffer(command_buffer, &begin) }
+                .context("begin empty wallpaper upload")?;
+            let range = full_color_range();
+            let to_transfer = [vk::ImageMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::empty())
+                .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(image)
+                .subresource_range(range)];
+            unsafe {
+                device.cmd_pipeline_barrier(
+                    command_buffer,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &to_transfer,
+                );
+            }
+            let copy = [vk::BufferImageCopy::default()
+                .image_subresource(vk::ImageSubresourceLayers {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    mip_level: 0,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                })
+                .image_extent(vk::Extent3D {
+                    width: extent.width,
+                    height: extent.height,
+                    depth: 1,
+                })];
+            unsafe {
+                device.cmd_copy_buffer_to_image(
+                    command_buffer,
+                    staging,
+                    image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &copy,
+                );
+            }
+            let to_shader = [vk::ImageMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(image)
+                .subresource_range(range)];
+            unsafe {
+                device.cmd_pipeline_barrier(
+                    command_buffer,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &to_shader,
+                );
+            }
+            unsafe { device.end_command_buffer(command_buffer) }
+                .context("end empty wallpaper upload")?;
+            Ok(())
+        })();
+        if let Err(error) = record {
+            unsafe {
+                device.destroy_command_pool(command_pool, None);
+                device.free_memory(staging_memory, None);
+                device.destroy_buffer(staging, None);
+                device.free_memory(memory, None);
+                device.destroy_image(image, None);
+            }
+            return Err(error);
+        }
+        let fence_info = vk::FenceCreateInfo::default();
+        let fence = match unsafe { device.create_fence(&fence_info, None) } {
+            Ok(fence) => fence,
+            Err(error) => {
+                unsafe {
+                    device.destroy_command_pool(command_pool, None);
+                    device.free_memory(staging_memory, None);
+                    device.destroy_buffer(staging, None);
+                    device.free_memory(memory, None);
+                    device.destroy_image(image, None);
+                }
+                return Err(anyhow!("create empty wallpaper fence: {error:?}"));
+            }
+        };
+        let command_buffers = [command_buffer];
+        let submit = [vk::SubmitInfo::default().command_buffers(&command_buffers)];
+        let submitted = unsafe { device.queue_submit(self.runtime.graphics_queue, &submit, fence) };
+        let waited = submitted.and_then(|_| unsafe {
+            device.wait_for_fences(&[fence], true, RESOURCE_RETIRE_TIMEOUT_NS)
+        });
+        unsafe { device.destroy_fence(fence, None) };
+        unsafe { device.destroy_command_pool(command_pool, None) };
+        unsafe {
+            device.free_memory(staging_memory, None);
+            device.destroy_buffer(staging, None);
+        }
+        if let Err(error) = waited {
+            unsafe {
+                device.free_memory(memory, None);
+                device.destroy_image(image, None);
+            }
+            return Err(anyhow!("upload empty wallpaper: {error:?}"));
+        }
+
+        let view_info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(vk::Format::R8G8B8A8_UNORM)
+            .subresource_range(full_color_range());
+        let view = match unsafe { device.create_image_view(&view_info, None) } {
+            Ok(view) => view,
+            Err(error) => {
+                unsafe {
+                    device.free_memory(memory, None);
+                    device.destroy_image(image, None);
+                }
+                return Err(anyhow!("create empty wallpaper view: {error:?}"));
+            }
+        };
+        Ok(PlaceholderTexture {
+            image,
+            memory,
+            view,
+            extent,
+        })
+    }
+
+    fn destroy_placeholder(&mut self) {
+        if let Some(texture) = self.placeholder.take() {
+            unsafe {
+                if texture.view != vk::ImageView::null() {
+                    self.runtime.device.destroy_image_view(texture.view, None);
+                }
+                if texture.image != vk::Image::null() {
+                    self.runtime.device.destroy_image(texture.image, None);
+                }
+                if texture.memory != vk::DeviceMemory::null() {
+                    self.runtime.device.free_memory(texture.memory, None);
+                }
+            }
+        }
+    }
+
     fn create_blur_resources(
         &self,
         swapchain_render_pass: vk::RenderPass,
@@ -2495,6 +2854,7 @@ impl Drop for WsiPresenter {
         unsafe {
             let _ = self.runtime.device.device_wait_idle();
         }
+        self.destroy_placeholder();
         if let Some(direct) = self.pending_direct_frame.take() {
             unsafe { libc::close(direct.release_syncobj_fd) };
         }
@@ -2821,6 +3181,20 @@ fn forward_display(transform: u32, pre_u: f32, pre_v: f32) -> [f32; 2] {
     }
 }
 
+fn placeholder_destination(output: vk::Extent2D, texture: vk::Extent2D) -> [f32; 4] {
+    let min_side = output.width.min(output.height) as f32;
+    let max_dim = min_side * 0.40;
+    let aspect = texture.width as f32 / texture.height.max(1) as f32;
+    let (dest_w, dest_h) = if aspect >= 1.0 {
+        (max_dim, max_dim / aspect.max(f32::EPSILON))
+    } else {
+        (max_dim * aspect, max_dim)
+    };
+    let x = (output.width as f32 - dest_w) * 0.5;
+    let y = (output.height as f32 - dest_h) * 0.5;
+    [x, y, dest_w, dest_h]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2853,6 +3227,24 @@ mod tests {
         let mut state = BlankState::Pending;
         state.abandon();
         assert_eq!(state, BlankState::Inactive);
+    }
+
+    #[test]
+    fn placeholder_destination_centers_a_square_icon() {
+        let dest = placeholder_destination(
+            vk::Extent2D {
+                width: 1920,
+                height: 1080,
+            },
+            vk::Extent2D {
+                width: 1024,
+                height: 1024,
+            },
+        );
+        assert_near(dest[2], 1080.0 * 0.40);
+        assert_near(dest[3], 1080.0 * 0.40);
+        assert_near(dest[0] + dest[2] / 2.0, 960.0);
+        assert_near(dest[1] + dest[3] / 2.0, 540.0);
     }
 
     #[test]

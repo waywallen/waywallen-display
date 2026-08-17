@@ -37,6 +37,7 @@ fn main() {
 
     if layer_shell {
         compile_layer_shell_shaders(&manifest_dir, &out_dir);
+        rasterize_empty_wallpaper(&manifest_dir, &out_dir);
     }
 
     let mut build = cc::Build::new();
@@ -99,6 +100,41 @@ fn main() {
     ] {
         println!("cargo:rerun-if-changed={f}");
     }
+}
+
+fn rasterize_empty_wallpaper(manifest_dir: &Path, out_dir: &Path) {
+    let svg_path = manifest_dir.join("data/icons/hicolor/scalable/apps/waywallen.svg");
+    println!("cargo:rerun-if-changed={}", svg_path.display());
+    let svg = fs::read(&svg_path).unwrap_or_else(|error| {
+        panic!("read {}: {error}", svg_path.display());
+    });
+    let tree = resvg::usvg::Tree::from_data(&svg, &resvg::usvg::Options::default())
+        .unwrap_or_else(|error| panic!("parse {}: {error}", svg_path.display()));
+    let size = tree.size();
+    let scale = 1024.0 / size.width();
+    let width = 1024u32;
+    let height = ((size.height() * scale).round() as u32).max(1);
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height).unwrap_or_else(|| {
+        panic!("allocate empty wallpaper pixmap {width}x{height}");
+    });
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
+    let rgba_path = out_dir.join("empty_wallpaper.rgba");
+    fs::write(&rgba_path, pixmap.data()).unwrap_or_else(|error| {
+        panic!("write {}: {error}", rgba_path.display());
+    });
+    fs::write(
+        out_dir.join("empty_wallpaper_rgba.rs"),
+        format!(
+            "pub const EMPTY_WALLPAPER_WIDTH: u32 = {width};\n\
+             pub const EMPTY_WALLPAPER_HEIGHT: u32 = {height};\n\
+             pub const EMPTY_WALLPAPER_RGBA: &[u8] = include_bytes!(\"empty_wallpaper.rgba\");\n"
+        ),
+    )
+    .expect("write empty_wallpaper_rgba.rs");
 }
 
 fn compile_layer_shell_shaders(manifest_dir: &Path, out_dir: &Path) {

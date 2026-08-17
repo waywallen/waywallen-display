@@ -130,8 +130,9 @@ static void snapshot_vfunc(GdkPaintable* paintable, GdkSnapshot* snapshot, doubl
     if (! isfinite(height) || height <= 0.0) height = self->height ? (double)self->height : 0.0;
     if (width <= 0.0 || height <= 0.0) return;
 
-    /* Clear-color base (default opaque black): pre-content + letterbox
-     * background, else the GTK window background leaks through. */
+    /* Clear-color base (empty wallpaper #D85A30, then daemon letterbox):
+     * pre-content + letterbox background, else the GTK window background
+     * leaks through. */
     if (self->clear[3] > 0.0f) {
         GdkRGBA         bg = { self->clear[0], self->clear[1], self->clear[2], self->clear[3] };
         graphene_rect_t full;
@@ -195,12 +196,18 @@ static void ww_shadow_paintable_iface_init(GdkPaintableInterface* iface) {
     iface->get_intrinsic_aspect_ratio = intrinsic_aspect_vfunc;
 }
 
+static void ww_empty_wallpaper_clear(float clear[4]) {
+    /* #D85A30 — fill used before any producer frame. */
+    clear[0] = 216.0f / 255.0f;
+    clear[1] = 90.0f / 255.0f;
+    clear[2] = 48.0f / 255.0f;
+    clear[3] = 1.0f;
+}
+
 static void ww_shadow_paintable_init(WwShadowPaintable* self) {
     self->fd = -1;
-    /* Default letterbox / pre-content background: opaque black. The
-     * daemon overrides via composition config; this is what shows before any
-     * content and behind a partial-coverage fill mode. */
-    self->clear[3] = 1.0f;
+    /* Daemon overrides via composition config once a stream is bound. */
+    ww_empty_wallpaper_clear(self->clear);
 }
 
 static void ww_shadow_paintable_finalize(GObject* object) {
@@ -301,9 +308,6 @@ void ww_shadow_paintable_clear(WwShadowPaintable* self) {
     memset(self->src, 0, sizeof(self->src));
     memset(self->dst, 0, sizeof(self->dst));
     self->transform = 0;
-    self->clear[0]  = 0.0f;
-    self->clear[1]  = 0.0f;
-    self->clear[2]  = 0.0f;
-    self->clear[3]  = 1.0f;
+    ww_empty_wallpaper_clear(self->clear);
     gdk_paintable_invalidate_contents(GDK_PAINTABLE(self));
 }
