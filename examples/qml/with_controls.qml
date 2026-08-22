@@ -23,6 +23,7 @@ ApplicationWindow {
         id: wallpaper
         anchors.fill: parent
         displayName: nameField.text
+        instanceId: "qml-example-controls"
         autoReconnect: reconnectToggle.checked
     }
 

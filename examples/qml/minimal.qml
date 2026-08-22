@@ -30,6 +30,7 @@ Window {
         id: wallpaper
         anchors.fill: parent
         displayName: "qml-minimal-long-long-long-long-long-long"
+        instanceId: "qml-example-minimal"
     }
 
     Rectangle {

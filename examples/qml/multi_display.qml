@@ -32,6 +32,7 @@ Window {
                 id: left
                 anchors.fill: parent
                 displayName: "qml-left"
+                instanceId: "qml-example-multi-left"
             }
 
             DiagBox {
@@ -49,6 +50,7 @@ Window {
                 id: right
                 anchors.fill: parent
                 displayName: "qml-right"
+                instanceId: "qml-example-multi-right"
             }
 
             DiagBox {
