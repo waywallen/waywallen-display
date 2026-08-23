@@ -587,9 +587,11 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "wayland-backend",
  "wayland-client",
  "wayland-protocols",
  "wayland-protocols-wlr",
+ "wayland-scanner",
 ]
 
 [[package]]
