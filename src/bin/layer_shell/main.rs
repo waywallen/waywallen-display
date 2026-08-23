@@ -2257,6 +2257,23 @@ fn run(socket: PathBuf, name_prefix: String) -> Result<()> {
 
     watcher::spawn_all(app.binding_registry.clone(), watcher_sender);
 
+    // Diagnostics aid: run the watchers without registering any display,
+    // logging the window-state flags they would feed the daemon.
+    if std::env::var_os("WAYWALLEN_WATCHER_PROBE").is_some() {
+        log::info!("watcher probe mode: no displays will be registered");
+        loop {
+            for command in app.watcher_commands.drain() {
+                match command {
+                    watcher::Command::WindowState {
+                        display_name,
+                        flags,
+                    } => log::info!("probe: {display_name} flags=0x{flags:x}"),
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    }
+
     for g in globals.contents().clone_list() {
         match g.interface.as_str() {
             "wl_compositor" => {

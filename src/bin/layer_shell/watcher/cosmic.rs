@@ -107,22 +107,22 @@ pub fn spawn(commands: CommandSender) {
 }
 
 fn run_loop(commands: CommandSender) {
-    let connection = match Connection::connect_to_env() {
-        Ok(connection) => connection,
-        Err(error) => {
-            log::error!("cosmic_watcher: connect to compositor: {error}");
-            return;
+    // A poisoned event queue (protocol error, compositor restart) must not
+    // silence the watcher for the rest of the session — reconnect instead.
+    loop {
+        if let Err(error) = run_connected(&commands) {
+            log::error!("cosmic_watcher: {error}; reconnecting in 5s");
         }
-    };
-    let (globals, queue) = match registry_queue_init::<Watcher>(&connection) {
-        Ok(pair) => pair,
-        Err(error) => {
-            log::error!("cosmic_watcher: registry init: {error}");
-            return;
-        }
-    };
+        thread::sleep(std::time::Duration::from_secs(5));
+    }
+}
+
+fn run_connected(commands: &CommandSender) -> Result<(), String> {
+    let connection = Connection::connect_to_env().map_err(|error| format!("connect to compositor: {error}"))?;
+    let (globals, queue) =
+        registry_queue_init::<Watcher>(&connection).map_err(|error| format!("registry init: {error}"))?;
     let qh = queue.handle();
-    let mut watcher = Watcher::new(commands);
+    let mut watcher = Watcher::new(commands.clone());
     let mut foreign_toplevel_list = None;
     let mut toplevel_info = None;
     let mut workspace_manager = None;
@@ -179,7 +179,7 @@ fn run_loop(commands: CommandSender) {
             "cosmic_watcher: compositor does not expose {FOREIGN_TOPLEVEL_LIST_INTERFACE} \
              with {TOPLEVEL_INFO_INTERFACE} v2+"
         );
-        return;
+        return Ok(());
     };
     if workspace_manager.is_none() {
         log::debug!(
@@ -197,23 +197,21 @@ fn run_loop(commands: CommandSender) {
             .unwrap_or(0)
     );
     watcher.set_managers(toplevel_info);
-    run_dispatch(queue, watcher);
+    run_dispatch(queue, watcher)
 }
 
-fn run_dispatch(mut queue: EventQueue<Watcher>, mut watcher: Watcher) {
+fn run_dispatch(mut queue: EventQueue<Watcher>, mut watcher: Watcher) -> Result<(), String> {
     // Binding the toplevel list makes the compositor announce every window
     // it already has, so the first roundtrip is what fills in the state
     // the daemon starts out with.
-    if let Err(error) = queue.roundtrip(&mut watcher) {
-        log::error!("cosmic_watcher: initial roundtrip: {error}");
-        return;
-    }
+    queue
+        .roundtrip(&mut watcher)
+        .map_err(|error| format!("initial roundtrip: {error}"))?;
     watcher.push_state();
     loop {
-        if let Err(error) = queue.blocking_dispatch(&mut watcher) {
-            log::error!("cosmic_watcher: dispatch: {error}");
-            return;
-        }
+        queue
+            .blocking_dispatch(&mut watcher)
+            .map_err(|error| format!("dispatch: {error}"))?;
         if std::mem::take(&mut watcher.dirty) {
             watcher.push_state();
         }
@@ -607,17 +605,15 @@ impl Dispatch<ExtWorkspaceManagerV1, ()> for Watcher {
 impl Dispatch<ExtWorkspaceGroupHandleV1, ()> for Watcher {
     fn event(
         _: &mut Self,
-        group: &ExtWorkspaceGroupHandleV1,
-        event: ext_workspace_group_handle_v1::Event,
+        _: &ExtWorkspaceGroupHandleV1,
+        _event: ext_workspace_group_handle_v1::Event,
         _: &(),
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
         // Groups only relate workspaces to outputs; per-toplevel output
-        // enter/leave already covers that mapping.
-        if let ext_workspace_group_handle_v1::Event::Removed = event {
-            group.destroy();
-        }
+        // enter/leave already covers that mapping. Removed groups are kept
+        // alive for the same reason as removed workspaces.
     }
 }
 
@@ -650,7 +646,11 @@ impl Dispatch<ExtWorkspaceHandleV1, ()> for Watcher {
                 }
             }
             ext_workspace_handle_v1::Event::Removed => {
-                handle.destroy();
+                // Same as with groups: keep the proxy alive. cosmic-comp has
+                // been observed sending ext_workspace_enter for a removed
+                // workspace afterwards; a destroyed proxy would make the
+                // demarshaller see NULL on a non-nullable object and kill
+                // the whole queue.
                 state.workspaces.remove(&handle.id());
                 state.dirty = true;
             }
