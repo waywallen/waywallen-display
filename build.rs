@@ -47,6 +47,7 @@ fn main() {
         .include(manifest_dir.join("src/generated"))
         .define("WAYWALLEN_DISPLAY_VERSION_PATCH", version_patch.as_str())
         .file(manifest_dir.join("src/display.c"))
+        .file(manifest_dir.join("src/log_file.c"))
         .file(manifest_dir.join("src/codec.c"))
         .file(manifest_dir.join("src/generated/ww_proto.c"))
         .flag("-std=c11")
@@ -56,6 +57,8 @@ fn main() {
         .flag_if_supported("-Wpedantic")
         .flag_if_supported("-Wconversion")
         .flag_if_supported("-Wsign-conversion");
+
+    build.flag_if_supported("-pthread");
 
     if egl {
         build
@@ -80,10 +83,12 @@ fn main() {
         // so we never link against libEGL/libGLESv2/libvulkan themselves.
         println!("cargo:rustc-link-lib=dl");
     }
+    println!("cargo:rustc-link-lib=pthread");
 
     println!("cargo:rerun-if-changed=include/waywallen_display.h");
     for f in [
         "src/display.c",
+        "src/log_file.c",
         "src/codec.c",
         "src/backend_egl.c",
         "src/backend_vulkan.c",

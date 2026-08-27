@@ -210,6 +210,7 @@ endif()
 
 add_library(waywallen_display SHARED
     src/display.c
+    src/log_file.c
     src/codec.c
     ${_backend_sources}
     ${GENERATED_C})
@@ -244,10 +245,13 @@ target_compile_definitions(waywallen_display PRIVATE
 if(_backend_private_libs)
     target_link_libraries(waywallen_display PRIVATE ${_backend_private_libs})
 endif()
+find_package(Threads REQUIRED)
+target_link_libraries(waywallen_display PRIVATE Threads::Threads)
 
 # Also build a static archive for consumers that want a fat binary.
 add_library(waywallen_display_static STATIC
     src/display.c
+    src/log_file.c
     src/codec.c
     ${_backend_sources}
     ${GENERATED_C})
@@ -283,6 +287,7 @@ target_compile_definitions(waywallen_display_static PRIVATE
 if(_backend_private_libs)
     target_link_libraries(waywallen_display_static PUBLIC ${_backend_private_libs})
 endif()
+target_link_libraries(waywallen_display_static PUBLIC Threads::Threads)
 
 # ---------------------------------------------------------------------------
 # Tests
@@ -316,6 +321,17 @@ if(WAYWALLEN_DISPLAY_BUILD_TESTS)
     target_compile_options(test_display PRIVATE
         -Wall -Wextra -Wpedantic)
     add_test(NAME test_display COMMAND test_display)
+
+    add_executable(test_log_file tests/test_log_file.c)
+    target_link_libraries(test_log_file PRIVATE
+        waywallen_display_static
+        Threads::Threads)
+    target_include_directories(test_log_file PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${GENERATED_DIR})
+    target_compile_options(test_log_file PRIVATE
+        -Wall -Wextra -Wpedantic)
+    add_test(NAME test_log_file COMMAND test_log_file)
 
     if(WAYWALLEN_DISPLAY_BUILD_QML_TESTS)
         enable_language(CXX)

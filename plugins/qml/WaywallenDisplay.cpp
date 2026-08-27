@@ -531,6 +531,7 @@ void WaywallenDisplay::c_on_disconnected(void* ud, int err, const char* msg) {
 WaywallenDisplay::WaywallenDisplay(QQuickItem* parent): QQuickItem(parent) {
     setFlag(ItemHasContents, true);
     waywallen_display_set_log_callback(qtLogBridge, nullptr);
+    waywallen_display_set_log_tag("kde-plasma");
 
     m_updateSizeTimer.setSingleShot(true);
     m_updateSizeTimer.setInterval(100);

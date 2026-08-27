@@ -174,3 +174,28 @@ bundles `waywallen-layer-shell`, it must also bundle
 `share/locale/<lang>/LC_MESSAGES/waywallen-layer-shell.mo` alongside the
 archive-style root executable, or set `WAYWALLEN_LOCALEDIR` to the bundled
 locale directory.
+
+## Logging
+
+`libwaywallen_display` writes INFO, WARN, and ERROR messages asynchronously to
+daily log files alongside the daemon:
+
+```text
+$XDG_STATE_HOME/waywallen/logs/waywallen_display_rYYYY-MM-DD.log
+~/.local/state/waywallen/logs/waywallen_display_rYYYY-MM-DD.log   # fallback
+```
+
+- **Levels:** INFO, WARN, and ERROR are persisted; DEBUG is not written to the
+  file (stderr / host callback only).
+- **Async:** application threads enqueue lines into a fixed ring buffer and
+  never perform disk I/O. A dedicated flush thread writes buffered lines every
+  two seconds.
+- **Non-blocking:** if the enqueue lock is contended or the ring is full, lines
+  may be dropped rather than blocking compositor or render threads.
+- **Retention:** at most the seven newest `waywallen_display_r*.log` files are
+  kept; older files are removed on flush.
+- **Tags:** backends may call `waywallen_display_set_log_tag()` once at init
+  (`kde-plasma`, `gnome-shell`, `layer-shell`) to prefix log lines.
+
+For bug reports, attach both `waywallen_r*.log` (daemon) and
+`waywallen_display_r*.log` (display) from the same log directory.

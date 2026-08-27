@@ -18,6 +18,7 @@
 
 #include "codec.h"
 #include "drm_fourcc_internal.h"
+#include "log_file.h"
 #include "ww_proto.h"
 
 #ifdef WW_HAVE_EGL
@@ -70,6 +71,8 @@ void waywallen_display_set_log_callback(waywallen_log_callback_t cb, void* user_
     s_log_ud = user_data;
 }
 
+void waywallen_display_set_log_tag(const char* tag) { ww_log_file_set_tag(tag); }
+
 __attribute__((format(printf, 2, 3), visibility("hidden"))) void ww_log(waywallen_log_level_t level,
                                                                         const char* fmt, ...) {
     char    buf[512];
@@ -77,6 +80,7 @@ __attribute__((format(printf, 2, 3), visibility("hidden"))) void ww_log(waywalle
     va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
+    ww_log_file_append_for_level(level, buf);
     if (s_log_cb) {
         s_log_cb(level, buf, s_log_ud);
     } else {

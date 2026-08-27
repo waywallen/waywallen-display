@@ -383,6 +383,8 @@ static void ww_display_class_init(WwDisplayClass* klass) {
                                                 2,
                                                 G_TYPE_INT,
                                                 G_TYPE_STRING);
+
+    waywallen_display_set_log_tag("gnome-shell");
 }
 
 static void ww_display_init(WwDisplay* self) {
