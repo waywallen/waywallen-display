@@ -360,7 +360,8 @@ static void* flush_thread_main(void* arg) {
 #if defined(__linux__)
     (void)pthread_setname_np(pthread_self(), "ww-log-flush");
 #endif
-    (void)nice(19);
+    const int nice_rc = nice(19);
+    (void)nice_rc;
 
     while (true) {
         struct timespec deadline;
