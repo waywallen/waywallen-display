@@ -19,6 +19,12 @@ output as a regular surface, with zero-copy GPU sharing via DMA-BUF.
 - **Wayland layer-shell client** — standalone
   wallpaper client for compositors that expose `zwlr_layer_shell_v1`.
 
+## Logging
+
+Display library logs (INFO/WARN/ERROR) are written asynchronously to
+`~/.local/state/waywallen/logs/waywallen_display_rYYYY-MM-DD.log`. See
+[BUILD.md](BUILD.md#logging) for details.
+
 ## Install
 
 Prebuilt artifacts are published on the

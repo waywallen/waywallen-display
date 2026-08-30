@@ -2201,6 +2201,10 @@ fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     init_gettext();
 
+    unsafe {
+        sys::waywallen_display_set_log_tag(c"layer-shell".as_ptr());
+    }
+
     let mut socket: Option<PathBuf> = None;
     let mut name_prefix = String::from("output");
     let mut it = std::env::args().skip(1);

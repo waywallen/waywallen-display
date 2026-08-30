@@ -98,6 +98,13 @@ typedef struct waywallen_display waywallen_display_t;
  * By default the library logs to stderr. Call `set_log_callback` to
  * redirect messages to the host's logging framework (e.g. Qt's
  * QLoggingCategory, syslog, etc.).
+ *
+ * INFO, WARN, and ERROR are also appended asynchronously to
+ * `$XDG_STATE_HOME/waywallen/logs/waywallen_display_rYYYY-MM-DD.log`
+ * (or `~/.local/state/waywallen/logs/` when unset). A dedicated flush
+ * thread writes buffered lines every two seconds and retains the seven
+ * newest display log files. Application threads never perform disk I/O
+ * for file logging. DEBUG is not written to the log file.
  * ------------------------------------------------------------------------- */
 
 typedef enum waywallen_log_level
@@ -112,6 +119,8 @@ typedef void (*waywallen_log_callback_t)(waywallen_log_level_t level, const char
                                          void* user_data);
 
 void waywallen_display_set_log_callback(waywallen_log_callback_t cb, void* user_data);
+
+void waywallen_display_set_log_tag(const char* tag);
 
 /* -------------------------------------------------------------------------
  * Connection + stream state

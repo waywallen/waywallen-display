@@ -358,6 +358,8 @@ extern "C" {
 
     pub fn waywallen_display_set_log_callback(cb: waywallen_log_callback_t, user_data: *mut c_void);
 
+    pub fn waywallen_display_set_log_tag(tag: *const c_char);
+
     pub fn waywallen_display_new(
         cb: *const waywallen_display_callbacks_t,
     ) -> *mut waywallen_display_t;
