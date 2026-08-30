@@ -16,9 +16,10 @@ import {PauseEffectKind} from './controlCodec.js';
 const APPLICATION_ID = Wallpaper.APPLICATION_ID;
 
 export class GnomeShellOverride {
-    constructor(settings) {
+    constructor(settings, extensionPath = '') {
         this._injection = new InjectionManager();
         this._settings = settings;
+        this._extensionPath = extensionPath;
         // Held by LiveWallpaper -> nothing; we only iterate on disable
         // and let Clutter destruction cascades clean up otherwise.
         // Using a Set (not Map) means we don't need to wire a destroy
@@ -43,7 +44,8 @@ export class GnomeShellOverride {
                     ? Wallpaper.WallpaperRole.Desktop
                     : Wallpaper.WallpaperRole.Other;
                 this.waywallenActor = new Wallpaper.LiveWallpaper(
-                    backgroundActor, role, self._rendererAvailable, self._rendererLauncher);
+                    backgroundActor, role, self._rendererAvailable, self._rendererLauncher,
+                    self._extensionPath);
                 self._wallpaperActors.add(this.waywallenActor);
                 if (role === Wallpaper.WallpaperRole.Desktop)
                     self._applyPresentationToActor(this.waywallenActor);

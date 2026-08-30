@@ -88,7 +88,7 @@ void ww_shadow_paintable_set_composition(WwShadowPaintable* self, double sx, dou
  * @self: a #WwShadowPaintable
  *
  * Release the texture + shadow fd and discard the connection-local
- * composition. The paintable renders opaque black until the next
+ * composition. The paintable fills #D85A30 until the next
  * set_shadow() and set_composition().
  */
 void ww_shadow_paintable_clear(WwShadowPaintable* self);

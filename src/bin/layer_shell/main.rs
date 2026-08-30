@@ -452,7 +452,7 @@ impl App {
         if matches!(session.state, DisplaySessionState::Retiring { .. }) {
             if let Some(binding) = entry.binding.as_ref() {
                 log::warn!(
-                    "[{}] black fallback presentation failed: {error:#}",
+                    "[{}] empty wallpaper presentation failed: {error:#}",
                     binding.display_name
                 );
                 binding.pending_present.store(false, Ordering::SeqCst);
@@ -486,7 +486,7 @@ impl App {
                 binding.pending_present.store(true, Ordering::SeqCst);
             }
             if requested {
-                log::info!("[{}] black fallback requested", binding.display_name);
+                log::info!("[{}] empty wallpaper requested", binding.display_name);
             }
         }
         session.state = DisplaySessionState::Retiring {
@@ -1009,7 +1009,7 @@ fn make_output_binding(
         "output {output_name}: identity '{}' -> instance_id={instance_id}",
         output_identity_key(entry, output_name)
     );
-    Rc::new(OutputBinding {
+    let binding = Rc::new(OutputBinding {
         display_name,
         instance_id,
         configured_size: Mutex::new(Some(physical)),
@@ -1022,10 +1022,13 @@ fn make_output_binding(
         config: Mutex::new(FrameConfig::default()),
         runtime,
         presenter: Mutex::new(presenter),
-        pending_present: AtomicBool::new(false),
+        pending_present: AtomicBool::new(true),
         next_redraw: Mutex::new(None),
         watcher,
-    })
+    });
+    binding.presenter.lock().unwrap().request_blank();
+    log::info!("[{}] empty wallpaper requested", binding.display_name);
+    binding
 }
 
 fn logical_to_physical(state: &App, output_name: u32, lx: f64, ly: f64) -> (f32, f32) {
@@ -2097,20 +2100,19 @@ fn present_latest(binding: &OutputBinding) -> Result<()> {
         .lock()
         .unwrap()
         .as_ref()
-        .ok_or_else(|| anyhow!("present requested without a display session"))?
-        .0;
-    let release_display = (unsafe { sys::waywallen_display_conn_state(display) }
-        == sys::WAYWALLEN_CONN_CONNECTED)
-        .then_some(display);
+        .map(|display| display.0);
+    let release_display = display.filter(|&display| unsafe {
+        sys::waywallen_display_conn_state(display) == sys::WAYWALLEN_CONN_CONNECTED
+    });
     let mut presenter = binding.presenter.lock().unwrap();
     let was_blank = presenter.blank_committed();
     match presenter.present(release_display, &composition, Instant::now())? {
         vulkan::PresentResult::Presented { redraw } => {
             if !was_blank && presenter.blank_committed() {
-                log::info!("[{}] black fallback committed", binding.display_name);
+                log::info!("[{}] empty wallpaper committed", binding.display_name);
             } else if was_blank && !presenter.blank_committed() {
                 log::info!(
-                    "[{}] first frame replaced black fallback",
+                    "[{}] first frame replaced empty wallpaper",
                     binding.display_name
                 );
             }
