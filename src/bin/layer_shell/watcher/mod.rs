@@ -6,6 +6,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
+pub mod cosmic;
+pub mod cosmic_toplevel_info;
 pub mod hyprland;
 pub mod niri;
 pub mod wayfire;
@@ -57,7 +59,8 @@ pub fn new_registry() -> BindingRegistry {
 ///
 /// A compositor with its own IPC gets its own watcher: only that IPC can say
 /// which workspace is visible, and every window on a hidden one has to stay out
-/// of the count. [`wlr`] is the fallback for everything else.
+/// of the count. [`cosmic`] reads the same knowledge off COSMIC's own
+/// protocols, and [`wlr`] is the fallback for everything else.
 pub fn spawn_all(registry: BindingRegistry, commands: CommandSender) {
     if hyprland::detect_socket().is_some() {
         hyprland::spawn(registry, commands)
@@ -65,6 +68,8 @@ pub fn spawn_all(registry: BindingRegistry, commands: CommandSender) {
         niri::spawn(registry, commands)
     } else if wayfire::detect_socket().is_some() {
         wayfire::spawn(registry, commands)
+    } else if cosmic::detect() {
+        cosmic::spawn(commands)
     } else {
         wlr::spawn(commands)
     }
