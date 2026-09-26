@@ -769,6 +769,11 @@ void WaywallenDisplay::setDisplayHeight(int h) {
     if (displayHandle()) m_updateSizeTimer.start();
 }
 
+qreal WaywallenDisplay::effectiveDevicePixelRatio() const {
+    auto* w = window();
+    return w ? w->effectiveDevicePixelRatio() : 1.0;
+}
+
 void WaywallenDisplay::pushSizeUpdate() {
     auto* display = displayHandle();
     if (! display) return;
@@ -1195,6 +1200,13 @@ void WaywallenDisplay::onWindowReady() {
             this,
             &WaywallenDisplay::onAfterFrameEnd,
             Qt::UniqueConnection);
+    #if QT_VERSION >= QT_VERSION_CHECK(6, 11, 0)
+        connect(window(),
+            &QQuickWindow::devicePixelRatioChanged,
+            this,
+            [this]() { emit effectiveDevicePixelRatioChanged(); },
+            Qt::UniqueConnection);
+    #endif
     onScreenChanged(window()->screen());
 
     if (m_mouseForwardEnabled) {
@@ -1299,6 +1311,10 @@ void WaywallenDisplay::onWindowReady() {
 }
 
 void WaywallenDisplay::onScreenChanged(QScreen* screen) {
+    emit effectiveDevicePixelRatioChanged();
+    // refresh on next event loop cycle as well, after qt updates dpr
+    // Qt 6.11+ has a dedicated signal for older versions we use a singleShot.
+    QTimer::singleShot(0, this, [this]() { emit effectiveDevicePixelRatioChanged(); });
     if (screen) {
         connect(screen,
                 &QScreen::refreshRateChanged,

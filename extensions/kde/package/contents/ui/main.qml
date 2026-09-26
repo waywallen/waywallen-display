@@ -91,8 +91,8 @@ WallpaperItem {
                 root.configuration.DisplayName.length > 0
                     ? root.configuration.DisplayName
                     : root.defaultDisplayName);
-            d.displayWidth = Qt.binding(() => Math.round(root.width * Screen.devicePixelRatio));
-            d.displayHeight = Qt.binding(() => Math.round(root.height * Screen.devicePixelRatio));
+            d.displayWidth = Qt.binding(() => Math.round(root.width * d.effectiveDevicePixelRatio));
+            d.displayHeight = Qt.binding(() => Math.round(root.height * d.effectiveDevicePixelRatio));
             d.mouseForwardEnabled = Qt.binding(() => root.configuration.MouseForward);
             d.windowStateFlags = Qt.binding(() => windowModel.flags);
             d.contentRevisionChanged.connect(root.scheduleAccentColorRefresh);
@@ -168,7 +168,7 @@ WallpaperItem {
                     s += "  " + i18nd("plasma_wallpaper_org.waywallen.kde", "id:") + " " + (d.displayId === 0 ? "—" : d.displayId)
                     s += "\n" + i18nd("plasma_wallpaper_org.waywallen.kde", "inst:") + "   " + (d.instanceId.length > 0 ? d.instanceId : "—")
                     s += "\n" + i18nd("plasma_wallpaper_org.waywallen.kde", "screen:") + " " + Screen.name + screenVendor()
-                    s += "\n  " + i18nd("plasma_wallpaper_org.waywallen.kde", "geom:") + "  " + Screen.width + "x" + Screen.height
+                    s += "\n  " + i18nd("plasma_wallpaper_org.waywallen.kde", "geom:") + "  " + d.displayWidth + "x" + d.displayHeight + " (" + Screen.width + "x" + Screen.height + "*" + d.effectiveDevicePixelRatio + ")"
                           + " @ (" + Screen.virtualX + "," + Screen.virtualY + ")"
                     s += "\n  " + i18nd("plasma_wallpaper_org.waywallen.kde", "avail:") + " " + Screen.desktopAvailableWidth
                           + "x" + Screen.desktopAvailableHeight

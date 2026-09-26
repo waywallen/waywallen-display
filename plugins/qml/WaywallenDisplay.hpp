@@ -40,6 +40,8 @@ class WaywallenDisplay : public QQuickItem {
     Q_PROPERTY(int displayWidth READ displayWidth WRITE setDisplayWidth NOTIFY displayWidthChanged)
     Q_PROPERTY(
         int displayHeight READ displayHeight WRITE setDisplayHeight NOTIFY displayHeightChanged)
+    Q_PROPERTY(qreal effectiveDevicePixelRatio READ effectiveDevicePixelRatio NOTIFY
+                   effectiveDevicePixelRatioChanged)
     Q_PROPERTY(int framesReceived READ framesReceived NOTIFY framesReceivedChanged)
     Q_PROPERTY(qulonglong contentRevision READ contentRevision NOTIFY contentRevisionChanged)
     Q_PROPERTY(qulonglong displayId READ displayId NOTIFY displayIdChanged)
@@ -147,6 +149,8 @@ public:
     int  displayHeight() const { return m_displayHeight; }
     void setDisplayHeight(int h);
 
+    qreal effectiveDevicePixelRatio() const;
+
     int        framesReceived() const { return m_framesReceived; }
     qulonglong contentRevision() const { return m_contentRevision; }
 
@@ -192,6 +196,7 @@ signals:
     void instanceIdChanged();
     void displayWidthChanged();
     void displayHeightChanged();
+    void effectiveDevicePixelRatioChanged();
     void framesReceivedChanged();
     void contentRevisionChanged();
     void displayIdChanged();
