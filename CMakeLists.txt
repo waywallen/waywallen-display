@@ -450,6 +450,10 @@ if(WAYWALLEN_DISPLAY_PLUGIN_QML)
         COMPONENT kde_extension
         EXCLUDE_FROM_ALL
         PATTERN "Wrapper" EXCLUDE)
+    install(FILES extensions/kde/LICENSE
+        DESTINATION org.waywallen.kde
+        COMPONENT kde_extension
+        EXCLUDE_FROM_ALL)
 
     if(WAYWALLEN_DISPLAY_QML_URI MATCHES "Embed")
         set(_ww_kde_wrapper_suffix "Embed")
