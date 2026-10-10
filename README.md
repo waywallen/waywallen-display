@@ -41,12 +41,30 @@ kpackagetool6 --type Plasma/Wallpaper -i waywallen-kde-<version>-<arch>-embed.zi
 > ```
 
 > [!TIP]
-> On X11(like steamdeck), plasmashell needs the EGL XCB backend, Add a systemd user drop-in at
+> On X11(like steamdeck), plasmashell needs the EGL XCB backend.  
+> Add a systemd user drop-in at:  
 > `~/.config/systemd/user/plasma-plasmashell.service.d/override.conf`:
 > 
 > ```ini
 > [Service]
 > Environment=QT_XCB_GL_INTEGRATION=xcb_egl
+> ```
+> 
+> Then reload and restart:
+> 
+> ```sh
+> systemctl --user daemon-reload
+> systemctl --user restart plasma-plasmashell.service
+> ```
+
+> [!TIP]
+> For Nvidia user, better to use vulkan instead of egl due to the unstable driver issue.
+> Add a systemd user drop-in at:  
+> `~/.config/systemd/user/plasma-plasmashell.service.d/override.conf`:
+> 
+> ```ini
+> [Service]
+> Environment=QSG_RHI_BACKEND=vulkan
 > ```
 > 
 > Then reload and restart:
