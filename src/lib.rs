@@ -583,3 +583,7 @@ extern "C" {
     ) -> c_int;
     pub fn waywallen_display_delete_gl_texture(d: *mut waywallen_display_t, image_index: u32);
 }
+
+#[cfg(feature = "client-common")]
+#[doc(hidden)]
+pub mod client;

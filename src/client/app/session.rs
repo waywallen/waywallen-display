@@ -3,28 +3,26 @@ use super::presentation::{
     on_presentation_snapshot, on_presentation_state, on_textures_releasing,
 };
 use super::{
-    App, DisplayPtr, DisplaySession, DisplaySessionState, OutputBinding, OutputEntry,
-    INITIAL_RECONNECT_DELAY, MAX_RECONNECT_DELAY, STABLE_SESSION_TIME,
+    DisplayPtr, DisplaySession, DisplaySessionState, OutputBinding, INITIAL_RECONNECT_DELAY,
+    MAX_RECONNECT_DELAY, STABLE_SESSION_TIME,
 };
+use crate as sys;
 use anyhow::{anyhow, bail, Context, Result};
+use std::collections::HashMap;
 use std::ffi::{c_void, CString};
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
-use waywallen_display as sys;
 
-pub(super) fn publish_window_state(
-    binding: &OutputBinding,
-    display: *mut sys::waywallen_display_t,
-) -> i32 {
+pub fn publish_window_state(binding: &OutputBinding, display: DisplayPtr) -> i32 {
     let (generation, flags) = binding.watcher.window_state();
     unsafe {
         match generation {
             Some(generation) => {
-                sys::waywallen_display_set_window_observation_state(display, generation, flags)
+                sys::waywallen_display_set_window_observation_state(display.0, generation, flags)
             }
-            None => sys::waywallen_display_set_window_state(display, flags),
+            None => sys::waywallen_display_set_window_state(display.0, flags),
         }
     }
 }
@@ -37,7 +35,7 @@ unsafe extern "C" fn on_window_observation_config(
     let config = &*config;
     binding
         .watcher
-        .configure(Some(crate::watcher::WindowExclusions {
+        .configure(Some(crate::client::watcher::WindowExclusions {
             generation: config.generation,
             application_ids: config.excluded_application_ids.to_vec(),
             titles: config.excluded_titles.to_vec(),
@@ -55,35 +53,62 @@ unsafe extern "C" fn on_window_observation_config(
                 .collect(),
         }));
     if let Some(display) = *binding.display.lock().unwrap() {
-        publish_window_state(binding, display.0);
+        publish_window_state(binding, display);
     }
 }
 
-impl App {
-    pub(super) fn start_due_sessions(&mut self) {
+/// The display-session part of one entry in a client's output table.
+pub struct OutputSlot<'a> {
+    pub binding: Option<&'a Rc<OutputBinding>>,
+    pub session: &'a mut Option<DisplaySession>,
+    pub reconnect_at: &'a mut Instant,
+    pub reconnect_delay: &'a mut Duration,
+}
+
+pub trait SessionOutput {
+    fn binding(&self) -> Option<&Rc<OutputBinding>>;
+    fn session(&self) -> Option<&DisplaySession>;
+    fn slot(&mut self) -> OutputSlot<'_>;
+}
+
+/// Starts, polls and retires the display session of every output, with
+/// reconnect backoff. Implemented by each client's app over its own outputs.
+pub trait DisplaySessions {
+    type Output: SessionOutput;
+
+    fn outputs(&self) -> &HashMap<u32, Self::Output>;
+    fn outputs_mut(&mut self) -> &mut HashMap<u32, Self::Output>;
+    fn socket_path(&self) -> &Path;
+    fn window_observation_available(&self) -> bool;
+
+    fn start_due_sessions(&mut self) {
         let now = Instant::now();
         let due: Vec<u32> = self
-            .outputs
-            .iter()
+            .outputs_mut()
+            .iter_mut()
             .filter_map(|(name, entry)| {
-                (entry.session.is_none() && entry.binding.is_some() && entry.reconnect_at <= now)
+                let entry = entry.slot();
+                (entry.session.is_none() && entry.binding.is_some() && *entry.reconnect_at <= now)
                     .then_some(*name)
             })
             .collect();
         for output_name in due {
             let Some(binding) = self
-                .outputs
+                .outputs()
                 .get(&output_name)
-                .and_then(|entry| entry.binding.as_ref())
+                .and_then(|entry| entry.binding())
                 .cloned()
             else {
                 continue;
             };
-            match start_display_session(&self.uds_sock, &binding, self.window_observation_available)
-            {
+            match start_display_session(
+                self.socket_path(),
+                &binding,
+                self.window_observation_available(),
+            ) {
                 Ok(session) => {
-                    if let Some(entry) = self.outputs.get_mut(&output_name) {
-                        entry.session = Some(session);
+                    if let Some(entry) = self.outputs_mut().get_mut(&output_name) {
+                        *entry.slot().session = Some(session);
                         log::debug!(
                             "output {output_name}: display session started for '{}'",
                             binding.display_name
@@ -95,41 +120,22 @@ impl App {
                         "[{}] display session start failed: {error:#}",
                         binding.display_name
                     );
-                    self.schedule_reconnect(output_name, Duration::ZERO);
+                    schedule_reconnect(self.outputs_mut(), output_name, Duration::ZERO);
                 }
             }
         }
     }
 
-    fn schedule_reconnect(&mut self, output_name: u32, lived: Duration) {
-        let Some(entry) = self.outputs.get_mut(&output_name) else {
+    fn finish_session(&mut self, output_name: u32, error: &anyhow::Error) {
+        let Some(entry) = self.outputs_mut().get_mut(&output_name) else {
             return;
         };
-        if lived >= STABLE_SESSION_TIME {
-            entry.reconnect_delay = INITIAL_RECONNECT_DELAY;
-        }
-        let delay = entry.reconnect_delay;
-        entry.reconnect_at = Instant::now() + delay;
-        entry.reconnect_delay = std::cmp::min(delay * 2, MAX_RECONNECT_DELAY);
-        if let Some(binding) = entry.binding.as_ref() {
-            log::debug!(
-                "[{}] session lived {:?}; reconnecting in {:?}",
-                binding.display_name,
-                lived,
-                delay
-            );
-        }
-    }
-
-    pub(super) fn finish_session(&mut self, output_name: u32, error: &anyhow::Error) {
-        let Some(entry) = self.outputs.get_mut(&output_name) else {
-            return;
-        };
+        let entry = entry.slot();
         let Some(session) = entry.session.as_mut() else {
             return;
         };
         if matches!(session.state, DisplaySessionState::Retiring { .. }) {
-            if let Some(binding) = entry.binding.as_ref() {
+            if let Some(binding) = entry.binding {
                 log::warn!(
                     "[{}] black fallback presentation failed: {error:#}",
                     binding.display_name
@@ -143,7 +149,7 @@ impl App {
             };
             return;
         }
-        if let Some(binding) = entry.binding.as_ref() {
+        if let Some(binding) = entry.binding {
             log::warn!(
                 "[{}] display session error: {error:#}",
                 binding.display_name
@@ -173,16 +179,16 @@ impl App {
         };
     }
 
-    pub(super) fn retire_finished_sessions(&mut self) {
+    fn retire_finished_sessions(&mut self) {
         let ready: Vec<u32> = self
-            .outputs
+            .outputs()
             .iter()
             .filter_map(|(name, entry)| {
-                let session = entry.session.as_ref()?;
+                let session = entry.session()?;
                 let DisplaySessionState::Retiring { blank_required } = session.state else {
                     return None;
                 };
-                let binding = entry.binding.as_ref()?;
+                let binding = entry.binding()?;
                 let presenter = binding.presenter.lock().unwrap();
                 if blank_required && !presenter.blank_committed() {
                     return None;
@@ -201,25 +207,26 @@ impl App {
             })
             .collect();
         for output_name in ready {
-            let Some(entry) = self.outputs.get_mut(&output_name) else {
+            let Some(entry) = self.outputs_mut().get_mut(&output_name) else {
                 continue;
             };
+            let entry = entry.slot();
             let Some(session) = entry.session.take() else {
                 continue;
             };
             let lived = session.started.elapsed();
-            if let Some(binding) = entry.binding.as_ref() {
+            if let Some(binding) = entry.binding {
                 shutdown_display_session(binding, session);
             }
-            self.schedule_reconnect(output_name, lived);
+            schedule_reconnect(self.outputs_mut(), output_name, lived);
         }
     }
 
-    pub(super) fn display_poll_sources(&self) -> Vec<(u32, libc::pollfd)> {
-        self.outputs
+    fn display_poll_sources(&self) -> Vec<(u32, libc::pollfd)> {
+        self.outputs()
             .iter()
             .filter_map(|(name, entry)| {
-                let session = entry.session.as_ref()?;
+                let session = entry.session()?;
                 if matches!(session.state, DisplaySessionState::Retiring { .. }) {
                     return None;
                 }
@@ -236,15 +243,15 @@ impl App {
             .collect()
     }
 
-    pub(super) fn process_display_poll(&mut self, output_name: u32, revents: i16) {
+    fn process_display_poll(&mut self, output_name: u32, revents: i16) {
         let result = (|| -> Result<()> {
             let entry = self
-                .outputs
+                .outputs_mut()
                 .get_mut(&output_name)
-                .ok_or_else(|| anyhow!("poll result for removed output {output_name}"))?;
+                .ok_or_else(|| anyhow!("poll result for removed output {output_name}"))?
+                .slot();
             let binding = entry
                 .binding
-                .as_ref()
                 .cloned()
                 .ok_or_else(|| anyhow!("display session without output binding"))?;
             let session = entry
@@ -256,6 +263,31 @@ impl App {
         if let Err(error) = result {
             self.finish_session(output_name, &error);
         }
+    }
+}
+
+fn schedule_reconnect<O: SessionOutput>(
+    outputs: &mut HashMap<u32, O>,
+    output_name: u32,
+    lived: Duration,
+) {
+    let Some(entry) = outputs.get_mut(&output_name) else {
+        return;
+    };
+    let entry = entry.slot();
+    if lived >= STABLE_SESSION_TIME {
+        *entry.reconnect_delay = INITIAL_RECONNECT_DELAY;
+    }
+    let delay = *entry.reconnect_delay;
+    *entry.reconnect_at = Instant::now() + delay;
+    *entry.reconnect_delay = std::cmp::min(delay * 2, MAX_RECONNECT_DELAY);
+    if let Some(binding) = entry.binding {
+        log::debug!(
+            "[{}] session lived {:?}; reconnecting in {:?}",
+            binding.display_name,
+            lived,
+            delay
+        );
     }
 }
 
@@ -461,7 +493,7 @@ fn process_display_event(
     Ok(())
 }
 
-pub(super) fn shutdown_display_session(binding: &Rc<OutputBinding>, session: DisplaySession) {
+pub fn shutdown_display_session(binding: &Rc<OutputBinding>, session: DisplaySession) {
     binding.registered.store(false, Ordering::SeqCst);
     binding.pending_present.store(false, Ordering::SeqCst);
     binding.next_redraw.lock().unwrap().take();
@@ -471,8 +503,9 @@ pub(super) fn shutdown_display_session(binding: &Rc<OutputBinding>, session: Dis
     binding.display.lock().unwrap().take();
 }
 
-pub(super) fn shutdown_output_entry(mut entry: OutputEntry) {
-    if let (Some(binding), Some(session)) = (entry.binding.as_ref(), entry.session.take()) {
+pub fn shutdown_output_entry(mut entry: impl SessionOutput) {
+    let entry = entry.slot();
+    if let (Some(binding), Some(session)) = (entry.binding, entry.session.take()) {
         shutdown_display_session(binding, session);
     }
 }

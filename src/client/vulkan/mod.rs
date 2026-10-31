@@ -43,10 +43,9 @@ struct CompositionPushConstants {
 }
 
 pub struct VulkanRuntime {
-    _entry: ash::Entry,
+    entry: ash::Entry,
     instance: ash::Instance,
     surface_loader: ash::khr::surface::Instance,
-    wayland_surface_loader: ash::khr::wayland_surface::Instance,
     device: ash::Device,
     swapchain_loader: ash::khr::swapchain::Device,
     physical_device: vk::PhysicalDevice,
@@ -59,6 +58,7 @@ pub struct VulkanRuntime {
 }
 
 pub use direct::discard_direct_frame;
+pub use runtime::WindowSystem;
 
 pub struct Composition {
     pub source: [f32; 4],

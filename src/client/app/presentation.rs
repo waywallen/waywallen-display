@@ -1,12 +1,12 @@
 use super::OutputBinding;
-use crate::vulkan;
+use crate as sys;
+use crate::client::vulkan;
 use anyhow::{anyhow, Result};
 use ash::vk;
 use ash::vk::Handle;
 use std::ffi::{c_char, c_void, CStr};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
-use waywallen_display as sys;
 
 pub(super) unsafe extern "C" fn on_binding_ready(
     user_data: *mut c_void,
@@ -301,7 +301,7 @@ pub(super) unsafe extern "C" fn on_frame_ready(
     request_present(binding);
 }
 
-pub(super) fn present_latest(binding: &OutputBinding) -> Result<()> {
+pub fn present_latest(binding: &OutputBinding) -> Result<()> {
     let config = *binding.config.lock().unwrap();
     let composition = vulkan::Composition {
         source: config.source,

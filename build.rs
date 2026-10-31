@@ -33,9 +33,9 @@ fn main() {
 
     let egl = cfg!(feature = "egl");
     let vulkan = cfg!(feature = "vulkan");
-    let layer_shell = cfg!(feature = "layer-shell");
+    let client_common = cfg!(feature = "client-common");
 
-    if layer_shell {
+    if client_common {
         compile_layer_shell_shaders(&manifest_dir, &out_dir);
     }
 
