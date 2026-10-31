@@ -5,12 +5,12 @@
 //! display with the daemon over the waywallen-display UDS protocol.
 
 mod app;
-mod vulkan;
 mod watcher;
 
 use anyhow::Result;
 use std::path::PathBuf;
 use waywallen_display as sys;
+use waywallen_display::client::vulkan;
 
 fn default_socket_path() -> PathBuf {
     let runtime = std::env::var_os("XDG_RUNTIME_DIR")

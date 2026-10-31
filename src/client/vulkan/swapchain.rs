@@ -26,7 +26,7 @@ impl WsiPresenter {
         }
         .context("vkGetPhysicalDeviceSurfaceFormatsKHR")?;
         if formats.is_empty() {
-            bail!("Wayland surface has no Vulkan formats");
+            bail!("surface has no Vulkan formats");
         }
         let surface_format = choose_surface_format(&formats);
         let extent = choose_extent(&capabilities, requested);

@@ -1,30 +1,55 @@
 use super::VulkanRuntime;
+use crate as sys;
 use anyhow::{anyhow, bail, Context, Result};
 use ash::vk;
 use ash::vk::Handle;
 use std::collections::HashSet;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::sync::Arc;
-use wayland_client::protocol::wl_surface::WlSurface;
-use wayland_client::{Connection, Proxy};
-use waywallen_display as sys;
+
+/// The window-system half of presentation. Each client implements it for its
+/// own connection (Wayland, XCB); everything else in this module is shared.
+pub trait WindowSystem {
+    /// What a single Vulkan surface is created from.
+    type Target;
+    /// Shown in log and error messages, e.g. "Wayland".
+    const NAME: &'static str;
+    const APPLICATION: &'static CStr;
+    /// Instance extension providing the surface entry points.
+    const SURFACE_EXTENSION: &'static CStr;
+
+    fn create_surface(
+        &self,
+        entry: &ash::Entry,
+        instance: &ash::Instance,
+        target: &Self::Target,
+    ) -> Result<vk::SurfaceKHR>;
+
+    fn presentation_support(
+        &self,
+        entry: &ash::Entry,
+        instance: &ash::Instance,
+        physical_device: vk::PhysicalDevice,
+        queue_family: u32,
+    ) -> bool;
+}
 
 impl VulkanRuntime {
-    pub fn new(
-        conn: &Connection,
-        surfaces: &[(u32, WlSurface)],
+    pub fn new<W: WindowSystem>(
+        system: &W,
+        surfaces: &[(u32, W::Target)],
         compositor_drm: (u32, u32),
     ) -> Result<(Arc<Self>, Vec<(u32, vk::SurfaceKHR)>)> {
         if surfaces.is_empty() {
-            bail!("cannot initialize Vulkan without a Wayland surface");
+            bail!("cannot initialize Vulkan without a {} surface", W::NAME);
         }
         let requirements = importer_requirements()?;
         let entry = unsafe { ash::Entry::load() }.context("load Vulkan loader")?;
-        let app_name = CString::new("waywallen-layer-shell").unwrap();
+        let app_name = W::APPLICATION;
         let app_info = vk::ApplicationInfo::default()
-            .application_name(&app_name)
+            .application_name(app_name)
             .application_version(1)
-            .engine_name(&app_name)
+            .engine_name(app_name)
             .engine_version(1)
             .api_version(requirements.api_version);
         let validation_layer = CString::new("VK_LAYER_KHRONOS_validation").unwrap();
@@ -47,7 +72,7 @@ impl VulkanRuntime {
         let debug_enabled = validation_available && debug_utils_available;
         let mut instance_extensions = vec![
             ash::khr::surface::NAME.as_ptr(),
-            ash::khr::wayland_surface::NAME.as_ptr(),
+            W::SURFACE_EXTENSION.as_ptr(),
         ];
         if debug_enabled {
             instance_extensions.push(ash::ext::debug_utils::NAME.as_ptr());
@@ -63,11 +88,10 @@ impl VulkanRuntime {
         let instance =
             unsafe { entry.create_instance(&instance_info, None) }.context("vkCreateInstance")?;
         let surface_loader = ash::khr::surface::Instance::new(&entry, &instance);
-        let wayland_surface_loader = ash::khr::wayland_surface::Instance::new(&entry, &instance);
 
         let mut vk_surfaces = Vec::with_capacity(surfaces.len());
         for (output, surface) in surfaces {
-            match create_wayland_surface(conn, surface, &wayland_surface_loader) {
+            match system.create_surface(&entry, &instance, surface) {
                 Ok(vk_surface) => vk_surfaces.push((*output, vk_surface)),
                 Err(error) => {
                     for (_, vk_surface) in vk_surfaces.drain(..) {
@@ -80,10 +104,10 @@ impl VulkanRuntime {
         }
 
         let selected = select_physical_device(
+            &entry,
             &instance,
             &surface_loader,
-            &wayland_surface_loader,
-            conn.backend().display_ptr().cast(),
+            system,
             &vk_surfaces,
             &requirements.device_extensions,
             compositor_drm,
@@ -170,10 +194,9 @@ impl VulkanRuntime {
 
         Ok((
             Arc::new(Self {
-                _entry: entry,
+                entry,
                 instance,
                 surface_loader,
-                wayland_surface_loader,
                 device,
                 swapchain_loader,
                 physical_device,
@@ -188,8 +211,12 @@ impl VulkanRuntime {
         ))
     }
 
-    pub fn create_surface(&self, conn: &Connection, surface: &WlSurface) -> Result<vk::SurfaceKHR> {
-        let vk_surface = create_wayland_surface(conn, surface, &self.wayland_surface_loader)?;
+    pub fn create_surface<W: WindowSystem>(
+        &self,
+        system: &W,
+        surface: &W::Target,
+    ) -> Result<vk::SurfaceKHR> {
+        let vk_surface = system.create_surface(&self.entry, &self.instance, surface)?;
         let supported = unsafe {
             self.surface_loader.get_physical_device_surface_support(
                 self.physical_device,
@@ -200,7 +227,10 @@ impl VulkanRuntime {
         .context("query hot-plug surface support")?;
         if !supported {
             unsafe { self.surface_loader.destroy_surface(vk_surface, None) };
-            bail!("selected Vulkan device cannot present to the hot-plugged Wayland surface");
+            bail!(
+                "selected Vulkan device cannot present to the hot-plugged {} surface",
+                W::NAME
+            );
         }
         Ok(vk_surface)
     }
@@ -216,7 +246,7 @@ impl VulkanRuntime {
             device: self.device.handle().as_raw() as usize as *mut c_void,
             queue_family_index: self.graphics_queue_family,
             vk_get_instance_proc_addr: unsafe {
-                std::mem::transmute(self._entry.static_fn().get_instance_proc_addr)
+                std::mem::transmute(self.entry.static_fn().get_instance_proc_addr)
             },
         }
     }
@@ -290,27 +320,11 @@ fn importer_requirements() -> Result<ImporterRequirements> {
     })
 }
 
-fn create_wayland_surface(
-    conn: &Connection,
-    surface: &WlSurface,
-    loader: &ash::khr::wayland_surface::Instance,
-) -> Result<vk::SurfaceKHR> {
-    let display = conn.backend().display_ptr();
-    let wl_surface = surface.id().as_ptr();
-    if display.is_null() || wl_surface.is_null() {
-        bail!("wayland-client did not expose system display/surface handles");
-    }
-    let info = vk::WaylandSurfaceCreateInfoKHR::default()
-        .display(display.cast())
-        .surface(wl_surface.cast());
-    unsafe { loader.create_wayland_surface(&info, None) }.context("vkCreateWaylandSurfaceKHR")
-}
-
-fn select_physical_device(
+fn select_physical_device<W: WindowSystem>(
+    entry: &ash::Entry,
     instance: &ash::Instance,
     surface_loader: &ash::khr::surface::Instance,
-    wayland_surface_loader: &ash::khr::wayland_surface::Instance,
-    wayland_display: *mut vk::wl_display,
+    system: &W,
     surfaces: &[(u32, vk::SurfaceKHR)],
     importer_extensions: &[CString],
     compositor_drm: (u32, u32),
@@ -354,13 +368,7 @@ fn select_physical_device(
             if queue_properties[family as usize].queue_count == 0 {
                 continue;
             }
-            if !unsafe {
-                wayland_surface_loader.get_physical_device_wayland_presentation_support(
-                    physical_device,
-                    family,
-                    &mut *wayland_display,
-                )
-            } {
+            if !system.presentation_support(entry, instance, physical_device, family) {
                 continue;
             }
             let mut all_supported = true;
@@ -418,7 +426,8 @@ fn select_physical_device(
         })
         .ok_or_else(|| {
             anyhow!(
-                "no Vulkan device satisfies display DMA-BUF import requirements and all Wayland targets"
+                "no Vulkan device satisfies display DMA-BUF import requirements and all {} targets",
+                W::NAME
             )
         })
 }

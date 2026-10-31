@@ -15,7 +15,15 @@ path = "src/lib.rs"
 default = ["egl", "vulkan", "layer-shell"]
 egl = []
 vulkan = []
+client-common = [
+    "dep:ash",
+    "dep:anyhow",
+    "dep:libc",
+    "dep:log",
+    "dep:wildmatch",
+]
 layer-shell = [
+    "client-common",
     "dep:ash",
     "dep:anyhow",
     "dep:thiserror",
@@ -33,6 +41,17 @@ layer-shell = [
     "dep:niri-ipc",
     "dep:md-5",
     "dep:wildmatch",
+]
+x11 = [
+    "client-common",
+    "dep:ash",
+    "dep:anyhow",
+    "dep:env_logger",
+    "dep:libc",
+    "dep:log",
+    "dep:md-5",
+    "dep:wildmatch",
+    "dep:x11rb",
 ]
 
 [dependencies]
@@ -53,6 +72,10 @@ wayland-backend = { version = "0.3", default-features = false, optional = true }
 niri-ipc = { version = "26.4.0", optional = true }
 md-5 = { version = "0.10", optional = true }
 wildmatch = { version = "2.6.1", optional = true }
+x11rb = { version = "0.14", features = ["dl-libxcb", "dri3", "randr", "xinput"], optional = true }
+
+[dev-dependencies]
+serde_json = "1.0"
 
 [build-dependencies]
 cc = "1"
@@ -62,3 +85,8 @@ pkg-config = "0.3"
 name = "waywallen-layer-shell"
 path = "src/bin/layer_shell/main.rs"
 required-features = ["layer-shell"]
+
+[[bin]]
+name = "waywallen-x11"
+path = "src/bin/x11/main.rs"
+required-features = ["x11"]

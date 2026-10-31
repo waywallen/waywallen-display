@@ -8,11 +8,11 @@ use super::{
     full_color_range, ActiveTransition, BlankState, Composition, DirectRelease, PresentResult,
     WsiPresenter, BLUR_PUSH_CONSTANT_OFFSET, SWAPCHAIN_ACQUIRE_TIMEOUT_NS,
 };
+use crate as sys;
 use anyhow::{anyhow, Context, Result};
 use ash::vk;
 use ash::vk::Handle;
 use std::time::Instant;
-use waywallen_display as sys;
 
 impl WsiPresenter {
     pub fn present(

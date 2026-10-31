@@ -1,8 +1,9 @@
-use super::session::{shutdown_display_session, shutdown_output_entry};
 use super::{App, FrameConfig, OutputBinding, OutputEntry, INITIAL_RECONNECT_DELAY};
 use crate::{vulkan, watcher};
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Context, Result};
+use ash::vk;
 use md5::{Digest, Md5};
+use std::ffi::CStr;
 use std::os::unix::fs::FileExt;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -16,7 +17,7 @@ use wayland_client::protocol::wl_output::WlOutput;
 use wayland_client::protocol::wl_registry::WlRegistry;
 use wayland_client::protocol::wl_seat::WlSeat;
 use wayland_client::protocol::wl_surface::WlSurface;
-use wayland_client::{Connection, Dispatch, QueueHandle};
+use wayland_client::{Connection, Dispatch, Proxy, QueueHandle};
 use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_manager_v1::WpCursorShapeManagerV1;
 use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1;
 use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_v1::WpFractionalScaleV1;
@@ -35,6 +36,7 @@ use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::ZwlrLay
 use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::ZwlrLayerSurfaceV1;
 use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
 use waywallen_display as sys;
+use waywallen_display::client::app::{shutdown_display_session, shutdown_output_entry};
 
 delegate_noop!(App: ignore WpCursorShapeManagerV1);
 
@@ -693,4 +695,50 @@ fn push_resize_if_registered(binding: &Rc<OutputBinding>, physical: (u32, u32)) 
         refresh_mhz
     );
     Ok(())
+}
+
+/// The Wayland connection as seen by the shared Vulkan presenter.
+pub(super) struct WaylandSystem<'a>(pub(super) &'a Connection);
+
+impl vulkan::WindowSystem for WaylandSystem<'_> {
+    type Target = WlSurface;
+    const NAME: &'static str = "Wayland";
+    const APPLICATION: &'static CStr = c"waywallen-layer-shell";
+    const SURFACE_EXTENSION: &'static CStr = ash::khr::wayland_surface::NAME;
+
+    fn create_surface(
+        &self,
+        entry: &ash::Entry,
+        instance: &ash::Instance,
+        surface: &WlSurface,
+    ) -> Result<vk::SurfaceKHR> {
+        let display = self.0.backend().display_ptr();
+        let wl_surface = surface.id().as_ptr();
+        if display.is_null() || wl_surface.is_null() {
+            bail!("wayland-client did not expose system display/surface handles");
+        }
+        let info = vk::WaylandSurfaceCreateInfoKHR::default()
+            .display(display.cast())
+            .surface(wl_surface.cast());
+        let loader = ash::khr::wayland_surface::Instance::new(entry, instance);
+        unsafe { loader.create_wayland_surface(&info, None) }.context("vkCreateWaylandSurfaceKHR")
+    }
+
+    fn presentation_support(
+        &self,
+        entry: &ash::Entry,
+        instance: &ash::Instance,
+        physical_device: vk::PhysicalDevice,
+        queue_family: u32,
+    ) -> bool {
+        let display: *mut vk::wl_display = self.0.backend().display_ptr().cast();
+        let loader = ash::khr::wayland_surface::Instance::new(entry, instance);
+        unsafe {
+            loader.get_physical_device_wayland_presentation_support(
+                physical_device,
+                queue_family,
+                &mut *display,
+            )
+        }
+    }
 }

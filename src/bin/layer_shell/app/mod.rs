@@ -1,19 +1,15 @@
 mod input;
-mod presentation;
-mod session;
 mod wayland;
 
-use self::presentation::present_latest;
-use self::session::shutdown_display_session;
-use self::wayland::make_output_binding;
+use self::wayland::{make_output_binding, WaylandSystem};
 use crate::{vulkan, watcher};
 use anyhow::{anyhow, bail, Context, Result};
 use std::collections::HashMap;
 use std::os::fd::AsRawFd;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use wayland_client::globals::registry_queue_init;
 use wayland_client::protocol::wl_compositor::WlCompositor;
@@ -35,98 +31,11 @@ use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::{
 use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::{
     Anchor, KeyboardInteractivity, ZwlrLayerSurfaceV1,
 };
-use waywallen_display as sys;
-
-pub struct OutputBinding {
-    display_name: String,
-    instance_id: String,
-    configured_size: Mutex<Option<(u32, u32)>>,
-    scale: std::sync::atomic::AtomicI32,
-    fractional_scale_120: AtomicU32,
-    refresh_mhz: AtomicU32,
-    display: Mutex<Option<DisplayPtr>>,
-    registered: AtomicBool,
-    last_pushed_metrics: Mutex<Option<(u32, u32, u32)>>,
-    config: Mutex<FrameConfig>,
-    runtime: Arc<vulkan::VulkanRuntime>,
-    presenter: Mutex<vulkan::WsiPresenter>,
-    pending_present: AtomicBool,
-    next_redraw: Mutex<Option<Instant>>,
-    watcher: Arc<watcher::OutputInfo>,
-}
-
-impl OutputBinding {
-    pub fn display_name(&self) -> &str {
-        &self.display_name
-    }
-    fn with_display<F>(&self, f: F) -> Option<i32>
-    where
-        F: FnOnce(*mut sys::waywallen_display_t) -> i32,
-    {
-        let guard = self.display.lock().unwrap();
-        guard.as_ref().map(|d| f(d.0))
-    }
-}
-
-#[derive(Copy, Clone)]
-struct DisplayPtr(*mut sys::waywallen_display_t);
-
-const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(2);
-const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
-const STABLE_SESSION_TIME: Duration = Duration::from_secs(20);
-
-#[derive(Clone, Copy)]
-enum DisplaySessionState {
-    Handshake { events: i16 },
-    Ready,
-    Retiring { blank_required: bool },
-}
-
-struct DisplaySession {
-    display: DisplayPtr,
-    state: DisplaySessionState,
-    started: Instant,
-    _binding: Rc<OutputBinding>,
-}
-
-impl DisplaySession {
-    fn is_ready(&self) -> bool {
-        matches!(self.state, DisplaySessionState::Ready)
-    }
-
-    fn poll_events(&self) -> i16 {
-        match self.state {
-            DisplaySessionState::Handshake { events } => events,
-            DisplaySessionState::Ready => {
-                let mut events = libc::POLLIN;
-                if unsafe { sys::waywallen_display_wants_writable(self.display.0) } {
-                    events |= libc::POLLOUT;
-                }
-                events
-            }
-            DisplaySessionState::Retiring { .. } => 0,
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-struct FrameConfig {
-    source: [f32; 4],
-    destination: [f32; 4],
-    transform: u32,
-    clear: [f32; 4],
-}
-
-impl Default for FrameConfig {
-    fn default() -> Self {
-        Self {
-            source: [0.0; 4],
-            destination: [0.0; 4],
-            transform: 0,
-            clear: [0.0; 4],
-        }
-    }
-}
+use waywallen_display::client::app::{
+    present_latest, publish_window_state, shutdown_display_session, DisplaySession,
+    DisplaySessionState, DisplaySessions, FrameConfig, OutputBinding, OutputSlot, SessionOutput,
+    INITIAL_RECONNECT_DELAY,
+};
 
 struct OutputEntry {
     wl_output: WlOutput,
@@ -147,6 +56,25 @@ struct OutputEntry {
     output_description: Option<String>,
     output_make: Option<String>,
     output_model: Option<String>,
+}
+
+impl SessionOutput for OutputEntry {
+    fn binding(&self) -> Option<&Rc<OutputBinding>> {
+        self.binding.as_ref()
+    }
+
+    fn session(&self) -> Option<&DisplaySession> {
+        self.session.as_ref()
+    }
+
+    fn slot(&mut self) -> OutputSlot<'_> {
+        OutputSlot {
+            binding: self.binding.as_ref(),
+            session: &mut self.session,
+            reconnect_at: &mut self.reconnect_at,
+            reconnect_delay: &mut self.reconnect_delay,
+        }
+    }
 }
 
 struct App {
@@ -177,6 +105,26 @@ struct PointerCtx {
     last_x: f64,
     last_y: f64,
     axis_source: u32,
+}
+
+impl DisplaySessions for App {
+    type Output = OutputEntry;
+
+    fn outputs(&self) -> &HashMap<u32, OutputEntry> {
+        &self.outputs
+    }
+
+    fn outputs_mut(&mut self) -> &mut HashMap<u32, OutputEntry> {
+        &mut self.outputs
+    }
+
+    fn socket_path(&self) -> &Path {
+        &self.uds_sock
+    }
+
+    fn window_observation_available(&self) -> bool {
+        self.window_observation_available
+    }
 }
 
 impl App {
@@ -248,7 +196,7 @@ impl App {
         surface.commit();
         let mut rebuild_runtime = false;
         if let Some(runtime) = self.vulkan.as_ref() {
-            match runtime.create_surface(conn, &surface) {
+            match runtime.create_surface(&WaylandSystem(conn), &surface) {
                 Ok(vk_surface) => entry.vk_surface = Some(vk_surface),
                 Err(error) => {
                     rebuild_runtime = true;
@@ -274,7 +222,7 @@ impl App {
             .filter_map(|(name, entry)| entry.surface.clone().map(|surface| (*name, surface)))
             .collect::<Vec<_>>();
         let (runtime, surfaces) = vulkan::VulkanRuntime::new(
-            conn,
+            &WaylandSystem(conn),
             &wayland_surfaces,
             (self.compositor_drm_major, self.compositor_drm_minor),
         )?;
@@ -392,7 +340,7 @@ impl App {
                         continue;
                     }
                     let flags = binding.watcher.window_flags();
-                    let rc = session::publish_window_state(binding, session.display.0);
+                    let rc = publish_window_state(binding, session.display);
                     if rc >= 0 {
                         log::debug!(
                             "watcher: [{}] window_state flags=0x{flags:x}",
@@ -664,7 +612,7 @@ pub(super) fn run(socket: PathBuf, name_prefix: String) -> Result<()> {
         .filter_map(|(name, entry)| entry.surface.clone().map(|surface| (*name, surface)))
         .collect();
     let (runtime, vk_surfaces) = vulkan::VulkanRuntime::new(
-        &conn,
+        &WaylandSystem(&conn),
         &wayland_surfaces,
         (app.compositor_drm_major, app.compositor_drm_minor),
     )?;
@@ -750,9 +698,7 @@ pub(super) fn run(socket: PathBuf, name_prefix: String) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::presentation::redraw_interval;
     use super::wayland::physical_output_size;
-    use std::time::Duration;
 
     #[test]
     fn fractional_output_size_rounds_to_nearest_physical_pixel() {
@@ -764,12 +710,5 @@ mod tests {
             physical_output_size((1001, 801), 2, 150, false),
             (2002, 1602)
         );
-    }
-
-    #[test]
-    fn redraw_interval_tracks_refresh_rate_with_safe_bounds() {
-        assert_eq!(redraw_interval(60_000), Duration::from_nanos(16_666_666));
-        assert_eq!(redraw_interval(1_000_000), Duration::from_millis(4));
-        assert_eq!(redraw_interval(0), Duration::from_millis(33));
     }
 }

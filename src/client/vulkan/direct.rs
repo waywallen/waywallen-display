@@ -2,10 +2,10 @@ use super::{
     full_color_range, DirectBinding, DirectFrame, DirectRelease, WsiPresenter,
     RESOURCE_RETIRE_TIMEOUT_NS,
 };
+use crate as sys;
 use anyhow::{anyhow, bail, Context, Result};
 use ash::vk;
 use ash::vk::Handle;
-use waywallen_display as sys;
 
 impl WsiPresenter {
     pub fn has_direct_binding(&self) -> bool {
