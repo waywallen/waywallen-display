@@ -56,11 +56,12 @@ function setup() {
         Main, GLib, global, Meta: {WindowType: {NORMAL: 0}}, Wallpaper: {APPLICATION_ID: 'wallpaper'},
     });
     const lines = [];
-    const monitor = new Monitor();
+    const settings = Object.assign(new Signals(), {get_boolean: () => settings.enabled, enabled: true});
+    const monitor = new Monitor(settings);
     monitor.enable();
     monitor.setLauncher({running: true, writeStdin: line => lines.push(line.trim())});
     return {
-        monitor, global, Main, windows, geometries, lines, timers,
+        settings, monitor, global, Main, windows, geometries, lines, timers,
         flush() {
             for (const [id, callback] of [...timers]) {
                 timers.delete(id);
@@ -90,15 +91,61 @@ test('maximized windows and monitor transfers only affect their own output', () 
 
     s.Main.overview.visible = true;
     s.Main.overview.emit('showing');
-    assert.deepEqual(s.flush(), ['W 0 0 0']);
+    assert.deepEqual(s.flush(), []);
     s.Main.overview.visible = false;
     s.Main.overview.emit('hidden');
-    assert.deepEqual(s.flush(), ['W 0 0 7']);
+    assert.deepEqual(s.flush(), []);
     s.monitor.disable();
     assert.equal(s.global.display.handlers.size, 0);
     assert.equal(s.Main.layoutManager.handlers.size, 0);
     assert.equal(s.timers.size, 0);
 });
+
+for (const fullscreen of [false, true]) {
+    test(`${fullscreen ? 'fullscreen' : 'maximized'} windows follow the active workspace in overview`, () => {
+        const s = setup();
+        let visible = true;
+        const window = Object.assign(new Signals(), {
+            showing_on_its_workspace: () => visible,
+            get_window_type: () => 0,
+            get_monitor: () => 0,
+            has_focus: () => false,
+            is_maximized: () => true,
+            fullscreen,
+        });
+        const flags = fullscreen ? 9 : 5;
+        s.windows.push(window);
+        assert.deepEqual(s.flush(), [`W -1920 0 ${flags}`, 'W 0 0 0']);
+
+        s.Main.overview.visible = true;
+        s.Main.overview.emit('showing');
+        assert.deepEqual(s.flush(), []);
+        s.windows.length = 0;
+        s.global.workspace_manager.emit('active-workspace-changed');
+        assert.deepEqual(s.flush(), ['W -1920 0 0']);
+        assert.equal(window.handlers.size, 0);
+        s.windows.push(window);
+        s.global.workspace_manager.emit('active-workspace-changed');
+        assert.deepEqual(s.flush(), [`W -1920 0 ${flags}`]);
+
+        visible = false;
+        s.global.window_manager.emit('minimize');
+        assert.deepEqual(s.flush(), ['W -1920 0 0']);
+        visible = true;
+        s.global.window_manager.emit('unminimize');
+        assert.deepEqual(s.flush(), [`W -1920 0 ${flags}`]);
+        window.fullscreen = false;
+        window.is_maximized = () => false;
+        s.global.window_manager.emit('size-change');
+        assert.deepEqual(s.flush(), ['W -1920 0 1']);
+        s.Main.overview.visible = false;
+        s.Main.overview.emit('hidden');
+        assert.deepEqual(s.flush(), []);
+        s.monitor.disable();
+        assert.equal(window.handlers.size, 0);
+        assert.equal(s.timers.size, 0);
+    });
+}
 
 test('monitor layout changes resend unchanged window flags at the new geometry', () => {
     const s = setup();
@@ -109,7 +156,7 @@ test('monitor layout changes resend unchanged window flags at the new geometry',
     s.monitor.disable();
 });
 
-test('desktop and overview visibility preserve exclusion generations and metadata tracking', () => {
+test('desktop visibility and overview exclusions preserve generations and metadata tracking', () => {
     const s = setup();
     let visible = true;
     let applicationId = 'editor';
@@ -137,11 +184,11 @@ test('desktop and overview visibility preserve exclusion generations and metadat
 
     s.Main.overview.visible = true;
     s.Main.overview.emit('showing');
-    assert.deepEqual(s.flush(), ['W -1920 0 0 9']);
+    assert.deepEqual(s.flush(), []);
     assert.equal(window.handlers.size, 3);
     applicationId = 'ignored';
     window.emit('notify::gtk-application-id');
-    assert.deepEqual(s.flush(), []);
+    assert.deepEqual(s.flush(), ['W -1920 0 0 9']);
     s.Main.overview.visible = false;
     s.Main.overview.emit('hidden');
     assert.deepEqual(s.flush(), []);
@@ -150,4 +197,31 @@ test('desktop and overview visibility preserve exclusion generations and metadat
     assert.deepEqual(s.flush(), ['W -1920 0 7 9']);
     s.monitor.disable();
     assert.equal(window.handlers.size, 0);
+});
+
+test('overview pause setting updates window state immediately', () => {
+    const s = setup();
+    s.windows.push(Object.assign(new Signals(), {
+        showing_on_its_workspace: () => true,
+        get_window_type: () => 0,
+        get_monitor: () => 0,
+        has_focus: () => true,
+        is_maximized: () => true,
+    }));
+    assert.deepEqual(s.flush(), ['W -1920 0 7', 'W 0 0 0']);
+    s.Main.overview.visible = true;
+    s.Main.overview.emit('showing');
+    assert.deepEqual(s.flush(), []);
+    s.settings.enabled = false;
+    s.settings.emit('changed::overview-autopause');
+    assert.deepEqual(s.flush(), ['W -1920 0 0']);
+    s.settings.enabled = true;
+    s.settings.emit('changed::overview-autopause');
+    assert.deepEqual(s.flush(), ['W -1920 0 7']);
+    s.settings.enabled = false;
+    s.Main.overview.visible = false;
+    s.Main.overview.emit('hidden');
+    assert.deepEqual(s.flush(), []);
+    s.monitor.disable();
+    assert.equal(s.settings.handlers.size, 0);
 });

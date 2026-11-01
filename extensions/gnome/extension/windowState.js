@@ -22,7 +22,8 @@ const WIN_FULLSCREEN    = 1 << 3;
 const DEBOUNCE_MS = 80;
 
 export class WindowStateMonitor {
-    constructor() {
+    constructor(settings) {
+        this._settings = settings;
         this._launcher = null;
         this._sigs = [];   // [obj, handlerId]
         this._lastFlags = new Map();  // monitor index -> last sent flags
@@ -67,6 +68,7 @@ export class WindowStateMonitor {
         })]);
         this._sigs.push([wsm, wsm.connect('active-workspace-changed', queue)]);
         this._sigs.push([wsm, wsm.connect('showing-desktop-changed', queue)]);
+        this._sigs.push([this._settings, this._settings.connect('changed::overview-autopause', queue)]);
         this._sigs.push([overview, overview.connect('showing', queue)]);
         this._sigs.push([overview, overview.connect('hidden', queue)]);
         this._queue();
@@ -136,10 +138,9 @@ export class WindowStateMonitor {
                     .map(signal => w.connect(signal, () => this._queue()));
                 this._windowSignals.set(w, signals);
             }
-            // Overview exposes the wallpaper until its exit animation finishes.
-            // Keep observing window metadata while suppressing coverage.
             // Show-desktop hides normal windows without minimizing them.
-            if (Main.overview.visible || w.skip_taskbar || !w.showing_on_its_workspace())
+            if ((Main.overview.visible && !this._settings.get_boolean('overview-autopause')) ||
+                w.skip_taskbar || !w.showing_on_its_workspace())
                 continue;
             if (w.title?.includes(APPLICATION_ID))
                 continue;

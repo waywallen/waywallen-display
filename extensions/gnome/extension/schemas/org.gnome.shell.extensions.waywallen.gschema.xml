@@ -31,6 +31,11 @@
       </description>
     </key>
 
+    <key name="overview-autopause" type="b">
+      <default>true</default>
+      <summary>Apply window pause rules in overview</summary>
+    </key>
+
     <key name="overview-blur" type="b">
       <default>true</default>
       <summary>Blur the overview background</summary>

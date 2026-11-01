@@ -50,38 +50,46 @@ msgid "Turn off to keep GNOME's solid frame around workspaces and the app grid."
 msgstr ""
 
 #: extensions/gnome/extension/prefs.js:65
-msgid "Blur overview background"
+msgid "Apply window pause rules in overview"
 msgstr ""
 
 #: extensions/gnome/extension/prefs.js:66
-msgid "Frosted-glass blur over the overview wallpaper."
+msgid "Use Waywallen pause settings for windows on the active workspace."
 msgstr ""
 
 #: extensions/gnome/extension/prefs.js:73
-msgid "Overview blur strength"
+msgid "Blur overview background"
 msgstr ""
 
 #: extensions/gnome/extension/prefs.js:74
+msgid "Frosted-glass blur over the overview wallpaper."
+msgstr ""
+
+#: extensions/gnome/extension/prefs.js:81
+msgid "Overview blur strength"
+msgstr ""
+
+#: extensions/gnome/extension/prefs.js:82
 msgid "Blur radius in pixels (higher is blurrier)."
 msgstr ""
 
-#: extensions/gnome/extension/prefs.js:96
+#: extensions/gnome/extension/prefs.js:104
 msgid "Pairs well with Blur my Shell"
 msgstr ""
 
-#: extensions/gnome/extension/prefs.js:97
+#: extensions/gnome/extension/prefs.js:105
 msgid "For the full frosted-glass look, install Blur my Shell — it also blurs the panel, dash and application windows, and coexists with this extension."
 msgstr ""
 
-#: extensions/gnome/extension/prefs.js:108
+#: extensions/gnome/extension/prefs.js:116
 msgid "Advanced"
 msgstr ""
 
-#: extensions/gnome/extension/prefs.js:112
+#: extensions/gnome/extension/prefs.js:120
 msgid "Show diagnostics overlay"
 msgstr ""
 
-#: extensions/gnome/extension/prefs.js:113
+#: extensions/gnome/extension/prefs.js:121
 msgid "Overlay resolution / fps / window-state on the wallpaper (dev only)."
 msgstr ""
 
@@ -109,19 +117,19 @@ msgstr ""
 msgid "Show the live wallpaper behind the overview and app grid. Disable this option to keep GNOME's original solid overview background."
 msgstr ""
 
-#: extensions/gnome/extension/schemas/org.gnome.shell.extensions.waywallen.gschema.xml:36
+#: extensions/gnome/extension/schemas/org.gnome.shell.extensions.waywallen.gschema.xml:41
 msgid "Blur the overview background"
 msgstr ""
 
-#: extensions/gnome/extension/schemas/org.gnome.shell.extensions.waywallen.gschema.xml:37
+#: extensions/gnome/extension/schemas/org.gnome.shell.extensions.waywallen.gschema.xml:42
 msgid "Apply a gaussian blur to the overview background wallpaper, like Blur my Shell does for the static wallpaper. Pairs well with Blur my Shell (the two are z-ordered to coexist), but does not require it."
 msgstr ""
 
-#: extensions/gnome/extension/schemas/org.gnome.shell.extensions.waywallen.gschema.xml:47
+#: extensions/gnome/extension/schemas/org.gnome.shell.extensions.waywallen.gschema.xml:52
 msgid "Overview background blur radius"
 msgstr ""
 
-#: extensions/gnome/extension/schemas/org.gnome.shell.extensions.waywallen.gschema.xml:48
+#: extensions/gnome/extension/schemas/org.gnome.shell.extensions.waywallen.gschema.xml:53
 msgid "Gaussian blur radius (in pixels) for the overview background. Higher is blurrier. 0 effectively disables the blur even when it is on."
 msgstr ""
 
@@ -129,52 +137,52 @@ msgstr ""
 msgid "Wallpaper plugin for the waywallen daemon."
 msgstr ""
 
-#: extensions/gnome/renderer/renderer.js:203
+#: extensions/gnome/renderer/renderer.js:199
 msgid "active"
 msgstr ""
 
-#: extensions/gnome/renderer/renderer.js:203
+#: extensions/gnome/renderer/renderer.js:199
 msgid "win"
 msgstr ""
 
-#: extensions/gnome/renderer/renderer.js:204
+#: extensions/gnome/renderer/renderer.js:200
 msgid "full"
 msgstr ""
 
-#: extensions/gnome/renderer/renderer.js:204
+#: extensions/gnome/renderer/renderer.js:200
 msgid "max"
 msgstr ""
 
-#: extensions/gnome/renderer/renderer.js:204
+#: extensions/gnome/renderer/renderer.js:200
 msgid "none"
 msgstr ""
 
-#: extensions/gnome/renderer/renderer.js:206
+#: extensions/gnome/renderer/renderer.js:202
 #, javascript-format
 msgid "mon %d  %s"
 msgstr ""
 
-#: extensions/gnome/renderer/renderer.js:207
+#: extensions/gnome/renderer/renderer.js:203
 #, javascript-format
 msgid "id %s"
 msgstr ""
 
-#: extensions/gnome/renderer/renderer.js:208
+#: extensions/gnome/renderer/renderer.js:204
 #, javascript-format
 msgid "disp %dx%d scale=%s"
 msgstr ""
 
-#: extensions/gnome/renderer/renderer.js:209
+#: extensions/gnome/renderer/renderer.js:205
 #, javascript-format
 msgid "tex %dx%d fourcc=0x%s backend=%s"
 msgstr ""
 
-#: extensions/gnome/renderer/renderer.js:211
+#: extensions/gnome/renderer/renderer.js:207
 #, javascript-format
 msgid "fps %s  frames %d"
 msgstr ""
 
-#: extensions/gnome/renderer/renderer.js:212
+#: extensions/gnome/renderer/renderer.js:208
 #, javascript-format
 msgid "winstate 0x%s (%s)"
 msgstr ""

@@ -61,6 +61,14 @@ export default class WaywallenPrefs extends ExtensionPreferences {
             Gio.SettingsBindFlags.DEFAULT);
         ovGroup.add(wallpaperRow);
 
+        const autopauseRow = new Adw.SwitchRow({
+            title: _('Apply window pause rules in overview'),
+            subtitle: _('Use Waywallen pause settings for windows on the active workspace.'),
+        });
+        settings.bind('overview-autopause', autopauseRow, 'active',
+            Gio.SettingsBindFlags.DEFAULT);
+        ovGroup.add(autopauseRow);
+
         const blurRow = new Adw.SwitchRow({
             title: _('Blur overview background'),
             subtitle: _('Frosted-glass blur over the overview wallpaper.'),
