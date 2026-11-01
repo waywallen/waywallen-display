@@ -49,38 +49,46 @@ msgid "Turn off to keep GNOME's solid frame around workspaces and the app grid."
 msgstr "Отключите, чтобы сохранить однотонную рамку GNOME вокруг рабочих пространств и сетки приложений."
 
 #: extensions/gnome/extension/prefs.js:65
+msgid "Apply window pause rules in overview"
+msgstr "Применять правила паузы для окон в режиме обзора"
+
+#: extensions/gnome/extension/prefs.js:66
+msgid "Use Waywallen pause settings for windows on the active workspace."
+msgstr "Применять настройки паузы Waywallen к окнам активного рабочего стола."
+
+#: extensions/gnome/extension/prefs.js:73
 msgid "Blur overview background"
 msgstr "Размывать фон режима обзора"
 
-#: extensions/gnome/extension/prefs.js:66
+#: extensions/gnome/extension/prefs.js:74
 msgid "Frosted-glass blur over the overview wallpaper."
 msgstr "Применять эффект матового стекла к обоям в режиме обзора."
 
-#: extensions/gnome/extension/prefs.js:73
+#: extensions/gnome/extension/prefs.js:81
 msgid "Overview blur strength"
 msgstr "Сила размытия фона обзора"
 
-#: extensions/gnome/extension/prefs.js:74
+#: extensions/gnome/extension/prefs.js:82
 msgid "Blur radius in pixels (higher is blurrier)."
 msgstr "Радиус размытия в пикселях (чем больше значение, тем сильнее размытие)."
 
-#: extensions/gnome/extension/prefs.js:96
+#: extensions/gnome/extension/prefs.js:104
 msgid "Pairs well with Blur my Shell"
 msgstr "Хорошо сочетается с Blur my Shell"
 
-#: extensions/gnome/extension/prefs.js:97
+#: extensions/gnome/extension/prefs.js:105
 msgid "For the full frosted-glass look, install Blur my Shell — it also blurs the panel, dash and application windows, and coexists with this extension."
 msgstr "Для полноценного эффекта матового стекла установите Blur my Shell. Оно также размывает панель, панель запуска и окна приложений и работает вместе с этим расширением."
 
-#: extensions/gnome/extension/prefs.js:108
+#: extensions/gnome/extension/prefs.js:116
 msgid "Advanced"
 msgstr "Дополнительно"
 
-#: extensions/gnome/extension/prefs.js:112
+#: extensions/gnome/extension/prefs.js:120
 msgid "Show diagnostics overlay"
 msgstr "Показывать диагностическую информацию"
 
-#: extensions/gnome/extension/prefs.js:113
+#: extensions/gnome/extension/prefs.js:121
 msgid "Overlay resolution / fps / window-state on the wallpaper (dev only)."
 msgstr "Показывать состояние подключения, разрешение и состояние окон поверх обоев"
 
@@ -108,19 +116,19 @@ msgstr "Показывать обои на фоне режима обзора"
 msgid "Show the live wallpaper behind the overview and app grid. Disable this option to keep GNOME's original solid overview background."
 msgstr "Показывать живые обои на фоне режима обзора и сетки приложений. Отключите этот параметр, чтобы сохранить исходный однотонный фон режима обзора GNOME."
 
-#: extensions/gnome/extension/schemas/org.gnome.shell.extensions.waywallen.gschema.xml:36
+#: extensions/gnome/extension/schemas/org.gnome.shell.extensions.waywallen.gschema.xml:41
 msgid "Blur the overview background"
 msgstr "Размывать фон режима обзора"
 
-#: extensions/gnome/extension/schemas/org.gnome.shell.extensions.waywallen.gschema.xml:37
+#: extensions/gnome/extension/schemas/org.gnome.shell.extensions.waywallen.gschema.xml:42
 msgid "Apply a gaussian blur to the overview background wallpaper, like Blur my Shell does for the static wallpaper. Pairs well with Blur my Shell (the two are z-ordered to coexist), but does not require it."
 msgstr "Применять размытие по Гауссу к фоновым обоям режима обзора, как Blur my Shell делает со статическими обоями. Хорошо сочетается с Blur my Shell, но не требует его установки."
 
-#: extensions/gnome/extension/schemas/org.gnome.shell.extensions.waywallen.gschema.xml:47
+#: extensions/gnome/extension/schemas/org.gnome.shell.extensions.waywallen.gschema.xml:52
 msgid "Overview background blur radius"
 msgstr "Радиус размытия фона обзора"
 
-#: extensions/gnome/extension/schemas/org.gnome.shell.extensions.waywallen.gschema.xml:48
+#: extensions/gnome/extension/schemas/org.gnome.shell.extensions.waywallen.gschema.xml:53
 msgid "Gaussian blur radius (in pixels) for the overview background. Higher is blurrier. 0 effectively disables the blur even when it is on."
 msgstr "Радиус размытия по Гауссу в пикселях для фона режима обзора. Чем больше значение, тем сильнее размытие. Значение 0 фактически отключает размытие."
 
@@ -128,52 +136,52 @@ msgstr "Радиус размытия по Гауссу в пикселях дл
 msgid "Wallpaper plugin for the waywallen daemon."
 msgstr "Модуль живых обоев для фоновой службы waywallen."
 
-#: extensions/gnome/renderer/renderer.js:203
+#: extensions/gnome/renderer/renderer.js:199
 msgid "active"
 msgstr "активно"
 
-#: extensions/gnome/renderer/renderer.js:203
+#: extensions/gnome/renderer/renderer.js:199
 msgid "win"
 msgstr "окно"
 
-#: extensions/gnome/renderer/renderer.js:204
+#: extensions/gnome/renderer/renderer.js:200
 msgid "full"
 msgstr "полный экран"
 
-#: extensions/gnome/renderer/renderer.js:204
+#: extensions/gnome/renderer/renderer.js:200
 msgid "max"
 msgstr "развёрнуто"
 
-#: extensions/gnome/renderer/renderer.js:204
+#: extensions/gnome/renderer/renderer.js:200
 msgid "none"
 msgstr "нет"
 
-#: extensions/gnome/renderer/renderer.js:206
+#: extensions/gnome/renderer/renderer.js:202
 #, javascript-format
 msgid "mon %d  %s"
 msgstr "мон. %d  %s"
 
-#: extensions/gnome/renderer/renderer.js:207
+#: extensions/gnome/renderer/renderer.js:203
 #, javascript-format
 msgid "id %s"
 msgstr "id %s"
 
-#: extensions/gnome/renderer/renderer.js:208
+#: extensions/gnome/renderer/renderer.js:204
 #, javascript-format
 msgid "disp %dx%d scale=%s"
 msgstr "Экран: %dx%d, масштаб %s"
 
-#: extensions/gnome/renderer/renderer.js:209
+#: extensions/gnome/renderer/renderer.js:205
 #, javascript-format
 msgid "tex %dx%d fourcc=0x%s backend=%s"
 msgstr "Текстура: %dx%d, FourCC 0x%s, бэкенд %s"
 
-#: extensions/gnome/renderer/renderer.js:211
+#: extensions/gnome/renderer/renderer.js:207
 #, javascript-format
 msgid "fps %s  frames %d"
 msgstr "FPS: %s; кадров: %d"
 
-#: extensions/gnome/renderer/renderer.js:212
+#: extensions/gnome/renderer/renderer.js:208
 #, javascript-format
 msgid "winstate 0x%s (%s)"
 msgstr "Состояние окон: 0x%s (%s)"

@@ -87,7 +87,7 @@ export default class WaywallenExtension extends Extension {
         this._windowMgr.enable();
         this._pointer = new PointerForwarder();
         this._pointer.enable();
-        this._winState = new WindowStateMonitor();
+        this._winState = new WindowStateMonitor(this._settings);
         this._winState.enable();
         this._watchDaemon();
     }
