@@ -60,10 +60,28 @@ class ShaderEffect {
     uniforms = new Map();
     get_actor() { return this.actor; }
     get_texture() { return this.texture; }
-    get_uniform_location(name) { return name; }
     set_uniform_float(name, count, values) {
+        assert.equal(typeof name, 'string');
         assert.equal(values.length, count);
         this.uniforms.set(name, Array.from(values));
+    }
+    vfunc_paint_target(node, paintContext) { this.lastPaint = {node, paintContext}; }
+}
+
+class GLSLEffect extends ShaderEffect {
+    uniformNames = ['pixel_step', 'bounds', 'clip_radius'];
+    get_uniform_location(name) {
+        const location = this.uniformNames.indexOf(name);
+        assert.ok(location >= 0);
+        return location;
+    }
+    set_uniform_float(location, count, values) {
+        assert.ok(Number.isInteger(location));
+        super.set_uniform_float(this.uniformNames[location], count, values);
+    }
+    add_glsl_snippet(hook, declarations, code, replace) {
+        assert.equal(replace, false);
+        this.snippet = {hook, declarations, code};
     }
 }
 
@@ -72,7 +90,7 @@ function allocation(width, height) {
         get_width: () => width, get_height: () => height};
 }
 
-function setup() {
+function setup({shell51 = false} = {}) {
     const timers = new Map();
     let nextTimer = 1;
     const windows = [];
@@ -92,9 +110,20 @@ function setup() {
         .replace(/^import .*;\n/gm, '')
         .replace(/^export /gm, '');
     const Wallpaper = vm.runInNewContext(`${source}\n({LiveWallpaper, WallpaperRole, APPLICATION_ID})`, {
-        St: {Widget: Actor}, GObject: {registerClass: klass => klass}, GLib,
-        Clutter: {Clone: Actor, FixedLayout: class {}, BinLayout: class {}, AnimationMode: {}},
-        Shell: {GLSLEffect: ShaderEffect},
+        St: {Widget: Actor}, GObject: {registerClass(klass) {
+            if (klass.prototype instanceof ShaderEffect) {
+                const methods = Object.getOwnPropertyNames(klass.prototype);
+                assert.equal(methods.includes('vfunc_build_pipeline'), !shell51);
+                assert.equal(methods.includes('vfunc_get_static_snippet'), shell51);
+            }
+            return klass;
+        }}, GLib,
+        Clutter: {Clone: Actor, FixedLayout: class {}, BinLayout: class {}, AnimationMode: {},
+            ShaderEffect: shell51 ? ShaderEffect : class {}},
+        Shell: shell51 ? {} : {GLSLEffect},
+        Cogl: {SnippetHook: {FRAGMENT: 1}, Snippet: {
+            new: (hook, declarations, code) => ({hook, declarations, code}),
+        }},
         Main: {layoutManager: {monitors: [monitor], getWorkAreaForMonitor: () => work}},
         BlurController: class { setState() {} destroy() {} },
         PauseEffectKind: {BLUR: 'blur'},
@@ -308,3 +337,47 @@ test('clip uniforms account for offscreen offset and HiDPI changes', () => {
     assert.equal(actor.effects.size, 0);
     assert.equal(content.handlers.size, 0);
 });
+
+for (const shell51 of [false, true]) {
+    test(`rounded clip shader renders and resizes with ${shell51 ? 'GNOME 51' : 'legacy GLSLEffect'}`, () => {
+        const s = setup({shell51});
+        const r = s.renderer();
+        const {actor, background, content} = s.wallpaper(r.launcher, true, 'other');
+        content.rounded_clip_radius = 30;
+        actor.vfunc_allocate(allocation(960, 540));
+        const effect = actor._clipEffect;
+        let snippet;
+        if (shell51) {
+            snippet = effect.vfunc_get_static_snippet();
+        } else {
+            effect.vfunc_build_pipeline();
+            snippet = effect.snippet;
+        }
+        assert.equal(snippet.hook, 1);
+        assert.match(snippet.declarations, /uniform vec4 bounds;/);
+        assert.match(snippet.code, /cogl_color_out \*= rounded_rect_coverage/);
+
+        const node = {}, paintContext = {};
+        effect.texture = {get_width: () => 964, get_height: () => 544};
+        effect.vfunc_paint_target(node, paintContext);
+        assert.deepEqual(effect.lastPaint, {node, paintContext});
+        assert.deepEqual(effect.uniforms.get('bounds'), [22, 18, 962, 542]);
+        assert.deepEqual(effect.uniforms.get('clip_radius'), [15]);
+        assert.deepEqual(effect.uniforms.get('pixel_step'), [1 / 964, 1 / 544]);
+
+        content.rounded_clip_radius = 40;
+        content.emit('notify::rounded-clip-radius');
+        actor.vfunc_allocate(allocation(480, 270));
+        actor.resourceScale = 2;
+        effect.texture = {get_width: () => 968, get_height: () => 548};
+        effect.vfunc_paint_target(node, paintContext);
+        assert.equal(actor._clipEffect, effect);
+        assert.deepEqual(effect.uniforms.get('bounds'), [24, 20, 964, 544]);
+        assert.deepEqual(effect.uniforms.get('clip_radius'), [20]);
+        assert.deepEqual(effect.uniforms.get('pixel_step'), [1 / 968, 1 / 548]);
+
+        background.destroy();
+        assert.equal(actor.effects.size, 0);
+        assert.equal(content.handlers.size, 0);
+    });
+}

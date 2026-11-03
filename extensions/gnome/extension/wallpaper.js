@@ -78,7 +78,7 @@ float rounded_rect_coverage(vec2 p) {
 `;
 
 const CLIP_CODE = `
-vec2 texture_coord = cogl_tex_coord0_in.xy / pixel_step;
+vec2 texture_coord = cogl_tex_coord_in[0].xy / pixel_step;
 bool inside = texture_coord.x >= bounds.x && texture_coord.x <= bounds.z
            && texture_coord.y >= bounds.y && texture_coord.y <= bounds.w;
 if (clip_radius > 0.0 && !inside)
@@ -111,7 +111,7 @@ function fboOffset(actor) {
 }
 
 const RoundedClipEffect = GObject.registerClass(
-class WaywallenRoundedClipEffect extends Shell.GLSLEffect {
+class WaywallenRoundedClipEffect extends (Shell.GLSLEffect ?? Clutter.ShaderEffect) {
     constructor() {
         super();
         this._bounds = [0, 0, 0, 0];
@@ -124,10 +124,15 @@ class WaywallenRoundedClipEffect extends Shell.GLSLEffect {
         this._offsetY = 0;
     }
 
-    vfunc_build_pipeline() {
-        this.add_glsl_snippet(
-            Cogl.SnippetHook.FRAGMENT, CLIP_DECLARATIONS, CLIP_CODE, false
-        );
+    // GNOME 51 moved shader effects to Clutter and replaced the pipeline vfunc.
+    [Shell.GLSLEffect ? 'vfunc_build_pipeline' : 'vfunc_get_static_snippet']() {
+        if (Shell.GLSLEffect) {
+            this.add_glsl_snippet(
+                Cogl.SnippetHook.FRAGMENT, CLIP_DECLARATIONS, CLIP_CODE, false
+            );
+        } else {
+            return Cogl.Snippet.new(Cogl.SnippetHook.FRAGMENT, CLIP_DECLARATIONS, CLIP_CODE);
+        }
     }
 
     vfunc_paint_target(node, paintContext) {
@@ -166,17 +171,17 @@ class WaywallenRoundedClipEffect extends Shell.GLSLEffect {
         this._offsetY = offsetY;
 
         this.set_uniform_float(
-            this.get_uniform_location('pixel_step'), 2, [1 / width, 1 / height]
+            this.get_uniform_location?.('pixel_step') ?? 'pixel_step', 2, [1 / width, 1 / height]
         );
         const [x1, y1, x2, y2] = this._bounds;
-        this.set_uniform_float(this.get_uniform_location('bounds'), 4, [
+        this.set_uniform_float(this.get_uniform_location?.('bounds') ?? 'bounds', 4, [
             (x1 - offsetX) * scale,
             (y1 - offsetY) * scale,
             (x2 - offsetX) * scale,
             (y2 - offsetY) * scale,
         ]);
         this.set_uniform_float(
-            this.get_uniform_location('clip_radius'), 1, [this._radius * scale]
+            this.get_uniform_location?.('clip_radius') ?? 'clip_radius', 1, [this._radius * scale]
         );
     }
 });
