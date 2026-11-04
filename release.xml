@@ -1,3 +1,24 @@
+<release version="0.4.5" date="2026-11-04">
+  <description>
+    <p>Added:</p>
+    <ul>
+      <li>Add an optional native X11 desktop wallpaper client with per-monitor windows, pointer input, and window-state tracking. #85 by @wehrwolfmann</li>
+      <li>Add an option to apply window-based pause rules in the GNOME overview. #87 by @Gimas-aza</li>
+    </ul>
+    <p>Changed:</p>
+    <ul>
+      <li>Share Vulkan presentation and display session handling between layer-shell and X11 clients. #85 by @wehrwolfmann</li>
+      <li>Remove the -embed suffix from KDE zip filenames.</li>
+    </ul>
+    <p>Fixed:</p>
+    <ul>
+      <li>Release retired GPU buffer imports when switching GNOME wallpapers to prevent memory growth.</li>
+      <li>Allow the plasma-login-wallpaper host to connect on KDE login screens. #84 by @Neclyon</li>
+      <li>Fix rounded wallpaper corners in the GNOME overview. #87 by @Gimas-aza</li>
+      <li>Support rounded overview clipping on GNOME 51. #86 by @Gimas-aza</li>
+    </ul>
+  </description>
+</release>
 <release version="0.4.4" date="2026-10-28">
   <description>
     <p>Fixed:</p>

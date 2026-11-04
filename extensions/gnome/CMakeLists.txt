@@ -14,7 +14,7 @@ set(WW_GNOME_GETTEXT_DOMAIN "waywallen-gnome")
 # GNOME extension `version`: a monotonic integer the Shell / EGO compare on
 # (semver doesn't fit here). Bump by 1 every released extension change,
 # independent of the repo's PROJECT_VERSION (which goes into version-name).
-set(WW_GNOME_VERSION 5)
+set(WW_GNOME_VERSION 6)
 
 # Generate metadata.json with the version + project version stamped in.
 configure_file(
