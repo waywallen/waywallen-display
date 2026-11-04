@@ -131,7 +131,7 @@ plugin options. Release helpers compile and package them automatically:
 KDE testing:
 
 ```bash
-kpackagetool6 --type Plasma/Wallpaper --install build/waywallen-kde-<version>-<arch>-embed.zip
+kpackagetool6 --type Plasma/Wallpaper --install build/waywallen-kde-<version>-<arch>.zip
 LANGUAGE=ru LANG=ru_RU.UTF-8 plasmoidviewer -a org.waywallen.kde
 ```
 

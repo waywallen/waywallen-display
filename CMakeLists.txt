@@ -488,16 +488,8 @@ if(WAYWALLEN_DISPLAY_PLUGIN_QML)
     endforeach()
 
     list(APPEND CPACK_COMPONENTS_ALL kde_extension)
-    # An embed-flavored URI implies the kpackage bundles its own QML module
-    # (the CI build path); tag the zip so it doesn't collide with a future
-    # distro build that ships the system-module variant.
-    if(WAYWALLEN_DISPLAY_QML_URI MATCHES "Embed")
-        set(_ww_kde_zip_suffix "-embed")
-    else()
-        set(_ww_kde_zip_suffix "")
-    endif()
     set(CPACK_ARCHIVE_KDE_EXTENSION_FILE_NAME
-        "waywallen-kde-${PROJECT_VERSION}-${CMAKE_SYSTEM_PROCESSOR}${_ww_kde_zip_suffix}")
+        "waywallen-kde-${PROJECT_VERSION}-${CMAKE_SYSTEM_PROCESSOR}")
 endif()
 
 option(WAYWALLEN_DISPLAY_PLUGIN_GOBJECT "Build the GObject Introspection plugin" OFF)
