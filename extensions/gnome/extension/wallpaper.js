@@ -4,10 +4,14 @@
 // corners (in workspace overview) and lifetime automatically.
 
 import Clutter from 'gi://Clutter';
+import Cogl from 'gi://Cogl';
 import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
 import St from 'gi://St';
 import Graphene from 'gi://Graphene';
+import Shell from 'gi://Shell';
+
+import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 import {BlurController} from './blur.js';
 import {PauseEffectKind} from './controlCodec.js';
@@ -33,6 +37,154 @@ export function rendererPresentationReady(actor) {
 }
 
 const FADE_IN_MS = 800;
+
+// From LiveWallpaper: Meta.BackgroundContent clips its own pixels, not child clones.
+const CLIP_DECLARATIONS = `
+uniform vec4 bounds;
+uniform float clip_radius;
+uniform vec2 pixel_step;
+
+float rounded_rect_coverage(vec2 p) {
+    float center_left = bounds.x + clip_radius;
+    float center_right = bounds.z - clip_radius;
+    float center_x;
+    if (p.x < center_left)
+        center_x = center_left;
+    else if (p.x > center_right)
+        center_x = center_right;
+    else
+        return 1.0;
+
+    float center_top = bounds.y + clip_radius;
+    float center_bottom = bounds.w - clip_radius;
+    float center_y;
+    if (p.y < center_top)
+        center_y = center_top;
+    else if (p.y > center_bottom)
+        center_y = center_bottom;
+    else
+        return 1.0;
+
+    vec2 delta = p - vec2(center_x, center_y);
+    float dist_squared = dot(delta, delta);
+    float outer_radius = clip_radius + 0.5;
+    if (dist_squared >= outer_radius * outer_radius)
+        return 0.0;
+    float inner_radius = clip_radius - 0.5;
+    if (dist_squared <= inner_radius * inner_radius)
+        return 1.0;
+    return outer_radius - sqrt(dist_squared);
+}
+`;
+
+const CLIP_CODE = `
+vec2 texture_coord = cogl_tex_coord_in[0].xy / pixel_step;
+bool inside = texture_coord.x >= bounds.x && texture_coord.x <= bounds.z
+           && texture_coord.y >= bounds.y && texture_coord.y <= bounds.w;
+if (clip_radius > 0.0 && !inside)
+    cogl_color_out = vec4(0.0);
+else if (clip_radius > 0.0)
+    cogl_color_out *= rounded_rect_coverage(texture_coord);
+`;
+
+function enlargeForEffects(x1, y1, width, height) {
+    if (width <= 0 || height <= 0)
+        return [x1, y1];
+    const x2 = Math.ceil(x1 + width + 0.75);
+    const y2 = Math.ceil(y1 + height + 0.75);
+    return [x2 - Math.round(width) - 3, y2 - Math.round(height) - 3];
+}
+
+function fboOffset(actor) {
+    const volume = actor.get_paint_volume();
+    if (volume) {
+        const origin = volume.get_origin();
+        return enlargeForEffects(
+            origin.x, origin.y, volume.get_width(), volume.get_height()
+        ).map(Math.trunc);
+    }
+    const box = actor.get_allocation_box();
+    const [x1, y1] = enlargeForEffects(
+        box.x1, box.y1, box.x2 - box.x1, box.y2 - box.y1
+    );
+    return [Math.trunc(x1 - box.x1), Math.trunc(y1 - box.y1)];
+}
+
+const RoundedClipEffect = GObject.registerClass(
+class WaywallenRoundedClipEffect extends (Shell.GLSLEffect ?? Clutter.ShaderEffect) {
+    constructor() {
+        super();
+        this._bounds = [0, 0, 0, 0];
+        this._radius = 0;
+        this._dirty = true;
+        this._textureWidth = 0;
+        this._textureHeight = 0;
+        this._textureScale = 0;
+        this._offsetX = 0;
+        this._offsetY = 0;
+    }
+
+    // GNOME 51 moved shader effects to Clutter and replaced the pipeline vfunc.
+    [Shell.GLSLEffect ? 'vfunc_build_pipeline' : 'vfunc_get_static_snippet']() {
+        if (Shell.GLSLEffect) {
+            this.add_glsl_snippet(
+                Cogl.SnippetHook.FRAGMENT, CLIP_DECLARATIONS, CLIP_CODE, false
+            );
+        } else {
+            return Cogl.Snippet.new(Cogl.SnippetHook.FRAGMENT, CLIP_DECLARATIONS, CLIP_CODE);
+        }
+    }
+
+    vfunc_paint_target(node, paintContext) {
+        this._uploadUniforms();
+        super.vfunc_paint_target(node, paintContext);
+    }
+
+    setGeometry(bounds, radius) {
+        this._bounds = bounds;
+        this._radius = radius;
+        this._dirty = true;
+    }
+
+    _uploadUniforms() {
+        const texture = this.get_texture();
+        const actor = this.get_actor();
+        if (!texture || !actor)
+            return;
+        const width = texture.get_width();
+        const height = texture.get_height();
+        const scale = actor.get_resource_scale();
+        const [offsetX, offsetY] = fboOffset(actor);
+        if (!this._dirty &&
+            width === this._textureWidth &&
+            height === this._textureHeight &&
+            scale === this._textureScale &&
+            offsetX === this._offsetX &&
+            offsetY === this._offsetY)
+            return;
+
+        this._dirty = false;
+        this._textureWidth = width;
+        this._textureHeight = height;
+        this._textureScale = scale;
+        this._offsetX = offsetX;
+        this._offsetY = offsetY;
+
+        this.set_uniform_float(
+            this.get_uniform_location?.('pixel_step') ?? 'pixel_step', 2, [1 / width, 1 / height]
+        );
+        const [x1, y1, x2, y2] = this._bounds;
+        this.set_uniform_float(this.get_uniform_location?.('bounds') ?? 'bounds', 4, [
+            (x1 - offsetX) * scale,
+            (y1 - offsetY) * scale,
+            (x2 - offsetX) * scale,
+            (y2 - offsetY) * scale,
+        ]);
+        this.set_uniform_float(
+            this.get_uniform_location?.('clip_radius') ?? 'clip_radius', 1, [this._radius * scale]
+        );
+    }
+});
 
 export const LiveWallpaper = GObject.registerClass(
 class LiveWallpaper extends St.Widget {
@@ -60,6 +212,10 @@ class LiveWallpaper extends St.Widget {
         this._rendererLauncher = rendererLauncher;
         this._presentation = null;
         this._blurController = null;
+        this._clipEffect = null;
+        this._clipContent = backgroundActor.content;
+        this._clipRadiusId = this._clipContent?.connect('notify::rounded-clip-radius',
+            () => this.queue_relayout()) ?? 0;
         this._wwDestroyed = false;
         this._onDestroyed = onDestroyed;
         this._destroyId = this.connect('destroy', () => this._cleanup());
@@ -109,6 +265,33 @@ class LiveWallpaper extends St.Widget {
                 Math.abs((clone.scale_y ?? 1) - sy) > 0.001)
                 clone.set_scale(sx, sy);
         }
+        this._syncClip(box);
+    }
+
+    _syncClip(box) {
+        const monitor = Main.layoutManager.monitors[this._monitorIndex];
+        if (!monitor || monitor.width <= 0 || monitor.height <= 0)
+            return;
+        const sx = box.get_width() / monitor.width;
+        const sy = box.get_height() / monitor.height;
+        const radius = (this._clipContent?.rounded_clip_radius ?? 0) * sx;
+        if (radius < 0.5 || sy <= 0) {
+            if (this._clipEffect) {
+                this.remove_effect(this._clipEffect);
+                this._clipEffect = null;
+            }
+            return;
+        }
+
+        const work = Main.layoutManager.getWorkAreaForMonitor(this._monitorIndex);
+        const x = (work.x - monitor.x) * sx;
+        const y = (work.y - monitor.y) * sy;
+        if (!this._clipEffect) {
+            this._clipEffect = new RoundedClipEffect();
+            this.add_effect(this._clipEffect);
+        }
+        this._clipEffect.setGeometry(
+            [x, y, x + work.width * sx, y + work.height * sy], radius);
     }
 
     _tryAttach() {
@@ -335,6 +518,14 @@ class LiveWallpaper extends St.Widget {
         this._onDestroyed = null;
         onDestroyed?.(this);
         this._cancelPoll();
+        if (this._clipRadiusId)
+            this._clipContent.disconnect(this._clipRadiusId);
+        this._clipRadiusId = 0;
+        this._clipContent = null;
+        if (this._clipEffect) {
+            this.remove_effect(this._clipEffect);
+            this._clipEffect = null;
+        }
         this._detachRenderer();
         this._dimBackdrop(false);
         if (this._backgroundActor && this._backgroundDestroyId)
