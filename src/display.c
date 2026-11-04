@@ -2258,6 +2258,21 @@ int waywallen_display_drain(waywallen_display_t* d) {
     return drained;
 }
 
+static void collect_relay_pending_pools(waywallen_display_t* d) {
+#ifdef WW_HAVE_VULKAN
+    if (d->backend != WAYWALLEN_BACKEND_DMABUF_RELAY) return;
+    pthread_mutex_lock(&d->pending_mutex);
+    bool pending = d->vk_pending != NULL;
+    pthread_mutex_unlock(&d->pending_mutex);
+    /* The relay owns the only queue using these imports; external Vulkan
+     * and EGL hosts must still drain on their own render thread. */
+    if (pending && ww_vk_blitter_poll_completion(&d->vk_relay_blitter) == 0)
+        (void)waywallen_display_drain(d);
+#else
+    (void)d;
+#endif
+}
+
 static void fire_textures_releasing_if_any(waywallen_display_t* d) {
     if (! d->bound.valid) return;
     if (d->cb.on_textures_releasing) {
@@ -2278,6 +2293,7 @@ static void fire_textures_releasing_if_any(waywallen_display_t* d) {
     d->bound.valid                             = false;
     d->bound.generation                        = 0;
     d->bound.phase                             = WW_STREAM_IDLE;
+    collect_relay_pending_pools(d);
 }
 
 #ifdef WW_HAVE_EGL
@@ -3050,6 +3066,7 @@ int waywallen_display_dispatch(waywallen_display_t* d) {
     if (! d) return WAYWALLEN_ERR_INVAL;
     if (d->fd < 0 || d->conn == WW_CONN_DEAD) return WAYWALLEN_ERR_NOTCONN;
     if (d->conn == WW_CONN_DISCONNECTED) return WAYWALLEN_ERR_STATE;
+    collect_relay_pending_pools(d);
 
     /* Stateful non-blocking read, same path as the handshake. The
      * fd is SOCK_NONBLOCK, so a partial frame (split header/body, or a
@@ -3163,6 +3180,7 @@ int waywallen_display_dispatch(waywallen_display_t* d) {
      * Reset must precede flush_dead_event, which may free d. */
     d->hs_recv.n_fds = 0;
     ww_codec_recv_state_reset(&d->hs_recv);
+    collect_relay_pending_pools(d);
     if (op == WW_EVT_SET_WINDOW_OBSERVATION_CONFIG && ret < 0)
         fire_disconnected(d, ret, "invalid window observation config");
     flush_dead_event(d); /* must be last; may free d */
@@ -3348,6 +3366,7 @@ void waywallen_display_close(waywallen_display_t* d) {
     /* DMABUF_RELAY owns the complete Vulkan stack. */
     if (d->backend == WAYWALLEN_BACKEND_DMABUF_RELAY) {
         ww_vk_blitter_shutdown(&d->vk_relay_blitter);
+        (void)waywallen_display_drain(d);
         ww_vk_backend_unload(&d->vk_backend);
         ww_vk_destroy_owned(&d->vk_owned);
     }

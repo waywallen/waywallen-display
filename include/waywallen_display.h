@@ -370,6 +370,9 @@ waywallen_display_t* waywallen_display_new(const waywallen_display_callbacks_t* 
  *     pending pools destroyed this call. Must be called until it
  *     returns 0 (typically once after close, but pools that built
  *     up over the session may need a second pass).
+ *     DMABUF_RELAY owns its GPU context and automatically drains
+ *     completed imports during dispatch and pool replacement, and
+ *     drains all remaining imports before destroying its device.
  *
  *   waywallen_display_free(d)    // any thread
  *     Frees the struct. ABORTs if pending pools still exist (host

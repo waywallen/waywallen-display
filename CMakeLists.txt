@@ -324,6 +324,24 @@ if(WAYWALLEN_DISPLAY_BUILD_TESTS)
         -Wall -Wextra -Wpedantic)
     add_test(NAME test_display COMMAND test_display)
 
+    if(WAYWALLEN_DISPLAY_WITH_VULKAN)
+        add_executable(test_dmabuf_relay tests/test_dmabuf_relay.c)
+        target_link_libraries(test_dmabuf_relay PRIVATE waywallen_display_static)
+        target_include_directories(test_dmabuf_relay PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${GENERATED_DIR}
+            ${VULKAN_INCLUDE_DIRS})
+        target_compile_definitions(test_dmabuf_relay PRIVATE WW_HAVE_VULKAN=1)
+        target_compile_options(test_dmabuf_relay PRIVATE -Wall -Wextra -Wpedantic)
+        foreach(_function IN ITEMS ww_vk_create_owned ww_vk_destroy_owned ww_vk_backend_load
+                ww_vk_import_dmabuf ww_vk_blitter_init ww_vk_blitter_ensure_shadow_exportable
+                ww_vk_blitter_blit)
+            target_link_options(test_dmabuf_relay PRIVATE "-Wl,--wrap=${_function}")
+        endforeach()
+        add_test(NAME test_dmabuf_relay COMMAND test_dmabuf_relay)
+        set_tests_properties(test_dmabuf_relay PROPERTIES TIMEOUT 15)
+    endif()
+
     add_executable(test_presentation_state tests/test_presentation_state.c)
     target_link_libraries(test_presentation_state PRIVATE waywallen_display_static)
     target_compile_options(test_presentation_state PRIVATE

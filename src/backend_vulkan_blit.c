@@ -1034,6 +1034,14 @@ VkResult ww_vk_blitter_commit_candidate(ww_vk_blitter_t* b) {
     return result;
 }
 
+int ww_vk_blitter_poll_completion(const ww_vk_blitter_t* b) {
+    if (! b || ! b->initialized) return -EINVAL;
+    if (! b->fence_armed) return 0;
+    VkResult result = b->vkWaitForFences(b->backend.device, 1, &b->fence, VK_TRUE, 0);
+    if (result == VK_TIMEOUT) return -EAGAIN;
+    return result == VK_SUCCESS ? 0 : -EIO;
+}
+
 int ww_vk_blitter_drain_pending_release(ww_vk_blitter_t* b, bool* out_release_armed) {
     if (out_release_armed) *out_release_armed = false;
     if (! b || b->backend.device == VK_NULL_HANDLE || ! b->backend.vkDeviceWaitIdle) {

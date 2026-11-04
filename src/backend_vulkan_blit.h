@@ -175,6 +175,10 @@ int ww_vk_blitter_get_export(const ww_vk_blitter_t* b, int* out_fd, uint32_t* ou
 int ww_vk_blitter_blit(ww_vk_blitter_t* b, VkImage imported, uint32_t w, uint32_t h,
                        VkSemaphore acquire_sem, int release_syncobj_fd, bool* out_release_armed);
 
+/* Non-blocking completion check. Returns -EAGAIN while a submitted copy
+ * still uses its inputs, or -EIO when completion cannot be confirmed. */
+int ww_vk_blitter_poll_completion(const ww_vk_blitter_t* b);
+
 /*
  * Copy into the current shadow or prepare a one-off replacement. When
  * the current shadow matches and `force_replace` is false, this updates
