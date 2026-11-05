@@ -46,10 +46,15 @@ enum
     SIGNAL_DISCONNECTED,
     SIGNAL_WINDOW_OBSERVATION_CONFIG,
     SIGNAL_WINDOW_OBSERVATION_RULES,
+    SIGNAL_PREFERRED_RENDER_DEVICE,
     LAST_SIGNAL
 };
 
 static guint signals[LAST_SIGNAL] = { 0 };
+
+static void on_preferred_render_device(void* data, uint32_t major, uint32_t minor) {
+    g_signal_emit(WW_DISPLAY(data), signals[SIGNAL_PREFERRED_RENDER_DEVICE], 0, major, minor);
+}
 
 static void on_window_observation_config(void*                                        data,
                                          const waywallen_window_observation_config_t* config) {
@@ -494,6 +499,18 @@ static void ww_display_class_init(WwDisplayClass* klass) {
                                                             G_TYPE_STRV,
                                                             G_TYPE_STRV);
 
+    signals[SIGNAL_PREFERRED_RENDER_DEVICE] = g_signal_new("preferred-render-device",
+                                                           G_TYPE_FROM_CLASS(klass),
+                                                           G_SIGNAL_RUN_LAST,
+                                                           0,
+                                                           NULL,
+                                                           NULL,
+                                                           NULL,
+                                                           G_TYPE_NONE,
+                                                           2,
+                                                           G_TYPE_UINT,
+                                                           G_TYPE_UINT);
+
     /* (err_code, message) */
     signals[SIGNAL_DISCONNECTED] = g_signal_new("disconnected",
                                                 G_TYPE_FROM_CLASS(klass),
@@ -555,6 +572,18 @@ gboolean ww_display_bind_dmabuf_relay(WwDisplay* self) {
     g_return_val_if_fail(WW_IS_DISPLAY(self), FALSE);
     g_return_val_if_fail(self->handle != NULL, FALSE);
     return waywallen_display_bind_dmabuf_relay(self->handle) == WAYWALLEN_OK;
+}
+
+gboolean ww_display_bind_dmabuf_relay_on_device(WwDisplay* self, guint major, guint minor) {
+    g_return_val_if_fail(WW_IS_DISPLAY(self), FALSE);
+    return waywallen_display_bind_dmabuf_relay_on_device(self->handle, major, minor) ==
+           WAYWALLEN_OK;
+}
+
+gboolean ww_display_set_follow_producer_gpu(WwDisplay* self, gboolean enabled) {
+    g_return_val_if_fail(WW_IS_DISPLAY(self), FALSE);
+    return waywallen_display_set_render_device_callback(
+               self->handle, enabled ? on_preferred_render_device : NULL, self) == WAYWALLEN_OK;
 }
 
 gboolean ww_display_set_presentation_capabilities(WwDisplay* self, guint flags) {

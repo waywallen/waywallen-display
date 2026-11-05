@@ -290,6 +290,7 @@ typedef enum ww_event_op {
     WW_EVT_SET_PRESENTATION_SNAPSHOT = 8,
     WW_EVT_SET_PRESENTATION_STATE = 9,
     WW_EVT_SET_WINDOW_OBSERVATION_CONFIG = 10,
+    WW_EVT_PREFERRED_RENDER_DEVICE = 11,
 } ww_event_op_t;
 
 typedef struct ww_req_hello_t {
@@ -365,6 +366,8 @@ typedef struct ww_req_client_capabilities_t {
     waywallen_transition_capabilities_t transition;
     bool has_identity;
     waywallen_display_identity_t identity;
+    bool has_follow_producer_gpu;
+    uint32_t follow_producer_gpu;
 } ww_req_client_capabilities_t;
 
 typedef struct ww_req_set_window_observation_state_t {
@@ -427,6 +430,11 @@ typedef struct ww_evt_set_presentation_state_t {
 typedef struct ww_evt_set_window_observation_config_t {
     waywallen_window_observation_config_t config;
 } ww_evt_set_window_observation_config_t;
+
+typedef struct ww_evt_preferred_render_device_t {
+    uint32_t drm_render_major;
+    uint32_t drm_render_minor;
+} ww_evt_preferred_render_device_t;
 
 /* --- Per-message functions ---
  * encode:        append wire body to `out` (header is the caller's job)
@@ -544,6 +552,11 @@ int  ww_evt_set_window_observation_config_encode(const ww_evt_set_window_observa
 int  ww_evt_set_window_observation_config_decode(const uint8_t *buf, size_t len, ww_evt_set_window_observation_config_t *out);
 void ww_evt_set_window_observation_config_free(ww_evt_set_window_observation_config_t *m);
 uint32_t ww_evt_set_window_observation_config_expected_fds(const ww_evt_set_window_observation_config_t *m);
+
+int  ww_evt_preferred_render_device_encode(const ww_evt_preferred_render_device_t *m, ww_buf_t *out);
+int  ww_evt_preferred_render_device_decode(const uint8_t *buf, size_t len, ww_evt_preferred_render_device_t *out);
+void ww_evt_preferred_render_device_free(ww_evt_preferred_render_device_t *m);
+uint32_t ww_evt_preferred_render_device_expected_fds(const ww_evt_preferred_render_device_t *m);
 
 /* --- Output buffer helpers --- */
 void ww_buf_init(ww_buf_t *b);

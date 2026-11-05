@@ -213,6 +213,7 @@ typedef struct ww_vk_owned {
  * -ENOSYS if no suitable GPU/queue is found, -EIO on any other Vulkan
  * failure. Output struct is zeroed on failure. */
 int  ww_vk_create_owned(ww_vk_owned_t* out);
+int  ww_vk_create_owned_on_device(ww_vk_owned_t* out, uint32_t major, uint32_t minor);
 void ww_vk_destroy_owned(ww_vk_owned_t* o);
 
 /* Map a DRM fourcc to the VkFormat used by the lib-internal blitter +
