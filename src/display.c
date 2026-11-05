@@ -221,12 +221,14 @@ struct waywallen_display {
      * conservatively assumes a cross-GPU consumer and forces
      * HOST_VISIBLE on every connected renderer. May also be set
      * explicitly via `waywallen_display_set_drm_render_node`. */
-    uint32_t hs_drm_render_major;
-    uint32_t hs_drm_render_minor;
-    uint32_t pause_effect_caps;
-    uint32_t transition_caps;
-    bool     has_pause_effect_caps;
-    bool     has_transition_caps;
+    uint32_t                           hs_drm_render_major;
+    uint32_t                           hs_drm_render_minor;
+    waywallen_render_device_callback_t render_device_callback;
+    void*                              render_device_data;
+    uint32_t                           pause_effect_caps;
+    uint32_t                           transition_caps;
+    bool                               has_pause_effect_caps;
+    bool                               has_transition_caps;
 
     /* Presentation state is connection-local and independent of the
      * buffer/layout generations below. */
@@ -1346,10 +1348,17 @@ int waywallen_display_vulkan_discard_sampled_frame(waywallen_display_t* d) {
 }
 
 int waywallen_display_bind_dmabuf_relay(waywallen_display_t* d) {
+    return waywallen_display_bind_dmabuf_relay_on_device(d, 0, 0);
+}
+
+int waywallen_display_bind_dmabuf_relay_on_device(waywallen_display_t* d, uint32_t major,
+                                                  uint32_t minor) {
     if (! d) return WAYWALLEN_ERR_INVAL;
+    if (major == 0 && minor != 0) return WAYWALLEN_ERR_INVAL;
     if (d->conn != WW_CONN_DISCONNECTED) return WAYWALLEN_ERR_STATE;
 #ifdef WW_HAVE_VULKAN
-    int rc = ww_vk_create_owned(&d->vk_owned);
+    int rc = major == 0 ? ww_vk_create_owned(&d->vk_owned)
+                        : ww_vk_create_owned_on_device(&d->vk_owned, major, minor);
     if (rc == -ENOENT) return WAYWALLEN_ERR_NOMEM;
     if (rc == -ENOSYS) return WAYWALLEN_ERR_NOT_IMPL;
     if (rc != 0) return WAYWALLEN_ERR_IO;
@@ -1385,6 +1394,10 @@ int waywallen_display_bind_dmabuf_relay(waywallen_display_t* d) {
     }
 
     d->backend = WAYWALLEN_BACKEND_DMABUF_RELAY;
+    if (major != 0) {
+        d->hs_drm_render_major = major;
+        d->hs_drm_render_minor = minor;
+    }
     if (d->hs_drm_render_major == 0 && d->hs_drm_render_minor == 0) {
         uint32_t major = 0, minor = 0;
         if (ww_vk_query_drm_render_node(&d->vk_backend, &major, &minor) == 0) {
@@ -1396,8 +1409,20 @@ int waywallen_display_bind_dmabuf_relay(waywallen_display_t* d) {
     return WAYWALLEN_OK;
 #else
     (void)d;
+    (void)major;
+    (void)minor;
     return WAYWALLEN_ERR_NOT_IMPL;
 #endif
+}
+
+int waywallen_display_set_render_device_callback(waywallen_display_t*               d,
+                                                 waywallen_render_device_callback_t callback,
+                                                 void*                              data) {
+    if (! d) return WAYWALLEN_ERR_INVAL;
+    if (d->conn != WW_CONN_DISCONNECTED) return WAYWALLEN_ERR_STATE;
+    d->render_device_callback = callback;
+    d->render_device_data     = data;
+    return WAYWALLEN_OK;
 }
 
 int waywallen_display_set_drm_render_node(waywallen_display_t* d, uint32_t major, uint32_t minor) {
@@ -1717,14 +1742,16 @@ static int hs_advance_one(waywallen_display_t* d) {
         ww_evt_welcome_free(&welcome);
         ww_codec_recv_state_reset(&d->hs_recv);
         ww_req_client_capabilities_t caps = {
-            .has_window_observation = d->window_observation_callback != NULL,
-            .window_observation     = { .flags = d->window_observation_caps },
-            .has_pause_effect       = d->has_pause_effect_caps,
-            .pause_effect           = { .flags = d->pause_effect_caps },
-            .has_transition         = d->has_transition_caps,
-            .transition             = { .flags = d->transition_caps },
-            .has_identity           = true,
-            .identity               = { .role = (uint32_t)d->role },
+            .has_window_observation  = d->window_observation_callback != NULL,
+            .window_observation      = { .flags = d->window_observation_caps },
+            .has_pause_effect        = d->has_pause_effect_caps,
+            .pause_effect            = { .flags = d->pause_effect_caps },
+            .has_transition          = d->has_transition_caps,
+            .transition              = { .flags = d->transition_caps },
+            .has_identity            = true,
+            .identity                = { .role = (uint32_t)d->role },
+            .has_follow_producer_gpu = d->render_device_callback != NULL,
+            .follow_producer_gpu     = 1,
         };
         int rc2 = hs_queue_request(d, WW_REQ_CLIENT_CAPABILITIES, enc_client_capabilities, &caps);
         if (rc2 != WAYWALLEN_OK) {
@@ -3092,6 +3119,21 @@ int waywallen_display_dispatch(waywallen_display_t* d) {
     int      ret;
 
     switch (op) {
+    case WW_EVT_PREFERRED_RENDER_DEVICE: {
+        ww_evt_preferred_render_device_t event;
+        if (! d->render_device_callback || n_fds != 0 ||
+            ww_evt_preferred_render_device_decode(body_buf, body_len, &event) != WW_OK ||
+            event.drm_render_major == 0) {
+            close_all_fds(fd_buf, n_fds);
+            fire_disconnected(d, WAYWALLEN_ERR_PROTO, "invalid preferred render device");
+            ret = WAYWALLEN_ERR_PROTO;
+            break;
+        }
+        d->render_device_callback(
+            d->render_device_data, event.drm_render_major, event.drm_render_minor);
+        ret = WAYWALLEN_OK;
+        break;
+    }
     case WW_EVT_SET_WINDOW_OBSERVATION_CONFIG: {
         ww_evt_set_window_observation_config_t event;
         bool                                   valid = d->window_observation_callback && n_fds == 0;
