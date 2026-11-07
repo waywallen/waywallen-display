@@ -134,8 +134,10 @@ void WaywallenDisplay::renderThreadBlitEgl() {
         QPointer<WaywallenDisplay> guard(this);
         QMetaObject::invokeMethod(
             this,
-            [guard, rc]() {
-                if (guard) guard->handleDisconnect(rc, "EGL acquire wait failed");
+            [guard, session = std::weak_ptr<RenderSessionResources>(resourcesOwner), rc]() {
+                const auto owner = session.lock();
+                if (guard && owner && guard->renderSessionResources() == owner)
+                    guard->handleDisconnect(rc, "EGL acquire wait failed");
             },
             Qt::QueuedConnection);
         return;
@@ -251,8 +253,9 @@ QSGNode* WaywallenDisplay::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData
         QPointer<WaywallenDisplay> guard(this);
         QMetaObject::invokeMethod(
             this,
-            [guard]() {
-                if (guard) guard->update();
+            [guard, session = std::weak_ptr<RenderSessionResources>(resourcesOwner)]() {
+                const auto owner = session.lock();
+                if (guard && owner && guard->renderSessionResources() == owner) guard->update();
             },
             Qt::QueuedConnection);
     } else if (! retirementPending) {
@@ -266,15 +269,19 @@ QSGNode* WaywallenDisplay::updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData
         oldNode  = rootNode;
         return rootNode;
     };
-    auto scheduleSessionFailure = [this](const QString& reason) {
-        QPointer<WaywallenDisplay> guard(this);
-        QMetaObject::invokeMethod(
-            this,
-            [guard, reason]() {
-                if (guard) guard->handleDisconnect(-EIO, reason.toUtf8().constData());
-            },
-            Qt::QueuedConnection);
-    };
+    auto scheduleSessionFailure =
+        [this,
+         session = std::weak_ptr<RenderSessionResources>(resourcesOwner)](const QString& reason) {
+            QPointer<WaywallenDisplay> guard(this);
+            QMetaObject::invokeMethod(
+                this,
+                [guard, session, reason]() {
+                    const auto owner = session.lock();
+                    if (guard && owner && guard->renderSessionResources() == owner)
+                        guard->handleDisconnect(-EIO, reason.toUtf8().constData());
+                },
+                Qt::QueuedConnection);
+        };
 
     ContentSnapshot eglCandidateContent;
     {
