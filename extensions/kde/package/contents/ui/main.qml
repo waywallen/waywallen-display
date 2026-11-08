@@ -11,16 +11,6 @@ WallpaperItem {
     readonly property bool inLockScreen: HostIdentity.isLockScreen(Qt.application.name)
     readonly property bool liveHost: HostIdentity.canConnect(Qt.application.name, Qt.application.arguments)
 
-    // Prefer the EDID-derived model (stable across port re-plugs) over the
-    // connector name like "DP-1" (which the compositor reassigns when cables
-    // move). Fall back to the connector name, then to a generic literal.
-    readonly property string defaultDisplayName: {
-        const model = (Screen.model || "").trim();
-        if (model.length > 0) return model;
-        if (Screen.name && Screen.name.length > 0) return Screen.name;
-        return "kde-wallpaper";
-    }
-
     // Background is owned by the renderer (via the daemon's
     // the composition clear color); the surface itself paints any letterbox
     // bars. Show opaque black until the surface attaches so a slow
@@ -97,7 +87,7 @@ WallpaperItem {
             d.displayName = Qt.binding(() =>
                 root.configuration.DisplayName.length > 0
                     ? root.configuration.DisplayName
-                    : root.defaultDisplayName);
+                    : d.screenDisplayName);
             d.displayWidth = Qt.binding(() => Math.round(root.width * d.effectiveDevicePixelRatio));
             d.displayHeight = Qt.binding(() => Math.round(root.height * d.effectiveDevicePixelRatio));
             d.mouseForwardEnabled = Qt.binding(() => root.configuration.MouseForward);

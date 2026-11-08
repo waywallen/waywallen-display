@@ -455,6 +455,7 @@ void WaywallenDisplay::cleanup() {
     disconnect(m_frameEndConnection);
     m_screenIdentityTimer.stop();
     m_connectedInstanceId.clear();
+    m_connectedDisplayName.clear();
     if (m_filterInstalled && m_window) {
         m_window->removeEventFilter(this);
     }
@@ -744,9 +745,29 @@ void WaywallenDisplay::resetPresentation() {
 // Properties
 // ---------------------------------------------------------------------------
 
-QString WaywallenDisplay::screenIdentityKey() const {
+bool WaywallenDisplay::hasTrackedScreenProperty() const {
+    return window() && window()->metaObject()->indexOfProperty("screenToFollow") >= 0;
+}
+
+QScreen* WaywallenDisplay::trackedScreen() const {
     auto* w = window();
-    auto* s = w ? w->screen() : nullptr;
+    if (! w) return nullptr;
+    // Plasma's screenToFollow stays tied to the desktop when Qt moves the window.
+    return hasTrackedScreenProperty() ? w->property("screenToFollow").value<QScreen*>()
+                                      : w->screen();
+}
+
+QString WaywallenDisplay::screenDisplayName() const {
+    auto* s = trackedScreen();
+    if (! s) return QStringLiteral("kde-wallpaper");
+    const QString model = screenPart(s->model());
+    if (! model.isEmpty()) return model;
+    const QString name = screenPart(s->name());
+    return name.isEmpty() ? QStringLiteral("kde-wallpaper") : name;
+}
+
+QString WaywallenDisplay::screenIdentityKey() const {
+    auto* s = trackedScreen();
     if (! s) return {};
 
     return QStringLiteral("name=%1|manufacturer=%2|model=%3|serial=%4")
@@ -769,8 +790,7 @@ QString WaywallenDisplay::effectiveInstanceId() const {
 }
 
 uint32_t WaywallenDisplay::screenRefreshMhz() const {
-    auto* w = window();
-    auto* s = w ? w->screen() : nullptr;
+    auto* s = trackedScreen();
     if (! s || s->refreshRate() <= 0.0) return 60000;
 
     const auto mhz = qRound64(s->refreshRate() * 1000.0);
@@ -788,12 +808,14 @@ void WaywallenDisplay::setDisplayName(const QString& name) {
     if (m_displayName == name) return;
     m_displayName = name;
     emit displayNameChanged();
+    if (displayHandle()) m_screenIdentityTimer.start();
 }
 
 void WaywallenDisplay::setInstanceId(const QString& id) {
     if (m_instanceId == id) return;
     m_instanceId = id;
     emit instanceIdChanged();
+    if (displayHandle()) m_screenIdentityTimer.start();
 }
 
 void WaywallenDisplay::setDisplayRole(DisplayRole role) {
@@ -1311,6 +1333,11 @@ void WaywallenDisplay::onWindowReady() {
     auto* w = window();
     if (m_window == w && (w || m_windowConnections.isEmpty())) return;
 
+    disconnect(m_screenToFollowConnection);
+    disconnect(m_screenRefreshConnection);
+    disconnect(m_screenDestroyedConnection);
+    m_observedScreen.clear();
+
     ++m_windowGeneration;
     for (const auto& connection : m_windowConnections) disconnect(connection);
     m_windowConnections.clear();
@@ -1332,7 +1359,14 @@ void WaywallenDisplay::onWindowReady() {
             if (m_windowGeneration == generation) emit effectiveDevicePixelRatioChanged();
         }));
 #endif
-    onScreenChanged(w->screen());
+    if (hasTrackedScreenProperty()) {
+        m_screenToFollowConnection = connect(
+            w,
+            SIGNAL(screenToFollowChanged(QScreen*)),
+            this,
+            SLOT(onScreenChanged(QScreen*)));
+    }
+    onScreenChanged(trackedScreen());
 
     if (m_mouseForwardEnabled) {
         w->installEventFilter(this);
@@ -1365,14 +1399,31 @@ void WaywallenDisplay::onWindowReady() {
     tryConnect();
 }
 
-void WaywallenDisplay::onScreenChanged(QScreen* screen) {
+void WaywallenDisplay::onScreenChanged(QScreen*) {
+    if (auto* sourceWindow = qobject_cast<QQuickWindow*>(sender());
+        sourceWindow && sourceWindow != window())
+        return;
+    auto* screen = trackedScreen();
     if (m_instanceId.isEmpty()) emit instanceIdChanged();
+    emit screenDisplayNameChanged();
 
-    if (displayHandle() && ! m_connectedInstanceId.isEmpty() &&
-        m_connectedInstanceId != effectiveInstanceId()) {
+    if (hasTrackedScreenProperty() && ! screen) {
+        m_reconnectTimer.stop();
+        if (displayHandle()) {
+            cleanup();
+            setConnState(Disconnected);
+            setStreamState(Inactive);
+            update();
+        }
+    } else if (displayHandle() && (m_connectedInstanceId != effectiveInstanceId() ||
+                                   m_connectedDisplayName != m_displayName)) {
         m_screenIdentityTimer.start();
     } else {
         m_screenIdentityTimer.stop();
+        if (! displayHandle() && window() && window()->isSceneGraphInitialized()) {
+            QMetaObject::invokeMethod(
+                this, &WaywallenDisplay::requestReconnect, Qt::QueuedConnection);
+        }
     }
     emit effectiveDevicePixelRatioChanged();
     // refresh on next event loop cycle as well, after qt updates dpr
@@ -1381,39 +1432,59 @@ void WaywallenDisplay::onScreenChanged(QScreen* screen) {
     QTimer::singleShot(0, this, [this, generation]() {
         if (m_windowGeneration == generation) emit effectiveDevicePixelRatioChanged();
     });
-    disconnect(m_screenConnection);
-    if (screen) {
-        m_screenConnection =
-            connect(screen, &QScreen::refreshRateChanged, this, [this, generation]() {
-                if (m_windowGeneration == generation) pushSizeUpdate();
-            });
+    if (m_observedScreen != screen) {
+        disconnect(m_screenRefreshConnection);
+        disconnect(m_screenDestroyedConnection);
+        m_observedScreen = screen;
+        if (screen) {
+            m_screenRefreshConnection = connect(
+                screen, &QScreen::refreshRateChanged, this, [this, generation]() {
+                    if (m_windowGeneration == generation) pushSizeUpdate();
+                });
+            m_screenDestroyedConnection = connect(
+                screen, &QObject::destroyed, this, [this, generation]() {
+                    if (m_windowGeneration == generation) onTrackedScreenDestroyed();
+                });
+        }
     }
     if (displayHandle()) m_updateSizeTimer.start();
 }
 
+void WaywallenDisplay::onTrackedScreenDestroyed() {
+    m_observedScreen.clear();
+    m_reconnectTimer.stop();
+    if (displayHandle()) {
+        cleanup();
+        setConnState(Disconnected);
+        setStreamState(Inactive);
+        update();
+    }
+    QMetaObject::invokeMethod(
+        this,
+        [this]() {
+            onScreenChanged(nullptr);
+        },
+        Qt::QueuedConnection);
+}
+
 void WaywallenDisplay::reconnectForScreenIdentity() {
     const QString currentInstanceId = effectiveInstanceId();
-
-    if (! displayHandle() || m_connectedInstanceId.isEmpty() || currentInstanceId.isEmpty() ||
-        m_connectedInstanceId == currentInstanceId)
+    if (! displayHandle() || (hasTrackedScreenProperty() && ! trackedScreen()) ||
+        (m_connectedInstanceId == currentInstanceId && m_connectedDisplayName == m_displayName))
         return;
 
-    qCInfo(lcWD,
-           "screen identity changed: %s -> %s; reconnecting display",
-           qPrintable(m_connectedInstanceId),
-           qPrintable(currentInstanceId));
-
+    qCInfo(lcWD, "screen identity or name changed; reconnecting display");
     cleanup();
     setConnState(Disconnected);
     setStreamState(Inactive);
     update();
-
     QMetaObject::invokeMethod(this, &WaywallenDisplay::requestReconnect, Qt::QueuedConnection);
 }
 
 void WaywallenDisplay::tryConnect() {
     if (renderSessionResources() || ! m_window || m_window != window() ||
-        ! m_window->isSceneGraphInitialized())
+        ! m_window->isSceneGraphInitialized() ||
+        (hasTrackedScreenProperty() && ! trackedScreen()))
         return;
     setConnState(Connecting);
 
@@ -1556,7 +1627,8 @@ void WaywallenDisplay::tryConnect() {
         return;
     }
 
-    m_connectedInstanceId = QString::fromUtf8(instanceId);
+    m_connectedInstanceId  = QString::fromUtf8(instanceId);
+    m_connectedDisplayName = m_displayName;
 
     // begin_connect carries these dims to the daemon as part of
     // register_display, so seed the dedupe so a same-size resize
