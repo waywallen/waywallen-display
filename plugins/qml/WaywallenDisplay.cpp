@@ -109,8 +109,16 @@ toConfigSnapshot(const waywallen_composition_config_t& composition) {
     return composition;
 }
 
+WaywallenDisplay* WaywallenDisplay::callbackItem(void* ud) {
+    auto* resources = static_cast<RenderSessionResources*>(ud);
+    if (! resources->callbacksEnabled.load(std::memory_order_acquire)) return nullptr;
+    auto* self = resources->item;
+    return self->renderSessionResources().get() == resources ? self : nullptr;
+}
+
 void WaywallenDisplay::c_on_binding_ready(void* ud, const waywallen_binding_t* binding) {
-    auto*       self     = static_cast<WaywallenDisplay*>(ud);
+    auto* self = callbackItem(ud);
+    if (! self) return;
     const auto* t        = &binding->textures;
     const auto  config   = toConfigSnapshot(binding->config);
     self->m_textureCount = t->count;
@@ -168,7 +176,8 @@ void WaywallenDisplay::c_on_binding_ready(void* ud, const waywallen_binding_t* b
 }
 
 void WaywallenDisplay::c_on_textures_releasing(void* ud, const waywallen_textures_t* t) {
-    auto* self = static_cast<WaywallenDisplay*>(ud);
+    auto* self = callbackItem(ud);
+    if (! self) return;
     qCInfo(lcWD, "textures releasing: generation=%llu", qulonglong(t->buffer_generation));
     self->flushPendingRelease();
 
@@ -228,7 +237,8 @@ void WaywallenDisplay::c_on_textures_releasing(void* ud, const waywallen_texture
 
 void WaywallenDisplay::c_on_composition_config(void*                                 ud,
                                                const waywallen_composition_config_t* composition) {
-    auto*      self   = static_cast<WaywallenDisplay*>(ud);
+    auto* self = callbackItem(ud);
+    if (! self) return;
     const auto config = toConfigSnapshot(*composition);
 
     bool updatesPresented = false;
@@ -252,7 +262,14 @@ void WaywallenDisplay::c_on_composition_config(void*                            
 }
 
 void WaywallenDisplay::c_on_frame_ready(void* ud, const waywallen_frame_t* f) {
-    auto* self = static_cast<WaywallenDisplay*>(ud);
+    auto* self = callbackItem(ud);
+    if (! self) {
+        if (f->egl_acquire_sync_fd >= 0) ::close(f->egl_acquire_sync_fd);
+        if (f->release_syncobj_fd >= 0 &&
+            waywallen_display_signal_release_syncobj(f->release_syncobj_fd) != WAYWALLEN_OK)
+            qCWarning(lcWD, "failed to release frame from retired session");
+        return;
+    }
     self->m_framesReceived++;
 
     bool validIncoming = false;
@@ -318,9 +335,12 @@ void WaywallenDisplay::c_on_frame_ready(void* ud, const waywallen_frame_t* f) {
             self->m_pendingEgl.seq               = f->seq;
         }
         if (auto* w = self->window()) {
-            QPointer<WaywallenDisplay> guard(self);
-            w->scheduleRenderJob(new FnRunnable([guard]() {
-                                     if (guard) guard->renderThreadBlitEgl();
+            QPointer<WaywallenDisplay>                  guard(self);
+            const std::weak_ptr<RenderSessionResources> session = self->renderSessionResources();
+            w->scheduleRenderJob(new FnRunnable([guard, session]() {
+                                     const auto owner = session.lock();
+                                     if (guard && owner && guard->renderSessionResources() == owner)
+                                         guard->renderThreadBlitEgl();
                                  }),
                                  QQuickWindow::BeforeSynchronizingStage);
         }
@@ -336,18 +356,21 @@ void WaywallenDisplay::c_on_frame_ready(void* ud, const waywallen_frame_t* f) {
 
 void WaywallenDisplay::c_on_presentation_snapshot(
     void* ud, const waywallen_presentation_snapshot_t* presentation) {
-    auto* self = static_cast<WaywallenDisplay*>(ud);
+    auto* self = callbackItem(ud);
+    if (! self) return;
     self->applyPresentationSnapshot(*presentation);
 }
 
 void WaywallenDisplay::c_on_presentation_state(void*                                 ud,
                                                const waywallen_presentation_state_t* state) {
-    auto* self = static_cast<WaywallenDisplay*>(ud);
+    auto* self = callbackItem(ud);
+    if (! self) return;
     self->applyPresentationState(*state);
 }
 
 void WaywallenDisplay::c_on_disconnected(void* ud, int err, const char* msg) {
-    auto* self    = static_cast<WaywallenDisplay*>(ud);
+    auto* self = callbackItem(ud);
+    if (! self) return;
     auto* display = self->displayHandle();
     if (! display) return;
     const auto reason =
@@ -391,6 +414,8 @@ WaywallenDisplay::WaywallenDisplay(QQuickItem* parent): QQuickItem(parent) {
 
 WaywallenDisplay::~WaywallenDisplay() {
     cleanup();
+    for (const auto& connection : m_windowConnections) disconnect(connection);
+    disconnect(m_screenConnection);
     waywallen_presentation_controller_free(m_presentationState);
     m_presentationState = nullptr;
 }
@@ -418,23 +443,24 @@ std::shared_ptr<RenderSessionResources> WaywallenDisplay::takeRenderSessionResou
         QMutexLocker lock(&m_resourcesMutex);
         resources = std::move(m_renderResources);
     }
-    if (resources && resources->display) waywallen_display_close(resources->display);
+    if (resources) {
+        resources->callbacksEnabled.store(false, std::memory_order_release);
+        if (resources->display) waywallen_display_close(resources->display);
+    }
     return resources;
 }
 
 void WaywallenDisplay::cleanup() {
+    disconnect(m_sessionInvalidationConnection);
+    disconnect(m_frameEndConnection);
     m_screenIdentityTimer.stop();
     m_connectedInstanceId.clear();
     m_connectedDisplayName.clear();
-    if (m_filterInstalled && window()) {
-        window()->removeEventFilter(this);
+    if (m_filterInstalled && m_window) {
+        m_window->removeEventFilter(this);
     }
     m_filterInstalled = false;
 
-    /* Notifiers live on GUI thread — direct delete. cleanup() always
-     * runs on GUI thread (called from ~WaywallenDisplay or
-     * handleDisconnect). The sceneGraphInvalidated path uses a
-     * different teardown route via deleteLater. */
     delete m_notifier;
     m_notifier = nullptr;
     delete m_notifierWrite;
@@ -455,14 +481,14 @@ void WaywallenDisplay::cleanup() {
 #endif
 
     if (auto resources = takeRenderSessionResources()) {
-        QQuickWindow* w = window();
+        QQuickWindow* w = resources->window;
         if (w && w->isSceneGraphInitialized()) {
             /* updateDirtyNodes() detaches the old owned QSGTexture during
              * sync; native shadows can only be destroyed after that. */
             w->scheduleRenderJob(new RenderSessionCleanupJob(std::move(resources)),
                                  QQuickWindow::AfterSynchronizingStage);
             w->update();
-        } else if (m_activeBackend == BackendNone) {
+        } else if (! resources->display || m_activeBackend == BackendNone) {
             resources->shutdown();
         } else {
             qCCritical(lcWD,
@@ -1218,11 +1244,8 @@ bool WaywallenDisplay::bindVulkanBackend() {
 void WaywallenDisplay::componentComplete() {
     QQuickItem::componentComplete();
     setupDBusWatcher();
-    if (window()) {
-        onWindowReady();
-    } else {
-        connect(this, &QQuickItem::windowChanged, this, &WaywallenDisplay::onWindowReady);
-    }
+    connect(this, &QQuickItem::windowChanged, this, &WaywallenDisplay::onWindowReady);
+    onWindowReady();
 }
 
 void WaywallenDisplay::setupDBusWatcher() {
@@ -1307,113 +1330,53 @@ void WaywallenDisplay::scheduleReconnectBackoff() {
 }
 
 void WaywallenDisplay::onWindowReady() {
-    disconnect(m_screenToFollowConnection);
-    if (! window()) {
-        disconnect(m_screenRefreshConnection);
-        disconnect(m_screenDestroyedConnection);
-        m_observedScreen.clear();
-        return;
-    }
+    auto* w = window();
+    if (m_window == w && (w || m_windowConnections.isEmpty())) return;
 
-    connect(window(),
-            &QQuickWindow::screenChanged,
-            this,
-            &WaywallenDisplay::onScreenChanged,
-            Qt::UniqueConnection);
-    connect(window(),
-            &QQuickWindow::afterFrameEnd,
-            this,
-            &WaywallenDisplay::onAfterFrameEnd,
-            Qt::UniqueConnection);
+    disconnect(m_screenToFollowConnection);
+    disconnect(m_screenRefreshConnection);
+    disconnect(m_screenDestroyedConnection);
+    m_observedScreen.clear();
+
+    ++m_windowGeneration;
+    for (const auto& connection : m_windowConnections) disconnect(connection);
+    m_windowConnections.clear();
+    disconnect(m_screenConnection);
+    cleanup();
+    setConnState(Disconnected);
+    setStreamState(Inactive);
+    m_window = w;
+    if (! w) return;
+
+    const auto generation = m_windowGeneration;
+    m_windowConnections.append(
+        connect(w, &QQuickWindow::screenChanged, this, [this, generation](QScreen* screen) {
+            if (m_windowGeneration == generation) onScreenChanged(screen);
+        }));
 #if QT_VERSION >= QT_VERSION_CHECK(6, 11, 0)
-    connect(window(),
-            &QQuickWindow::devicePixelRatioChanged,
-            this,
-            &WaywallenDisplay::effectiveDevicePixelRatioChanged,
-            Qt::UniqueConnection);
+    m_windowConnections.append(
+        connect(w, &QQuickWindow::devicePixelRatioChanged, this, [this, generation]() {
+            if (m_windowGeneration == generation) emit effectiveDevicePixelRatioChanged();
+        }));
 #endif
     if (hasTrackedScreenProperty()) {
-        m_screenToFollowConnection = connect(window(),
-                                             SIGNAL(screenToFollowChanged(QScreen*)),
-                                             this,
-                                             SLOT(onScreenChanged(QScreen*)));
+        m_screenToFollowConnection = connect(
+            w,
+            SIGNAL(screenToFollowChanged(QScreen*)),
+            this,
+            SLOT(onScreenChanged(QScreen*)));
     }
     onScreenChanged(trackedScreen());
 
     if (m_mouseForwardEnabled) {
-        // installEventFilter is idempotent on the same (target, filter)
-        // pair; safe to call again if windowChanged refires.
-        window()->installEventFilter(this);
+        w->installEventFilter(this);
         m_filterInstalled = true;
     }
 
-    if (displayHandle()) return;
-
-    // sceneGraphInvalidated: SG is being torn down (window closing,
-    // renderer reset, etc). Fires on render thread with DirectConnection.
-    // We have to release GPU resources NOW — by the time this returns
-    // Qt will start destroying its VkDevice / GL context.
-    connect(
-        window(),
-        &QQuickWindow::sceneGraphInvalidated,
-        this,
-        [this]() {
-            qCInfo(lcWD, "sceneGraphInvalidated: releasing GPU resources");
-            flushPendingRelease();
-#ifdef WW_HAVE_VULKAN
-            {
-                QMutexLocker lk(&m_pendingMutex);
-                if (m_pendingVk.valid && m_pendingVk.releaseSyncobjFd >= 0) {
-                    signalFrameRelease(m_pendingVk.releaseSyncobjFd,
-                                       m_pendingVk.buffer_generation,
-                                       m_pendingVk.seq,
-                                       "invalidated Vulkan frame");
-                }
-                m_pendingVk = PendingVkFrame {};
-            }
-#endif
-            if (auto resources = takeRenderSessionResources()) resources->shutdown();
-            // Notifiers live on GUI thread; this lambda is on render
-            // thread. deleteLater is documented thread-safe; it
-            // posts a destruction event back to the notifier's GUI
-            // thread. QPointer ensures we don't double-free if
-            // cleanup() also runs in parallel.
-            if (m_notifier) m_notifier->deleteLater();
-            if (m_notifierWrite) m_notifierWrite->deleteLater();
-            m_notifier.clear();
-            m_notifierWrite.clear();
-            m_eglImagesValid    = false;
-            m_glTexturesCreated = false;
-            m_glTextures.clear();
-            m_vkImagesValid = false;
-            m_vkImages.clear();
-            {
-                QMutexLocker lk(&m_pendingMutex);
-                waywallen_presentation_controller_reset(m_presentationState);
-                m_preparedEglContent = ContentSnapshot {};
-#ifdef WW_HAVE_VULKAN
-                m_preparedVkContent = ContentSnapshot {};
-#endif
-                m_candidatePrepareSerial        = 0;
-                m_promotionSerial               = 0;
-                m_frameSubmissionSerial         = 0;
-                m_promotionUsesTransition       = false;
-                m_frameSubmissionUsesTransition = false;
-                m_transitionActive              = false;
-                m_activeTransitionSerial        = 0;
-                m_transitionProgress            = 1.0;
-                m_outgoingContent               = ContentSnapshot {};
-                m_renderFrameSerial             = 0;
-                m_presentedLastFrameSerial      = 0;
-                m_presentedLastFrameSlot        = -1;
-                m_transitionLastFrameSerial     = 0;
-                m_transitionLastFrameSlot       = -1;
-                m_retirementPumpBudget          = 0;
-            }
-            m_textureCount  = 0;
-            m_activeBackend = BackendNone;
-        },
-        Qt::DirectConnection);
+    m_windowConnections.append(
+        connect(w, &QQuickWindow::sceneGraphInitialized, this, [this, generation]() {
+            if (m_windowGeneration == generation) tryConnect();
+        }));
 
     if (! window()->isSceneGraphInitialized()) {
         // Inject Vulkan device extensions needed for DMA-BUF import
@@ -1431,11 +1394,6 @@ void WaywallenDisplay::onWindowReady() {
         window()->setGraphicsConfiguration(config);
         qCInfo(lcWD, "requested DMA-BUF Vulkan device extensions");
 
-        connect(window(),
-                &QQuickWindow::sceneGraphInitialized,
-                this,
-                &WaywallenDisplay::tryConnect,
-                Qt::UniqueConnection);
         return;
     }
     tryConnect();
@@ -1470,8 +1428,9 @@ void WaywallenDisplay::onScreenChanged(QScreen*) {
     emit effectiveDevicePixelRatioChanged();
     // refresh on next event loop cycle as well, after qt updates dpr
     // Qt 6.11+ has a dedicated signal for older versions we use a singleShot.
-    QTimer::singleShot(0, this, [this]() {
-        emit effectiveDevicePixelRatioChanged();
+    const auto generation = m_windowGeneration;
+    QTimer::singleShot(0, this, [this, generation]() {
+        if (m_windowGeneration == generation) emit effectiveDevicePixelRatioChanged();
     });
     if (m_observedScreen != screen) {
         disconnect(m_screenRefreshConnection);
@@ -1479,9 +1438,13 @@ void WaywallenDisplay::onScreenChanged(QScreen*) {
         m_observedScreen = screen;
         if (screen) {
             m_screenRefreshConnection = connect(
-                screen, &QScreen::refreshRateChanged, this, &WaywallenDisplay::pushSizeUpdate);
+                screen, &QScreen::refreshRateChanged, this, [this, generation]() {
+                    if (m_windowGeneration == generation) pushSizeUpdate();
+                });
             m_screenDestroyedConnection = connect(
-                screen, &QObject::destroyed, this, &WaywallenDisplay::onTrackedScreenDestroyed);
+                screen, &QObject::destroyed, this, [this, generation]() {
+                    if (m_windowGeneration == generation) onTrackedScreenDestroyed();
+                });
         }
     }
     if (displayHandle()) m_updateSizeTimer.start();
@@ -1519,7 +1482,10 @@ void WaywallenDisplay::reconnectForScreenIdentity() {
 }
 
 void WaywallenDisplay::tryConnect() {
-    if (displayHandle() || (hasTrackedScreenProperty() && ! trackedScreen())) return;
+    if (renderSessionResources() || ! m_window || m_window != window() ||
+        ! m_window->isSceneGraphInitialized() ||
+        (hasTrackedScreenProperty() && ! trackedScreen()))
+        return;
     setConnState(Connecting);
 
     waywallen_display_callbacks_t cb {};
@@ -1530,9 +1496,11 @@ void WaywallenDisplay::tryConnect() {
     cb.on_presentation_snapshot = c_on_presentation_snapshot;
     cb.on_presentation_state    = c_on_presentation_state;
     cb.on_disconnected          = c_on_disconnected;
-    cb.user_data                = this;
 
     auto resources     = std::make_shared<RenderSessionResources>();
+    resources->window  = m_window;
+    resources->item    = this;
+    cb.user_data       = resources.get();
     resources->display = waywallen_display_new(&cb);
     if (! resources->display) {
         qCWarning(lcWD, "waywallen_display_new() failed");
@@ -1551,7 +1519,8 @@ void WaywallenDisplay::tryConnect() {
             display,
             m_windowObservationCapabilities,
             [](void* data, const waywallen_window_observation_config_t* config) {
-                auto* self                          = static_cast<WaywallenDisplay*>(data);
+                auto* self = callbackItem(data);
+                if (! self) return;
                 self->m_windowObservationGeneration = config->generation;
                 self->m_excludedApplicationIds.clear();
                 self->m_excludedWindowTitles.clear();
@@ -1572,7 +1541,7 @@ void WaywallenDisplay::tryConnect() {
                 emit self->windowObservationChanged();
                 self->setWindowStateFlags(self->m_windowStateFlags);
             },
-            this);
+            resources.get());
     }
 
     (void)waywallen_display_set_deferred_egl_acquire(display, true);
@@ -1679,6 +1648,36 @@ void WaywallenDisplay::tryConnect() {
         scheduleReconnectBackoff();
         return;
     }
+
+    // The resource callback must survive item moves and discarded cleanup jobs.
+    resources->invalidationConnection = connect(
+        resources->window,
+        &QQuickWindow::sceneGraphInvalidated,
+        resources->window,
+        [resources]() {
+            auto owner = resources;
+            owner->shutdown();
+        },
+        Qt::DirectConnection);
+    const std::weak_ptr<RenderSessionResources> session = resources;
+    m_sessionInvalidationConnection                     = connect(
+        resources->window,
+        &QQuickWindow::sceneGraphInvalidated,
+        this,
+        [this, session]() {
+            const auto owner = session.lock();
+            if (! owner || renderSessionResources() != owner) return;
+            cleanup();
+            setConnState(Disconnected);
+            setStreamState(Inactive);
+            update();
+        },
+        Qt::QueuedConnection);
+    m_frameEndConnection =
+        connect(resources->window, &QQuickWindow::afterFrameEnd, this, [this, session]() {
+            const auto owner = session.lock();
+            if (owner && renderSessionResources() == owner) onAfterFrameEnd();
+        });
 
     setConnState(Handshaking);
 
@@ -1791,11 +1790,13 @@ void WaywallenDisplay::armWriteNotifier() {
 }
 
 void WaywallenDisplay::reportFrameArmed(uint64_t generation, uint64_t seq) {
-    QPointer<WaywallenDisplay> guard(this);
+    QPointer<WaywallenDisplay>                  guard(this);
+    const std::weak_ptr<RenderSessionResources> session = renderSessionResources();
     QMetaObject::invokeMethod(
         this,
-        [guard, generation, seq]() {
-            if (! guard) return;
+        [guard, session, generation, seq]() {
+            const auto owner = session.lock();
+            if (! guard || ! owner || guard->renderSessionResources() != owner) return;
             auto* display = guard->displayHandle();
             if (! display) return;
             const int rc = waywallen_display_frame_release_armed(display, generation, seq);
@@ -1829,11 +1830,14 @@ void WaywallenDisplay::signalFrameRelease(int fd, uint64_t generation, uint64_t 
               qulonglong(generation),
               qulonglong(seq),
               rc);
-    QPointer<WaywallenDisplay> guard(this);
+    QPointer<WaywallenDisplay>                  guard(this);
+    const std::weak_ptr<RenderSessionResources> session = renderSessionResources();
     QMetaObject::invokeMethod(
         this,
-        [guard, rc, reason]() {
-            if (guard) guard->handleDisconnect(rc, reason.toUtf8().constData());
+        [guard, session, rc, reason]() {
+            const auto owner = session.lock();
+            if (guard && owner && guard->renderSessionResources() == owner)
+                guard->handleDisconnect(rc, reason.toUtf8().constData());
         },
         Qt::QueuedConnection);
 }

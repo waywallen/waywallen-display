@@ -337,8 +337,9 @@ private:
     void setPresentedClearColor(const QColor& color);
 
     // C callback trampolines.
-    static void c_on_binding_ready(void* ud, const waywallen_binding_t* binding);
-    static void c_on_textures_releasing(void* ud, const waywallen_textures_t* t);
+    static WaywallenDisplay* callbackItem(void* ud);
+    static void              c_on_binding_ready(void* ud, const waywallen_binding_t* binding);
+    static void              c_on_textures_releasing(void* ud, const waywallen_textures_t* t);
     static void c_on_composition_config(void* ud, const waywallen_composition_config_t* config);
     static void c_on_frame_ready(void* ud, const waywallen_frame_t* f);
     static void c_on_presentation_snapshot(void*                                    ud,
@@ -392,12 +393,13 @@ private:
 
     mutable QMutex                          m_resourcesMutex;
     std::shared_ptr<RenderSessionResources> m_renderResources;
-    /* QPointer so cross-thread access (sceneGraphInvalidated lambda
-     * runs on render thread) is safe — QPointer auto-clears when the
-     * underlying QObject is destroyed via deleteLater, and reads of
-     * a destroyed QPointer are well-defined (return nullptr). Raw
-     * pointers here used to require careful disconnect+deleteLater+
-     * null-write ordering across threads. */
+    QPointer<QQuickWindow>                  m_window;
+    QVector<QMetaObject::Connection>        m_windowConnections;
+    QMetaObject::Connection                 m_screenConnection;
+    QMetaObject::Connection                 m_sessionInvalidationConnection;
+    QMetaObject::Connection                 m_frameEndConnection;
+    quint64                                 m_windowGeneration { 0 };
+    // Notifiers are only accessed on the GUI thread, including invalidation cleanup.
     QPointer<QSocketNotifier> m_notifier;
     QPointer<QSocketNotifier> m_notifierWrite;
 

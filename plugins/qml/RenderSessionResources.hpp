@@ -5,13 +5,18 @@
 #include <waywallen_display.h>
 
 #include <QLoggingCategory>
+#include <QMetaObject>
+#include <QPointer>
 #include <QRunnable>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 
 Q_DECLARE_LOGGING_CATEGORY(lcWD)
 
 class QOpenGLExtraFunctions;
+class QQuickWindow;
+class WaywallenDisplay;
 
 class RenderSessionResources {
 public:
@@ -26,6 +31,10 @@ public:
     bool collectRetired(int frameSlot, std::uint64_t frameSerial);
 
     waywallen_display_t*         display { nullptr };
+    QPointer<QQuickWindow>       window;
+    QMetaObject::Connection      invalidationConnection;
+    WaywallenDisplay*            item { nullptr };
+    std::atomic<bool>            callbacksEnabled { true };
     waywallen_egl_presenter_t*   eglPresenter { nullptr };
     waywallen_egl_presentable_t* eglOutgoing { nullptr };
     void*                        eglDisplay { nullptr };

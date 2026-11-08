@@ -1,6 +1,7 @@
 #include "RenderSessionResources.hpp"
 
 #include <QOpenGLExtraFunctions>
+#include <QQuickWindow>
 #include <utility>
 
 namespace
@@ -131,6 +132,9 @@ RenderSessionResources::~RenderSessionResources() {
 }
 
 void RenderSessionResources::shutdown() {
+    callbacksEnabled.store(false, std::memory_order_release);
+    QObject::disconnect(invalidationConnection);
+    invalidationConnection = {};
 #ifdef WW_HAVE_VULKAN
     if (vkPresenter) {
         (void)waywallen_vulkan_presenter_drain_pending_release(vkPresenter, nullptr);
