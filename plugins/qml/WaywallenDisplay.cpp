@@ -1359,10 +1359,7 @@ void WaywallenDisplay::onWindowReady() {
         }));
     if (hasTrackedScreenProperty()) {
         m_screenToFollowConnection = connect(
-            w,
-            SIGNAL(screenToFollowChanged(QScreen*)),
-            this,
-            SLOT(onScreenChanged(QScreen*)));
+            w, SIGNAL(screenToFollowChanged(QScreen*)), this, SLOT(onScreenChanged(QScreen*)));
     }
     onScreenChanged(trackedScreen());
 
@@ -1435,16 +1432,16 @@ void WaywallenDisplay::onScreenChanged(QScreen*) {
         disconnect(m_screenDestroyedConnection);
         m_observedScreen = screen;
         if (screen) {
-            m_screenRefreshConnection = connect(
-                screen, &QScreen::refreshRateChanged, this, [this, generation]() {
+            m_screenRefreshConnection =
+                connect(screen, &QScreen::refreshRateChanged, this, [this, generation]() {
                     if (m_windowGeneration == generation) pushSizeUpdate();
                 });
-            m_screenDpiConnection = connect(
-                screen, &QScreen::physicalDotsPerInchChanged, this, [this, generation]() {
+            m_screenDpiConnection =
+                connect(screen, &QScreen::physicalDotsPerInchChanged, this, [this, generation]() {
                     if (m_windowGeneration == generation) emit effectiveDevicePixelRatioChanged();
                 });
-            m_screenDestroyedConnection = connect(
-                screen, &QObject::destroyed, this, [this, generation]() {
+            m_screenDestroyedConnection =
+                connect(screen, &QObject::destroyed, this, [this, generation]() {
                     if (m_windowGeneration == generation) onTrackedScreenDestroyed();
                 });
         }
@@ -1485,8 +1482,7 @@ void WaywallenDisplay::reconnectForScreenIdentity() {
 
 void WaywallenDisplay::tryConnect() {
     if (renderSessionResources() || ! m_window || m_window != window() ||
-        ! m_window->isSceneGraphInitialized() ||
-        (hasTrackedScreenProperty() && ! trackedScreen()))
+        ! m_window->isSceneGraphInitialized() || (hasTrackedScreenProperty() && ! trackedScreen()))
         return;
     setConnState(Connecting);
 

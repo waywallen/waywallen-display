@@ -1,3 +1,13 @@
+<release version="0.4.6" date="2026-11-08">
+  <description>
+    <p>Fixed:</p>
+    <ul>
+      <li>Keep QML rendering sessions tied to their owning window during window changes and scene graph recreation. #91 by @MR-kartoshki</li>
+      <li>Preserve KDE output identity and display names across monitor hotplug. #92 by @MR-kartoshki</li>
+      <li>Config.qml missing kcm_wallpaper properties/signals #93.</li>
+    </ul>
+  </description>
+</release>
 <release version="0.4.5" date="2026-11-04">
   <description>
     <p>Added:</p>
