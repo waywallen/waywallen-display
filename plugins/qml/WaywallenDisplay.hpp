@@ -395,7 +395,6 @@ private:
     std::shared_ptr<RenderSessionResources> m_renderResources;
     QPointer<QQuickWindow>                  m_window;
     QVector<QMetaObject::Connection>        m_windowConnections;
-    QMetaObject::Connection                 m_screenConnection;
     QMetaObject::Connection                 m_sessionInvalidationConnection;
     QMetaObject::Connection                 m_frameEndConnection;
     quint64                                 m_windowGeneration { 0 };

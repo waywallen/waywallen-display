@@ -415,7 +415,6 @@ WaywallenDisplay::WaywallenDisplay(QQuickItem* parent): QQuickItem(parent) {
 WaywallenDisplay::~WaywallenDisplay() {
     cleanup();
     for (const auto& connection : m_windowConnections) disconnect(connection);
-    disconnect(m_screenConnection);
     waywallen_presentation_controller_free(m_presentationState);
     m_presentationState = nullptr;
 }
@@ -1341,7 +1340,6 @@ void WaywallenDisplay::onWindowReady() {
     ++m_windowGeneration;
     for (const auto& connection : m_windowConnections) disconnect(connection);
     m_windowConnections.clear();
-    disconnect(m_screenConnection);
     cleanup();
     setConnState(Disconnected);
     setStreamState(Inactive);
