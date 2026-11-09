@@ -8,10 +8,20 @@ ColumnLayout {
 
     spacing: Kirigami.Units.largeSpacing
 
+    property var configDialog
+    property var wallpaperConfiguration: typeof wallpaper !== "undefined" ? wallpaper.configuration : null
+    property var parentLayout: typeof appearanceRoot !== "undefined" ? appearanceRoot.parentLayout : null
+
     property string cfg_DisplayName
+    property string cfg_DisplayNameDefault
     property bool   cfg_ShowDiagnostics
+    property bool   cfg_ShowDiagnosticsDefault
     property bool   cfg_MouseForward
+    property bool   cfg_MouseForwardDefault
     property bool   cfg_AccentColorFromWallpaper
+    property bool   cfg_AccentColorFromWallpaperDefault
+
+    signal configurationChanged()
 
     property string _probeError: ""
     property string _libVersion: ""
@@ -53,7 +63,7 @@ ColumnLayout {
     Kirigami.FormLayout {
         Layout.fillWidth: true
         Layout.alignment: Qt.AlignTop
-        twinFormLayouts: parentLayout
+        twinFormLayouts: root.parentLayout ? [root.parentLayout] : []
 
         QQC2.TextField {
             id: displayNameField
