@@ -464,6 +464,16 @@ extern "C" {
     pub fn waywallen_display_vulkan_commit_sampled_frame(d: *mut waywallen_display_t) -> c_int;
     pub fn waywallen_display_vulkan_discard_sampled_frame(d: *mut waywallen_display_t) -> c_int;
     pub fn waywallen_display_bind_dmabuf_relay(d: *mut waywallen_display_t) -> c_int;
+    pub fn waywallen_display_bind_dmabuf_relay_on_device(
+        d: *mut waywallen_display_t,
+        major: u32,
+        minor: u32,
+    ) -> c_int;
+    pub fn waywallen_display_set_render_device_callback(
+        d: *mut waywallen_display_t,
+        callback: Option<unsafe extern "C" fn(*mut c_void, u32, u32)>,
+        data: *mut c_void,
+    ) -> c_int;
 
     pub fn waywallen_display_set_drm_render_node(
         d: *mut waywallen_display_t,
