@@ -849,6 +849,11 @@ qreal WaywallenDisplay::effectiveDevicePixelRatio() const {
     return w ? w->effectiveDevicePixelRatio() : 1.0;
 }
 
+void WaywallenDisplay::itemChange(ItemChange change, const ItemChangeData& data) {
+    QQuickItem::itemChange(change, data);
+    if (change == ItemDevicePixelRatioHasChanged) emit effectiveDevicePixelRatioChanged();
+}
+
 void WaywallenDisplay::pushSizeUpdate() {
     auto* display = displayHandle();
     if (! display) return;
@@ -1334,6 +1339,7 @@ void WaywallenDisplay::onWindowReady() {
 
     disconnect(m_screenToFollowConnection);
     disconnect(m_screenRefreshConnection);
+    disconnect(m_screenDpiConnection);
     disconnect(m_screenDestroyedConnection);
     m_observedScreen.clear();
 
@@ -1351,12 +1357,6 @@ void WaywallenDisplay::onWindowReady() {
         connect(w, &QQuickWindow::screenChanged, this, [this, generation](QScreen* screen) {
             if (m_windowGeneration == generation) onScreenChanged(screen);
         }));
-#if QT_VERSION >= QT_VERSION_CHECK(6, 11, 0)
-    m_windowConnections.append(
-        connect(w, &QQuickWindow::devicePixelRatioChanged, this, [this, generation]() {
-            if (m_windowGeneration == generation) emit effectiveDevicePixelRatioChanged();
-        }));
-#endif
     if (hasTrackedScreenProperty()) {
         m_screenToFollowConnection = connect(
             w,
@@ -1424,20 +1424,24 @@ void WaywallenDisplay::onScreenChanged(QScreen*) {
         }
     }
     emit effectiveDevicePixelRatioChanged();
-    // refresh on next event loop cycle as well, after qt updates dpr
-    // Qt 6.11+ has a dedicated signal for older versions we use a singleShot.
+    // Refresh on the next event loop cycle as well, after Qt updates DPR.
     const auto generation = m_windowGeneration;
     QTimer::singleShot(0, this, [this, generation]() {
         if (m_windowGeneration == generation) emit effectiveDevicePixelRatioChanged();
     });
     if (m_observedScreen != screen) {
         disconnect(m_screenRefreshConnection);
+        disconnect(m_screenDpiConnection);
         disconnect(m_screenDestroyedConnection);
         m_observedScreen = screen;
         if (screen) {
             m_screenRefreshConnection = connect(
                 screen, &QScreen::refreshRateChanged, this, [this, generation]() {
                     if (m_windowGeneration == generation) pushSizeUpdate();
+                });
+            m_screenDpiConnection = connect(
+                screen, &QScreen::physicalDotsPerInchChanged, this, [this, generation]() {
+                    if (m_windowGeneration == generation) emit effectiveDevicePixelRatioChanged();
                 });
             m_screenDestroyedConnection = connect(
                 screen, &QObject::destroyed, this, [this, generation]() {

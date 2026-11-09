@@ -259,6 +259,7 @@ signals:
 
 protected:
     QSGNode* updatePaintNode(QSGNode* oldNode, UpdatePaintNodeData* data) override;
+    void     itemChange(ItemChange change, const ItemChangeData& data) override;
     void     componentComplete() override;
     void     releaseResources() override;
 
@@ -414,6 +415,7 @@ private:
     QTimer                  m_screenIdentityTimer;
     QPointer<QScreen>       m_observedScreen;
     QMetaObject::Connection m_screenRefreshConnection;
+    QMetaObject::Connection m_screenDpiConnection;
     QMetaObject::Connection m_screenDestroyedConnection;
     QMetaObject::Connection m_screenToFollowConnection;
 
