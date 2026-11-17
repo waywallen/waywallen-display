@@ -7,6 +7,7 @@ pub mod cosmic;
 pub mod cosmic_toplevel_info;
 pub mod hyprland;
 pub mod niri;
+pub mod umbriel;
 pub mod wayfire;
 pub mod wlr;
 
@@ -27,6 +28,8 @@ pub fn spawn_all(registry: BindingRegistry, commands: CommandSender) -> bool {
         hyprland::spawn(registry, commands)
     } else if niri::detect_socket().is_some() {
         niri::spawn(registry, commands)
+    } else if umbriel::detect_socket().is_some() {
+        umbriel::spawn(registry, commands)
     } else if wayfire::detect_socket().is_some() {
         wayfire::spawn(registry, commands)
     } else if cosmic::detect() {
