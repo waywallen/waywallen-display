@@ -456,6 +456,18 @@ int waywallen_display_vulkan_discard_sampled_frame(waywallen_display_t* d);
  */
 int waywallen_display_bind_dmabuf_relay(waywallen_display_t* d);
 
+/* Select the relay GPU by DRM render-node id; (0, 0) keeps automatic selection.
+ * An unavailable device fails without falling back to another GPU. */
+int waywallen_display_bind_dmabuf_relay_on_device(waywallen_display_t* d, uint32_t major,
+                                                  uint32_t minor);
+
+typedef void (*waywallen_render_device_callback_t)(void* data, uint32_t major, uint32_t minor);
+/* Opt in before connecting. Reconnect on the requested device; the daemon
+ * withholds buffers until then. NULL preserves independent GPU selection. */
+int waywallen_display_set_render_device_callback(waywallen_display_t*               d,
+                                                 waywallen_render_device_callback_t callback,
+                                                 void*                              data);
+
 /*
  * Override the DRM render-node id reported during register_display.
  * Pass `(0, 0)` to mark "unknown" — the daemon will then conservatively

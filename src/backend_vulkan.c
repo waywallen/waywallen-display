@@ -858,7 +858,9 @@ static bool ext_present(const VkExtensionProperties* props, uint32_t count, cons
     return false;
 }
 
-int ww_vk_create_owned(ww_vk_owned_t* out) {
+int ww_vk_create_owned(ww_vk_owned_t* out) { return ww_vk_create_owned_on_device(out, 0, 0); }
+
+int ww_vk_create_owned_on_device(ww_vk_owned_t* out, uint32_t major, uint32_t minor) {
     if (! out) return -EINVAL;
     memset(out, 0, sizeof(*out));
 
@@ -926,7 +928,9 @@ int ww_vk_create_owned(ww_vk_owned_t* out) {
     PFN_vkGetPhysicalDeviceQueueFamilyProperties vkGetPhysicalDeviceQueueFamilyProperties =
         (PFN_vkGetPhysicalDeviceQueueFamilyProperties)gipa(
             out->instance, "vkGetPhysicalDeviceQueueFamilyProperties");
-    PFN_vkCreateDevice   vkCreateDevice = (PFN_vkCreateDevice)gipa(out->instance, "vkCreateDevice");
+    PFN_vkCreateDevice vkCreateDevice = (PFN_vkCreateDevice)gipa(out->instance, "vkCreateDevice");
+    PFN_vkGetPhysicalDeviceProperties2 get_properties =
+        (PFN_vkGetPhysicalDeviceProperties2)gipa(out->instance, "vkGetPhysicalDeviceProperties2");
     PFN_vkGetDeviceQueue vkGetDeviceQueue =
         (PFN_vkGetDeviceQueue)gipa(out->instance, "vkGetDeviceQueue");
     if (! out->vkDestroyInstance || ! out->vkDestroyDevice || ! vkEnumeratePhysicalDevices ||
@@ -968,8 +972,22 @@ int ww_vk_create_owned(ww_vk_owned_t* out) {
                 break;
             }
         }
+        if (major != 0 && ! ext_present(eprops, ec, "VK_EXT_physical_device_drm")) all = false;
         free(eprops);
         if (! all) continue;
+
+        if (major != 0) {
+            if (! get_properties) continue;
+            VkPhysicalDeviceDrmPropertiesEXT drm = {
+                .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRM_PROPERTIES_EXT,
+            };
+            VkPhysicalDeviceProperties2 props = {
+                .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+                .pNext = &drm,
+            };
+            get_properties(pds[i], &props);
+            if (! drm.hasRender || drm.renderMajor != major || drm.renderMinor != minor) continue;
+        }
 
         uint32_t qc = 0;
         vkGetPhysicalDeviceQueueFamilyProperties(pds[i], &qc, NULL);

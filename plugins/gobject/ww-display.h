@@ -118,6 +118,26 @@ WwDisplay* ww_display_new(void);
 gboolean ww_display_bind_dmabuf_relay(WwDisplay* self);
 
 /**
+ * ww_display_bind_dmabuf_relay_on_device:
+ * @self: a #WwDisplay
+ * @major: DRM render-node major, or zero for automatic selection
+ * @minor: DRM render-node minor
+ *
+ * Returns: TRUE if the relay was bound to the requested GPU
+ */
+gboolean ww_display_bind_dmabuf_relay_on_device(WwDisplay* self, guint major, guint minor);
+
+/**
+ * ww_display_set_follow_producer_gpu:
+ * @self: a #WwDisplay
+ * @enabled: whether to receive preferred-render-device signals
+ *
+ * Call before connecting. The host must reconnect on the requested device.
+ * Returns: TRUE on success
+ */
+gboolean ww_display_set_follow_producer_gpu(WwDisplay* self, gboolean enabled);
+
+/**
  * ww_display_set_presentation_capabilities:
  * @self: a #WwDisplay
  * @flags: a bitmask of #WwPresentationCapability

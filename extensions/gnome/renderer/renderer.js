@@ -242,8 +242,22 @@ class MonitorRenderer {
     _initWaywallen() {
         logIndexed(this._index, `display=${this._displayName} id=${this._instanceId}`);
         const d = Waywallen.Display.new();
-        if (!d.bind_dmabuf_relay())
+        let followGpu = true;
+        if (this._preferredGpu) {
+            const {major, minor} = this._preferredGpu;
+            if (!d.bind_dmabuf_relay_on_device(major, minor)) {
+                logIndexed(this._index, `GPU ${major}:${minor} unavailable; using default relay GPU`);
+                if (!d.bind_dmabuf_relay())
+                    throw new Error('bind_dmabuf_relay failed');
+                followGpu = false;
+            }
+        } else if (!d.bind_dmabuf_relay()) {
             throw new Error('bind_dmabuf_relay failed');
+        }
+        if (!d.set_follow_producer_gpu(followGpu))
+            throw new Error('set_follow_producer_gpu failed');
+        d.connect('preferred-render-device', (_o, major, minor) =>
+            this._reconnectOnGpu(major, minor));
         if (!d.set_pause_effect_capabilities(Waywallen.PauseEffectCapability.BLUR))
             throw new Error('set_pause_effect_capabilities failed');
         const transitions = Waywallen.TransitionCapability.FADE |
@@ -253,7 +267,7 @@ class MonitorRenderer {
             throw new Error('set_transition_capabilities failed');
         this._display = d;
 
-        this._presentationWidget.connect('binding-staged',
+        this._bindingSignalId ??= this._presentationWidget.connect('binding-staged',
             (_o, count, w, h, fourcc, backend) =>
                 this._onBindingReady(count, w, h, fourcc, backend));
         // Register physical pixels (logical geometry × scale) so the producer
@@ -282,7 +296,10 @@ class MonitorRenderer {
                 this._onPresentationState(
                     stateGeneration, configGeneration, active));
         d.connect('disconnected',
-            (_o, code, msg) => this._onDisconnected(code, msg));
+            (_o, code, msg) => {
+                if (this._display === d)
+                    this._onDisconnected(code, msg);
+            });
 
         const refreshMhz = this._monitor.get_refresh_rate() || 60000;
         d.connect('window-observation-rules', (_o, generation, applicationIds, titles, applicationIdPatterns, titlePatterns) => {
@@ -306,6 +323,37 @@ class MonitorRenderer {
         this._inSourceId = addFdWatch(fd, GLib.IOCondition.IN,
                                       () => this._driveIO());
         this._driveIO();
+    }
+
+    _reconnectOnGpu(major, minor) {
+        if (this._gpuReconnectId || this._destroyed)
+            return;
+        this._preferredGpu = {major, minor};
+        // Dispatch is still on the old display's stack; tear it down after it returns.
+        this._gpuReconnectId = GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
+            this._gpuReconnectId = 0;
+            if (this._destroyed)
+                return GLib.SOURCE_REMOVE;
+            for (const key of ['_inSourceId', '_outSourceId']) {
+                if (this[key]) GLib.source_remove(this[key]);
+                this[key] = 0;
+            }
+            this._presentationWidget.set_display(null, 1);
+            this._presentationWidget.clear();
+            const old = this._display;
+            this._display = null;
+            old.disconnect();
+            this._presentation = null;
+            this._presentationReady = false;
+            this._writeControl({type: 'reset'});
+            try {
+                this._initWaywallen();
+            } catch (e) {
+                logIndexed(this._index, `GPU reconnect failed: ${e}`);
+                this._exit();
+            }
+            return GLib.SOURCE_REMOVE;
+        });
     }
 
     _setOutWatch(want) {
@@ -505,6 +553,10 @@ class MonitorRenderer {
         if (this._destroyed)
             return;
         this._destroyed = true;
+        if (this._gpuReconnectId) {
+            GLib.source_remove(this._gpuReconnectId);
+            this._gpuReconnectId = 0;
+        }
         if (this._inSourceId) {
             GLib.source_remove(this._inSourceId);
             this._inSourceId = 0;
