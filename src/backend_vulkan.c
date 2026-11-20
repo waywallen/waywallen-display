@@ -26,9 +26,11 @@
 #    include <unistd.h>
 
 const char* const ww_vk_required_device_extensions[] = {
-    "VK_EXT_external_memory_dma_buf",   "VK_EXT_queue_family_foreign",
-    "VK_EXT_image_drm_format_modifier", "VK_KHR_external_memory_fd",
-    "VK_KHR_external_semaphore_fd",     "VK_KHR_image_format_list",
+    /* VK_EXT_image_drm_format_modifier is deliberately NOT required:
+     * GPUs without it (RADV GFX8) fall back to linear dma-bufs. */
+    "VK_EXT_external_memory_dma_buf", "VK_EXT_queue_family_foreign",
+    "VK_KHR_external_memory_fd",      "VK_KHR_external_semaphore_fd",
+    "VK_KHR_image_format_list",
 };
 const uint32_t ww_vk_required_device_extension_count =
     (uint32_t)(sizeof(ww_vk_required_device_extensions) /
@@ -224,6 +226,10 @@ int ww_vk_backend_load(ww_vk_backend_t* backend, VkInstance instance,
             }                                                                \
         } while (0)
 
+    /* The loader only returns entry points of *enabled* device extensions. */
+    backend->have_modifier_ext =
+        gdpa(device, "vkGetImageDrmFormatModifierPropertiesEXT") != NULL;
+
     /* Core device functions. */
     RESOLVE(vkCreateImage, PFN_vkCreateImage, "vkCreateImage");
     RESOLVE(vkDestroyImage, PFN_vkDestroyImage, "vkDestroyImage");
@@ -383,6 +389,7 @@ int ww_vk_import_dmabuf(const ww_vk_backend_t* backend, const ww_vk_dmabuf_impor
         plane_layouts[p].size     = 0; /* driver computes */
     }
 
+    const bool use_modifier = backend->have_modifier_ext;
     VkImageDrmFormatModifierExplicitCreateInfoEXT mod_info = {
         .sType             = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT,
         .pNext             = NULL,
@@ -393,7 +400,7 @@ int ww_vk_import_dmabuf(const ww_vk_backend_t* backend, const ww_vk_dmabuf_impor
 
     VkExternalMemoryImageCreateInfo ext_mem_info = {
         .sType       = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
-        .pNext       = &mod_info,
+        .pNext       = use_modifier ? (const void*)&mod_info : NULL,
         .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
     };
 
@@ -406,7 +413,8 @@ int ww_vk_import_dmabuf(const ww_vk_backend_t* backend, const ww_vk_dmabuf_impor
         .mipLevels             = 1,
         .arrayLayers           = 1,
         .samples               = VK_SAMPLE_COUNT_1_BIT,
-        .tiling                = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT,
+        .tiling                = use_modifier ? VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT
+                                              : VK_IMAGE_TILING_LINEAR,
         .usage                 = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
         .sharingMode           = VK_SHARING_MODE_EXCLUSIVE,
         .queueFamilyIndexCount = 1,
@@ -748,7 +756,14 @@ int ww_vk_query_format_caps(const ww_vk_backend_t* backend, uint32_t want_featur
         props.pNext               = &list;
 
         gpdfp2(backend->physical_device, e->vk_format, &props);
-        if (list.drmFormatModifierCount == 0) continue;
+        if (list.drmFormatModifierCount == 0) {
+            /* No modifier extension: advertise LINEAR if usable. */
+            if (! backend->have_modifier_ext &&
+                (props.formatProperties.linearTilingFeatures & want_features) == want_features) {
+                emit(e->fourcc, 0ULL /* DRM_FORMAT_MOD_LINEAR */, 1u, user_data);
+            }
+            continue;
+        }
 
         VkDrmFormatModifierPropertiesEXT* entries = (VkDrmFormatModifierPropertiesEXT*)calloc(
             list.drmFormatModifierCount, sizeof(*entries));
@@ -984,7 +999,7 @@ int ww_vk_create_owned(ww_vk_owned_t* out) {
                "vk owned: no GPU with required extensions+queue family "
                "(VK_EXT_external_memory_dma_buf + "
                "VK_EXT_queue_family_foreign + "
-               "VK_EXT_image_drm_format_modifier + VK_KHR_external_memory_fd)");
+               "VK_KHR_external_memory_fd)");
         free(pds);
         ww_vk_destroy_owned(out);
         return -ENOSYS;
@@ -1000,12 +1015,31 @@ int ww_vk_create_owned(ww_vk_owned_t* out) {
         .queueCount       = 1,
         .pQueuePriorities = &prio,
     };
+    /* Required extensions plus VK_EXT_image_drm_format_modifier when the
+     * device has it (otherwise linear dma-bufs are used). */
+    const char* enabled_exts[16];
+    uint32_t    enabled_n = 0;
+    for (uint32_t w = 0; w < ww_vk_required_device_extension_count && enabled_n < 15; w++) {
+        enabled_exts[enabled_n++] = ww_vk_required_device_extensions[w];
+    }
+    {
+        uint32_t ec2 = 0;
+        vkEnumerateDeviceExtensionProperties(out->physical_device, NULL, &ec2, NULL);
+        VkExtensionProperties* ep2 = ec2 ? (VkExtensionProperties*)calloc(ec2, sizeof(*ep2)) : NULL;
+        if (ep2) {
+            vkEnumerateDeviceExtensionProperties(out->physical_device, NULL, &ec2, ep2);
+            if (ext_present(ep2, ec2, "VK_EXT_image_drm_format_modifier")) {
+                enabled_exts[enabled_n++] = "VK_EXT_image_drm_format_modifier";
+            }
+            free(ep2);
+        }
+    }
     VkDeviceCreateInfo dci = {
         .sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         .queueCreateInfoCount    = 1,
         .pQueueCreateInfos       = &qci,
-        .enabledExtensionCount   = ww_vk_required_device_extension_count,
-        .ppEnabledExtensionNames = ww_vk_required_device_extensions,
+        .enabledExtensionCount   = enabled_n,
+        .ppEnabledExtensionNames = enabled_exts,
     };
     vr = vkCreateDevice(out->physical_device, &dci, NULL, &out->device);
     if (vr != VK_SUCCESS) {
