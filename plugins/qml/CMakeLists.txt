@@ -38,6 +38,8 @@ qt_add_qml_module(waywallen-display-qml
         WaywallenDisplay.cpp
         WaywallenDisplayRender.cpp
         PluginInfo.hpp
+        SystemWallpaper.hpp
+        SystemWallpaper.cpp
     OUTPUT_DIRECTORY
         ${CMAKE_CURRENT_BINARY_DIR}/${_ww_qml_uri_path}
 )
@@ -71,6 +73,15 @@ target_link_options(waywallen-display-qml PRIVATE
     -Wl,--as-needed)
 
 if(WAYWALLEN_DISPLAY_BUILD_TESTS AND WAYWALLEN_DISPLAY_BUILD_QML_TESTS)
+    find_program(DBUS_RUN_SESSION_EXECUTABLE dbus-run-session)
+    if(DBUS_RUN_SESSION_EXECUTABLE)
+        add_executable(test_system_wallpaper
+            ../../tests/test_system_wallpaper.cpp SystemWallpaper.cpp SystemWallpaper.hpp)
+        target_link_libraries(test_system_wallpaper PRIVATE Qt6::Core Qt6::Gui Qt6::Qml Qt6::DBus)
+        add_test(NAME test_system_wallpaper
+            COMMAND ${DBUS_RUN_SESSION_EXECUTABLE} $<TARGET_FILE:test_system_wallpaper>)
+    endif()
+
     add_executable(test_qml_display_metrics ../../tests/test_qml_display_metrics.cpp)
     target_compile_features(test_qml_display_metrics PRIVATE cxx_std_17)
     target_compile_options(test_qml_display_metrics PRIVATE -Wall -Wextra -Wpedantic)
