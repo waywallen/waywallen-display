@@ -88,6 +88,9 @@ typedef struct ww_vk_backend {
     uint32_t         queue_family_index;
 
     bool loaded;
+    /* False when VK_EXT_image_drm_format_modifier is not enabled on the
+     * device (e.g. RADV on GFX8/Tonga): only LINEAR dma-bufs are used. */
+    bool have_modifier_ext;
 } ww_vk_backend_t;
 
 typedef void* (*ww_vk_get_instance_proc_addr_fn)(void* instance, const char* name);
