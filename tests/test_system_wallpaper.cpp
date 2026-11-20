@@ -13,9 +13,9 @@
 #include <QTemporaryDir>
 #include <QTimer>
 
-#define CHECK(condition) \
-    do { \
-        if (!(condition)) qFatal("%s:%d: %s", __FILE__, __LINE__, #condition); \
+#define CHECK(condition)                                                        \
+    do {                                                                        \
+        if (! (condition)) qFatal("%s:%d: %s", __FILE__, __LINE__, #condition); \
     } while (false)
 
 class FakePlasma : public QObject, protected QDBusContext {
@@ -45,13 +45,13 @@ int main(int argc, char** argv) {
     QTemporaryDir directory;
     const QString image = directory.filePath(QStringLiteral("a'\"b.ppm"));
     QFile         file(image);
-    const bool opened = file.open(QIODevice::WriteOnly);
+    const bool    opened = file.open(QIODevice::WriteOnly);
     CHECK(opened);
     file.write("P6\n1 1\n255\n\xff\0\0", 14);
     file.close();
     const auto client = QDBusConnection::connectToBus(QDBusConnection::SessionBus,
                                                       QStringLiteral("background-test-client"));
-    auto requestCall = [&client](const QDBusMessage& request) {
+    auto       requestCall = [&client](const QDBusMessage& request) {
         QDBusPendingCallWatcher watcher(client.asyncCall(request, 2000));
         QEventLoop              loop;
         QObject::connect(&watcher, &QDBusPendingCallWatcher::finished, &loop, &QEventLoop::quit);
@@ -74,18 +74,19 @@ int main(int argc, char** argv) {
         SystemWallpaper second;
         first.setEnabled(true);
         second.setEnabled(true);
-        auto request = QDBusMessage::createMethodCall(
-            QStringLiteral("org.waywallen.Display.Background"),
-            QStringLiteral("/org/waywallen/Display/Background"),
-            QStringLiteral("org.freedesktop.DBus.Properties"), QStringLiteral("Get"));
+        auto request =
+            QDBusMessage::createMethodCall(QStringLiteral("org.waywallen.Display.Background"),
+                                           QStringLiteral("/org/waywallen/Display/Background"),
+                                           QStringLiteral("org.freedesktop.DBus.Properties"),
+                                           QStringLiteral("Get"));
         request << QStringLiteral("org.waywallen.Display.Background1")
                 << QStringLiteral("CanAutoUpdateStaticBackground");
         const QDBusPendingReply<QDBusVariant> capability(requestCall(request));
-        CHECK(!capability.isError() && capability.value().variant().toBool());
+        CHECK(! capability.isError() && capability.value().variant().toBool());
         auto error = call(image);
-        CHECK(!error.isValid());
+        CHECK(! error.isValid());
         CHECK(plasma.received == PlasmaBackgroundService::script(image));
-        QJSEngine js;
+        QJSEngine  js;
         const auto setup = js.evaluate(QStringLiteral(R"JS(
             function desktop(plugin) {
                 return { wallpaperPlugin: plugin, writes: 0, writeConfig(key, image) {
@@ -102,20 +103,22 @@ int main(int argc, char** argv) {
             function currentActivity() { return 'current'; }
             function desktopsForActivity(id) { return id === 'current' ? [live, image] : [inactive]; }
         )JS"));
-        CHECK(!setup.isError());
+        CHECK(! setup.isError());
         const auto evaluated = js.evaluate(plasma.received);
-        CHECK(!evaluated.isError());
-        CHECK(js.evaluate(QStringLiteral("live.writes === 1 && image.writes === 0 && inactive.writes === 0 && "
-                                        "live.wallpaperPlugin === 'org.waywallen.kde'")).toBool());
+        CHECK(! evaluated.isError());
+        CHECK(js.evaluate(QStringLiteral(
+                              "live.writes === 1 && image.writes === 0 && inactive.writes === 0 && "
+                              "live.wallpaperPlugin === 'org.waywallen.kde'"))
+                  .toBool());
         error = call(QStringLiteral("relative.ppm"));
         CHECK(error.type() == QDBusError::InvalidArgs);
         error = call(directory.path());
         CHECK(error.type() == QDBusError::InvalidArgs);
         first.setEnabled(false);
         error = call(image);
-        CHECK(!error.isValid());
+        CHECK(! error.isValid());
         plasma.fail = true;
-        error = call(image);
+        error       = call(image);
         CHECK(error.message().contains(QStringLiteral("test desktop failure")));
     }
     const auto error = call(image);

@@ -22,9 +22,10 @@ int                      users      = 0;
 
 PlasmaBackgroundService::PlasmaBackgroundService(QObject* parent): QObject(parent) {
     auto bus = QDBusConnection::sessionBus();
-    if (! bus.registerObject(
-            QString::fromLatin1(objectPath), this,
-            QDBusConnection::ExportAllSlots | QDBusConnection::ExportAllProperties)) {
+    if (! bus.registerObject(QString::fromLatin1(objectPath),
+                             this,
+                             QDBusConnection::ExportAllSlots |
+                                 QDBusConnection::ExportAllProperties)) {
         qWarning("Waywallen: could not export system background provider");
         return;
     }
@@ -49,13 +50,12 @@ QString PlasmaBackgroundService::script(const QString& path) {
             .toJson(QJsonDocument::Compact);
     const auto image = QString::fromUtf8(encoded.mid(1, encoded.size() - 2));
     // Writing the image plugin's config must not select it over the live wallpaper plugin.
-    return QStringLiteral(
-               "var ds = desktopsForActivity(currentActivity()).filter(function(d) { "
-               "return d.wallpaperPlugin === 'org.waywallen.kde'; }); "
-               "if (!ds.length) throw new Error('No active Waywallen desktops'); "
-               "for (var i = 0; i < ds.length; ++i) { var d = ds[i]; "
-               "d.currentConfigGroup = ['Wallpaper', 'org.kde.image', 'General']; "
-               "d.writeConfig('Image', %1); }")
+    return QStringLiteral("var ds = desktopsForActivity(currentActivity()).filter(function(d) { "
+                          "return d.wallpaperPlugin === 'org.waywallen.kde'; }); "
+                          "if (!ds.length) throw new Error('No active Waywallen desktops'); "
+                          "for (var i = 0; i < ds.length; ++i) { var d = ds[i]; "
+                          "d.currentConfigGroup = ['Wallpaper', 'org.kde.image', 'General']; "
+                          "d.writeConfig('Image', %1); }")
         .arg(image);
 }
 
@@ -78,9 +78,9 @@ void PlasmaBackgroundService::SetStaticBackground(const QString& path) {
     const auto replyTo = message();
     const auto bus     = connection();
     auto       request = QDBusMessage::createMethodCall(QStringLiteral("org.kde.plasmashell"),
-                                                  QStringLiteral("/PlasmaShell"),
-                                                  QStringLiteral("org.kde.PlasmaShell"),
-                                                  QStringLiteral("evaluateScript"));
+                                                        QStringLiteral("/PlasmaShell"),
+                                                        QStringLiteral("org.kde.PlasmaShell"),
+                                                        QStringLiteral("evaluateScript"));
     request << script(path);
     auto* watcher = new QDBusPendingCallWatcher(bus.asyncCall(request, 10000), this);
     connect(watcher,
