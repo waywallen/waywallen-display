@@ -23,6 +23,7 @@ public:
     ~RenderSessionResources();
 
     void shutdown();
+    bool isShutdown() const { return m_shutdown.load(std::memory_order_acquire); }
     bool ensureEglPresenter(QOpenGLExtraFunctions* functions);
     bool discardEglCandidate();
     bool commitEglCandidateRetaining();
@@ -44,6 +45,7 @@ public:
 #endif
 
 private:
+    std::atomic<bool> m_shutdown { false };
     FrameSlotRetirementQueue<waywallen_egl_presentable_t*> eglRetired;
 #ifdef WW_HAVE_VULKAN
     FrameSlotRetirementQueue<waywallen_vulkan_presentable_t*> vkRetired;

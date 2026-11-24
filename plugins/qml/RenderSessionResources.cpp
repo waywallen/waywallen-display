@@ -132,6 +132,7 @@ RenderSessionResources::~RenderSessionResources() {
 }
 
 void RenderSessionResources::shutdown() {
+    if (isShutdown()) return;
     callbacksEnabled.store(false, std::memory_order_release);
     QObject::disconnect(invalidationConnection);
     invalidationConnection = {};
@@ -161,6 +162,7 @@ void RenderSessionResources::shutdown() {
         eglPresenter = nullptr;
     }
     eglDisplay = nullptr;
+    m_shutdown.store(true, std::memory_order_release);
 }
 
 bool RenderSessionResources::ensureEglPresenter(QOpenGLExtraFunctions* functions) {

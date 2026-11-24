@@ -81,6 +81,17 @@ if(WAYWALLEN_DISPLAY_BUILD_TESTS AND WAYWALLEN_DISPLAY_BUILD_QML_TESTS)
         add_test(NAME test_system_wallpaper
             COMMAND ${DBUS_RUN_SESSION_EXECUTABLE} $<TARGET_FILE:test_system_wallpaper>)
     endif()
+    add_executable(test_render_session_shutdown
+        ../../tests/test_render_session_shutdown.cpp RenderSessionResources.cpp)
+    target_include_directories(test_render_session_shutdown PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(test_render_session_shutdown PRIVATE Qt6::Quick waywallen_display_static)
+    if(Vulkan_FOUND)
+        target_compile_definitions(test_render_session_shutdown PRIVATE WW_HAVE_VULKAN=1)
+        target_link_libraries(test_render_session_shutdown PRIVATE Vulkan::Headers)
+    endif()
+    add_test(NAME test_render_session_shutdown COMMAND test_render_session_shutdown)
+    set_tests_properties(test_render_session_shutdown PROPERTIES ENVIRONMENT
+        "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
 
     add_executable(test_qml_display_metrics ../../tests/test_qml_display_metrics.cpp)
     target_compile_features(test_qml_display_metrics PRIVATE cxx_std_17)

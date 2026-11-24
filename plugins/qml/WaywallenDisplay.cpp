@@ -442,7 +442,7 @@ std::shared_ptr<RenderSessionResources> WaywallenDisplay::takeRenderSessionResou
         QMutexLocker lock(&m_resourcesMutex);
         resources = std::move(m_renderResources);
     }
-    if (resources) {
+    if (resources && !resources->isShutdown()) {
         resources->callbacksEnabled.store(false, std::memory_order_release);
         if (resources->display) waywallen_display_close(resources->display);
     }
@@ -479,7 +479,9 @@ void WaywallenDisplay::cleanup() {
     }
 #endif
 
-    if (auto resources = takeRenderSessionResources()) {
+    // Window teardown invalidates the session before releasing its item tree.
+    // A non-null QPointer does not imply the window's render context still exists.
+    if (auto resources = takeRenderSessionResources(); resources && !resources->isShutdown()) {
         QQuickWindow* w = resources->window;
         if (w && w->isSceneGraphInitialized()) {
             /* updateDirtyNodes() detaches the old owned QSGTexture during
