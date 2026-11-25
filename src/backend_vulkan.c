@@ -28,9 +28,8 @@
 const char* const ww_vk_required_device_extensions[] = {
     /* VK_EXT_image_drm_format_modifier is deliberately NOT required:
      * GPUs without it (RADV GFX8) fall back to linear dma-bufs. */
-    "VK_EXT_external_memory_dma_buf", "VK_EXT_queue_family_foreign",
-    "VK_KHR_external_memory_fd",      "VK_KHR_external_semaphore_fd",
-    "VK_KHR_image_format_list",
+    "VK_EXT_external_memory_dma_buf", "VK_EXT_queue_family_foreign", "VK_KHR_external_memory_fd",
+    "VK_KHR_external_semaphore_fd",   "VK_KHR_image_format_list",
 };
 const uint32_t ww_vk_required_device_extension_count =
     (uint32_t)(sizeof(ww_vk_required_device_extensions) /
@@ -227,8 +226,7 @@ int ww_vk_backend_load(ww_vk_backend_t* backend, VkInstance instance,
         } while (0)
 
     /* The loader only returns entry points of *enabled* device extensions. */
-    backend->have_modifier_ext =
-        gdpa(device, "vkGetImageDrmFormatModifierPropertiesEXT") != NULL;
+    backend->have_modifier_ext = gdpa(device, "vkGetImageDrmFormatModifierPropertiesEXT") != NULL;
 
     /* Core device functions. */
     RESOLVE(vkCreateImage, PFN_vkCreateImage, "vkCreateImage");
@@ -389,8 +387,8 @@ int ww_vk_import_dmabuf(const ww_vk_backend_t* backend, const ww_vk_dmabuf_impor
         plane_layouts[p].size     = 0; /* driver computes */
     }
 
-    const bool use_modifier = backend->have_modifier_ext;
-    VkImageDrmFormatModifierExplicitCreateInfoEXT mod_info = {
+    const bool                                    use_modifier = backend->have_modifier_ext;
+    VkImageDrmFormatModifierExplicitCreateInfoEXT mod_info     = {
         .sType             = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT,
         .pNext             = NULL,
         .drmFormatModifier = im->modifier,
@@ -405,17 +403,16 @@ int ww_vk_import_dmabuf(const ww_vk_backend_t* backend, const ww_vk_dmabuf_impor
     };
 
     VkImageCreateInfo image_ci = {
-        .sType                 = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-        .pNext                 = &ext_mem_info,
-        .imageType             = VK_IMAGE_TYPE_2D,
-        .format                = format,
-        .extent                = { im->width, im->height, 1 },
-        .mipLevels             = 1,
-        .arrayLayers           = 1,
-        .samples               = VK_SAMPLE_COUNT_1_BIT,
-        .tiling                = use_modifier ? VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT
-                                              : VK_IMAGE_TILING_LINEAR,
-        .usage                 = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        .sType       = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .pNext       = &ext_mem_info,
+        .imageType   = VK_IMAGE_TYPE_2D,
+        .format      = format,
+        .extent      = { im->width, im->height, 1 },
+        .mipLevels   = 1,
+        .arrayLayers = 1,
+        .samples     = VK_SAMPLE_COUNT_1_BIT,
+        .tiling = use_modifier ? VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT : VK_IMAGE_TILING_LINEAR,
+        .usage  = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
         .sharingMode           = VK_SHARING_MODE_EXCLUSIVE,
         .queueFamilyIndexCount = 1,
         .pQueueFamilyIndices   = &backend->queue_family_index,

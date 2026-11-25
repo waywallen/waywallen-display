@@ -95,76 +95,111 @@ jobs:
           path: ${{ matrix.extension.pattern }}
           if-no-files-found: error
 
-  layer-shell:
-    name: Build layer-shell (${{ matrix.platform.arch }})
+  client:
+    name: Build ${{ matrix.client.bin }} (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
+        client:
+          - bin: waywallen-layer-shell
+            features: egl,vulkan,layer-shell
+          - bin: waywallen-x11
+            features: vulkan,x11
         platform:
           - arch: x86_64
             runner: ubuntu-24.04
           - arch: aarch64
             runner: ubuntu-24.04-arm
+    env:
+      CLIENT_BIN: ${{ matrix.client.bin }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.tag || github.ref }}
 
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            gcc gettext pkg-config glslang-tools libegl-dev libgles-dev libvulkan-dev \
-            libwayland-dev
-
-      - name: Build waywallen-layer-shell
-        run: cargo build --bin waywallen-layer-shell --release --locked
-
-      - name: Package waywallen-layer-shell
+      - name: Resolve client package
+        id: client
+        env:
+          RELEASE_REF: ${{ inputs.tag }}
         run: |
           version=$(
             cargo metadata --no-deps --format-version 1 \
-              | python3 -c 'import json, sys; data = json.load(sys.stdin); print(next(p["version"] for p in data["packages"] if p["name"] == "waywallen-display"))'
+              | python3 -c 'import json, sys; package = next(p for p in json.load(sys.stdin)["packages"] if p["name"] == "waywallen-display"); print(package["version"] if any(t["name"] == sys.argv[1] and "bin" in t["kind"] for t in package["targets"]) else "")' "$CLIENT_BIN"
           )
-          arch=$(uname -m)
-          root="waywallen-layer-shell-${version}-${arch}"
-          mkdir -p "dist/$root"
-          install -Dm755 target/release/waywallen-layer-shell "dist/$root/waywallen-layer-shell"
-          while IFS= read -r lang; do
-            case "$lang" in ''|'#'*) continue ;; esac
-            locale_dir="dist/$root/share/locale/$lang/LC_MESSAGES"
-            mkdir -p "$locale_dir"
-            msgfmt --check --check-format -o "$locale_dir/waywallen-layer-shell.mo" \
-              "po/layer-shell/$lang.po"
-          done < po/layer-shell/LINGUAS
-          tar -C dist -czf "dist/$root.tar.gz" "$root"
-          rm -rf "dist/$root"
+          if [[ -z "$version" ]]; then
+            if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$RELEASE_REF" == v* && "$CLIENT_BIN" == waywallen-x11 ]]; then
+              echo "Skipping $CLIENT_BIN: it is not present in $RELEASE_REF"
+              exit 0
+            fi
+            echo "::error::Missing Cargo target $CLIENT_BIN"
+            exit 1
+          fi
+          echo "root=${CLIENT_BIN}-${version}-$(uname -m)" >> "$GITHUB_OUTPUT"
 
-      - name: Verify translation assets
+      - name: Install build dependencies
+        if: steps.client.outputs.root != ''
         run: |
-          archive=$(compgen -G 'dist/waywallen-layer-shell-*.tar.gz' | head -n1)
-          test -n "$archive"
-          entries=$(tar -tzf "$archive")
-          grep -Eq '/share/locale/ru/LC_MESSAGES/waywallen-layer-shell.mo$' <<<"$entries"
+          packages=(gcc pkg-config glslang-tools libvulkan-dev)
+          if [[ "$CLIENT_BIN" == waywallen-layer-shell ]]; then
+            packages+=(gettext libegl-dev libgles-dev libwayland-dev)
+          fi
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends "${packages[@]}"
+
+      - name: Build ${{ matrix.client.bin }}
+        if: steps.client.outputs.root != ''
+        env:
+          CLIENT_FEATURES: ${{ matrix.client.features }}
+        run: cargo build --bin "$CLIENT_BIN" --release --locked --no-default-features --features "$CLIENT_FEATURES"
+
+      - name: Package ${{ matrix.client.bin }}
+        if: steps.client.outputs.root != ''
+        env:
+          PACKAGE_ROOT: ${{ steps.client.outputs.root }}
+        run: |
+          install -Dm755 "target/release/$CLIENT_BIN" "dist/$PACKAGE_ROOT/$CLIENT_BIN"
+          if [[ "$CLIENT_BIN" == waywallen-layer-shell ]]; then
+            while IFS= read -r lang; do
+              case "$lang" in ''|'#'*) continue ;; esac
+              locale_dir="dist/$PACKAGE_ROOT/share/locale/$lang/LC_MESSAGES"
+              mkdir -p "$locale_dir"
+              msgfmt --check --check-format -o "$locale_dir/waywallen-layer-shell.mo" \
+                "po/layer-shell/$lang.po"
+            done < po/layer-shell/LINGUAS
+          fi
+          tar -C dist -czf "dist/$PACKAGE_ROOT.tar.gz" "$PACKAGE_ROOT"
+
+      - name: Verify client archive
+        if: steps.client.outputs.root != ''
+        env:
+          PACKAGE_ROOT: ${{ steps.client.outputs.root }}
+        run: |
+          entries=$(tar -tzf "dist/$PACKAGE_ROOT.tar.gz")
+          grep -Fxq "$PACKAGE_ROOT/$CLIENT_BIN" <<<"$entries"
+          "dist/$PACKAGE_ROOT/$CLIENT_BIN" --version
+          if [[ "$CLIENT_BIN" == waywallen-layer-shell ]]; then
+            grep -Fxq "$PACKAGE_ROOT/share/locale/ru/LC_MESSAGES/waywallen-layer-shell.mo" <<<"$entries"
+          fi
           if grep -Eq '\.(po|pot)$' <<<"$entries"; then
             echo 'source translation catalog found in runtime archive' >&2
             exit 1
           fi
 
       - name: Upload artifact
+        if: steps.client.outputs.root != ''
         uses: actions/upload-artifact@v4
         with:
-          name: waywallen-layer-shell-${{ matrix.platform.arch }}
-          path: dist/waywallen-layer-shell-*.tar.gz
+          name: ${{ matrix.client.bin }}-${{ matrix.platform.arch }}
+          path: dist/${{ steps.client.outputs.root }}.tar.gz
           if-no-files-found: error
 
   create-release:
     name: Create release
     needs:
       - extension
-      - layer-shell
+      - client
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4

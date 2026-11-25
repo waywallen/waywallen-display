@@ -45,7 +45,7 @@ public:
 #endif
 
 private:
-    std::atomic<bool> m_shutdown { false };
+    std::atomic<bool>                                      m_shutdown { false };
     FrameSlotRetirementQueue<waywallen_egl_presentable_t*> eglRetired;
 #ifdef WW_HAVE_VULKAN
     FrameSlotRetirementQueue<waywallen_vulkan_presentable_t*> vkRetired;

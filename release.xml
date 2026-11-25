@@ -1,3 +1,20 @@
+<release version="0.4.7" date="2026-11-25">
+  <description>
+    <p>Added:</p>
+    <ul>
+      <li>Add an Umbriel IPC window watcher for layer-shell auto-pause. #95 by @AkiraLyu</li>
+    </ul>
+    <p>Changed:</p>
+    <ul>
+      <li>Make rounded wallpaper corners in the GNOME overview optional and off by default.</li>
+    </ul>
+    <p>Fixed:</p>
+    <ul>
+      <li>Fall back to linear DMA-BUF imports on Vulkan drivers without DRM format modifiers. #97 by @HarleyGaniere</li>
+      <li>Avoid accessing the QML window after the rendering session has shut down.</li>
+    </ul>
+  </description>
+</release>
 <release version="0.4.6" date="2026-11-08">
   <description>
     <p>Fixed:</p>
