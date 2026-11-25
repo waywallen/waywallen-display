@@ -73,23 +73,31 @@ msgstr ""
 msgid "Blur radius in pixels (higher is blurrier)."
 msgstr ""
 
-#: extensions/gnome/extension/prefs.js:104
+#: extensions/gnome/extension/prefs.js:100
+msgid "Round workspace preview corners"
+msgstr ""
+
+#: extensions/gnome/extension/prefs.js:101
+msgid "Clip the live wallpaper in workspace previews. Re-enable the extension to apply changes."
+msgstr ""
+
+#: extensions/gnome/extension/prefs.js:112
 msgid "Pairs well with Blur my Shell"
 msgstr ""
 
-#: extensions/gnome/extension/prefs.js:105
+#: extensions/gnome/extension/prefs.js:113
 msgid "For the full frosted-glass look, install Blur my Shell — it also blurs the panel, dash and application windows, and coexists with this extension."
 msgstr ""
 
-#: extensions/gnome/extension/prefs.js:116
+#: extensions/gnome/extension/prefs.js:124
 msgid "Advanced"
 msgstr ""
 
-#: extensions/gnome/extension/prefs.js:120
+#: extensions/gnome/extension/prefs.js:128
 msgid "Show diagnostics overlay"
 msgstr ""
 
-#: extensions/gnome/extension/prefs.js:121
+#: extensions/gnome/extension/prefs.js:129
 msgid "Overlay resolution / fps / window-state on the wallpaper (dev only)."
 msgstr ""
 

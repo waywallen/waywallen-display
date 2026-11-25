@@ -28,6 +28,7 @@ export class GnomeShellOverride {
 
     enable() {
         const self = this;
+        const roundOverviewCorners = this._settings?.get_boolean('overview-rounded-corners') ?? false;
 
         this._injection.overrideMethod(
             Background.BackgroundManager.prototype,
@@ -39,7 +40,8 @@ export class GnomeShellOverride {
                     : Wallpaper.WallpaperRole.Other;
                 this.waywallenActor = new Wallpaper.LiveWallpaper(
                     backgroundActor, role, self._rendererAvailable, self._rendererLauncher,
-                    actor => self._wallpaperActors.delete(actor));
+                    actor => self._wallpaperActors.delete(actor),
+                    roundOverviewCorners && role === Wallpaper.WallpaperRole.Other);
                 self._wallpaperActors.add(this.waywallenActor);
                 if (role === Wallpaper.WallpaperRole.Desktop)
                     self._applyPresentationToActor(this.waywallenActor);

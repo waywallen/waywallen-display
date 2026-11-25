@@ -141,7 +141,8 @@ function setup({shell51 = false} = {}) {
         windows.push(actor);
         return {actor, launcher: {ownsWindow: window => window === actor.meta_window}};
     }
-    function wallpaper(launcher, available = true, role = Wallpaper.WallpaperRole.Desktop) {
+    function wallpaper(launcher, available = true, role = Wallpaper.WallpaperRole.Desktop,
+        roundedCorners) {
         const background = new Actor({monitor: 0});
         const content = new Actor({brightness: 0.5, vignette: false, rounded_clip_radius: 0});
         Object.defineProperty(background, 'content', {get() {
@@ -149,7 +150,7 @@ function setup({shell51 = false} = {}) {
             return content;
         }});
         const actor = new Wallpaper.LiveWallpaper(background, role, available, launcher,
-            destroyed => actors.delete(destroyed));
+            destroyed => actors.delete(destroyed), roundedCorners);
         actors.add(actor);
         return {actor, background, content};
     }
@@ -276,10 +277,27 @@ test('launcher replacement cannot retain the previous renderer clone', () => {
     background.destroy();
 });
 
-test('overview clip follows work area, preview size and animated radius', () => {
+test('overview previews skip rounded clipping by default', () => {
     const s = setup();
     const r = s.renderer();
     const {actor, background, content} = s.wallpaper(r.launcher, true, 'other');
+    Object.defineProperty(content, 'rounded_clip_radius', {get() {
+        assert.fail('rounding is disabled: the clip radius must not be read');
+    }});
+    assert.equal(content.handlers.size, 0);
+    content.emit('notify::rounded-clip-radius');
+    assert.equal(actor.relayouts, undefined);
+    actor.vfunc_allocate(allocation(960, 540));
+    assert.equal(actor.effects.size, 0);
+    assert.equal(actor._cloneActor.scale_x, 0.5);
+    assert.equal(actor._cloneActor.scale_y, 0.5);
+    background.destroy();
+});
+
+test('overview clip follows work area, preview size and animated radius', () => {
+    const s = setup();
+    const r = s.renderer();
+    const {actor, background, content} = s.wallpaper(r.launcher, true, 'other', true);
     actor.vfunc_allocate(allocation(1920, 1080));
     assert.equal(actor.effects.size, 0);
 
@@ -311,7 +329,7 @@ test('overview clip follows work area, preview size and animated radius', () => 
 test('clip uniforms account for offscreen offset and HiDPI changes', () => {
     const s = setup();
     const r = s.renderer();
-    const {actor, background, content} = s.wallpaper(r.launcher, true, 'other');
+    const {actor, background, content} = s.wallpaper(r.launcher, true, 'other', true);
     content.rounded_clip_radius = 30;
     actor.vfunc_allocate(allocation(960, 540));
     const effect = actor._clipEffect;
@@ -342,7 +360,7 @@ for (const shell51 of [false, true]) {
     test(`rounded clip shader renders and resizes with ${shell51 ? 'GNOME 51' : 'legacy GLSLEffect'}`, () => {
         const s = setup({shell51});
         const r = s.renderer();
-        const {actor, background, content} = s.wallpaper(r.launcher, true, 'other');
+        const {actor, background, content} = s.wallpaper(r.launcher, true, 'other', true);
         content.rounded_clip_radius = 30;
         actor.vfunc_allocate(allocation(960, 540));
         const effect = actor._clipEffect;

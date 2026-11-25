@@ -56,5 +56,14 @@
       </description>
     </key>
 
+    <key name="overview-rounded-corners" type="b">
+      <default>false</default>
+      <summary>Round workspace preview corners</summary>
+      <description>
+        Clip the live wallpaper in workspace previews. Re-enable the extension
+        to apply changes.
+      </description>
+    </key>
+
   </schema>
 </schemalist>

@@ -1,7 +1,6 @@
 // Holds a Clutter.Clone of the renderer's MetaWindowActor for one
 // monitor. Inserted as a child of the original Background actor by
-// gnomeShellOverride, so it follows the desktop's z-order, rounded
-// corners (in workspace overview) and lifetime automatically.
+// gnomeShellOverride, so it follows the background's z-order and lifetime.
 
 import Clutter from 'gi://Clutter';
 import Cogl from 'gi://Cogl';
@@ -189,7 +188,7 @@ class WaywallenRoundedClipEffect extends (Shell.GLSLEffect ?? Clutter.ShaderEffe
 export const LiveWallpaper = GObject.registerClass(
 class LiveWallpaper extends St.Widget {
     _init(backgroundActor, role = WallpaperRole.Other, rendererAvailable = false,
-        rendererLauncher = null, onDestroyed = null) {
+        rendererLauncher = null, onDestroyed = null, roundedCorners = false) {
         super._init({
             // FixedLayout: we position the clone ourselves in vfunc_allocate
             // (top-left origin, scaled to fill). BinLayout centered the
@@ -213,7 +212,7 @@ class LiveWallpaper extends St.Widget {
         this._presentation = null;
         this._blurController = null;
         this._clipEffect = null;
-        this._clipContent = backgroundActor.content;
+        this._clipContent = roundedCorners ? backgroundActor.content : null;
         this._clipRadiusId = this._clipContent?.connect('notify::rounded-clip-radius',
             () => this.queue_relayout()) ?? 0;
         this._wwDestroyed = false;
@@ -265,7 +264,8 @@ class LiveWallpaper extends St.Widget {
                 Math.abs((clone.scale_y ?? 1) - sy) > 0.001)
                 clone.set_scale(sx, sy);
         }
-        this._syncClip(box);
+        if (this._clipContent)
+            this._syncClip(box);
     }
 
     _syncClip(box) {
@@ -274,7 +274,7 @@ class LiveWallpaper extends St.Widget {
             return;
         const sx = box.get_width() / monitor.width;
         const sy = box.get_height() / monitor.height;
-        const radius = (this._clipContent?.rounded_clip_radius ?? 0) * sx;
+        const radius = (this._clipContent.rounded_clip_radius ?? 0) * sx;
         if (radius < 0.5 || sy <= 0) {
             if (this._clipEffect) {
                 this.remove_effect(this._clipEffect);

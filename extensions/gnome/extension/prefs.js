@@ -96,6 +96,14 @@ export default class WaywallenPrefs extends ExtensionPreferences {
         syncOverviewControls();
         ovGroup.add(strengthRow);
 
+        const cornersRow = new Adw.SwitchRow({
+            title: _('Round workspace preview corners'),
+            subtitle: _('Clip the live wallpaper in workspace previews. Re-enable the extension to apply changes.'),
+        });
+        settings.bind('overview-rounded-corners', cornersRow, 'active',
+            Gio.SettingsBindFlags.DEFAULT);
+        ovGroup.add(cornersRow);
+
         // Linkage hint: the overview blur coexists with Blur my Shell and
         // pairs well with it. Only surface the hint if it isn't installed.
         if (!blurMyShellInstalled()) {
