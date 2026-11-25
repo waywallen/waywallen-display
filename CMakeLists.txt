@@ -431,6 +431,17 @@ if(WAYWALLEN_DISPLAY_BUILD_EXAMPLES)
     endif()
 endif()
 
+if(WAYWALLEN_DISPLAY_BUILD_TESTS)
+    find_program(GJS_EXECUTABLE gjs)
+    find_program(DBUS_RUN_SESSION_EXECUTABLE dbus-run-session)
+    if(GJS_EXECUTABLE AND DBUS_RUN_SESSION_EXECUTABLE)
+        add_test(NAME test_gnome_system_wallpaper
+            COMMAND ${CMAKE_COMMAND} -E env GIO_USE_VFS=local
+                ${DBUS_RUN_SESSION_EXECUTABLE} ${GJS_EXECUTABLE} -m
+                ${CMAKE_CURRENT_SOURCE_DIR}/extensions/gnome/tests/systemWallpaper.test.js)
+    endif()
+endif()
+
 if(WAYWALLEN_DISPLAY_PLUGIN_QML)
     add_subdirectory(plugins/qml)
     message(STATUS "libwaywallen_display: QML plugin ENABLED")
@@ -478,7 +489,7 @@ if(WAYWALLEN_DISPLAY_PLUGIN_QML)
     else()
         set(_ww_kde_wrapper_suffix "")
     endif()
-    foreach(_ww_kde_wrapper IN ITEMS PluginDisplay PluginInfo)
+    foreach(_ww_kde_wrapper IN ITEMS PluginDisplay PluginInfo PluginSystemWallpaper)
         install(FILES
             "${CMAKE_CURRENT_SOURCE_DIR}/extensions/kde/package/contents/ui/Wrapper/${_ww_kde_wrapper}${_ww_kde_wrapper_suffix}.qml"
             DESTINATION org.waywallen.kde/contents/ui/Plugin

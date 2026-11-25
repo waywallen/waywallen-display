@@ -5,6 +5,7 @@
 //! display with the daemon over the waywallen-display UDS protocol.
 
 mod app;
+mod background;
 mod watcher;
 
 use anyhow::Result;
@@ -104,5 +105,6 @@ fn main() -> Result<()> {
         .or_else(|| std::env::var_os("WAYWALLEN_SOCKET").map(PathBuf::from))
         .unwrap_or_else(default_socket_path);
 
+    let _background = background::Service::start();
     app::run(socket, name_prefix)
 }

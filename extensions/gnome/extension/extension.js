@@ -18,6 +18,7 @@ import {LaunchSubprocess} from './launcher.js';
 import {WindowManager} from './windowManager.js';
 import {PointerForwarder} from './pointerForwarder.js';
 import {WindowStateMonitor} from './windowState.js';
+import {SystemWallpaper} from './systemWallpaper.js';
 
 const DAEMON_BUS_NAME  = 'org.waywallen.waywallen.Daemon';
 const DAEMON_OBJ_PATH  = '/org/waywallen/waywallen/Daemon';
@@ -83,6 +84,8 @@ export default class WaywallenExtension extends Extension {
         if (!this._isEnabled)
             return;
         this._override.enable();
+        this._systemWallpaper = new SystemWallpaper();
+        this._systemWallpaper.enable();
         this._windowMgr = new WindowManager();
         this._windowMgr.enable();
         this._pointer = new PointerForwarder();
@@ -263,6 +266,8 @@ export default class WaywallenExtension extends Extension {
             this._currentProc.subprocess?.send_signal(15);
             this._currentProc = null;
         }
+        this._systemWallpaper?.disable();
+        this._systemWallpaper = null;
         if (this._override) {
             this._override.disable();
             this._override = null;

@@ -56,6 +56,12 @@ WallpaperItem {
         }
     }
 
+    Loader {
+        active: root._initDone && root.liveHost && HostIdentity.isDesktop(Qt.application.name)
+        source: "Plugin/PluginSystemWallpaper.qml"
+        onLoaded: item.enabled = true
+    }
+
     // Per-display window-state reporter. We aggregate the current
     // screen's covering windows into a bitmask and push it down to
     // the daemon via WaywallenDisplay.windowStateFlags. The daemon
