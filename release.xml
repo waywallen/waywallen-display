@@ -1,3 +1,11 @@
+<release version="0.4.8" date="2026-11-26">
+  <description>
+    <p>Fixed:</p>
+    <ul>
+      <li>Fix corrupted wallpapers in layer-shell and X11 by enabling Vulkan DRM format modifiers when supported and rejecting non-linear buffers on the linear fallback. #105 by @AkiraLyu</li>
+    </ul>
+  </description>
+</release>
 <release version="0.4.7" date="2026-11-25">
   <description>
     <p>Added:</p>
