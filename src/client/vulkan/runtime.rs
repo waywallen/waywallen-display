@@ -112,17 +112,22 @@ impl VulkanRuntime {
             &requirements.device_extensions,
             compositor_drm,
         );
-        let (physical_device, graphics_queue_family, present_queue_family, device_name) =
-            match selected {
-                Ok(selected) => selected,
-                Err(error) => {
-                    for (_, vk_surface) in vk_surfaces.drain(..) {
-                        unsafe { surface_loader.destroy_surface(vk_surface, None) };
-                    }
-                    unsafe { instance.destroy_instance(None) };
-                    return Err(error);
+        let (
+            physical_device,
+            graphics_queue_family,
+            present_queue_family,
+            device_name,
+            has_drm_modifier,
+        ) = match selected {
+            Ok(selected) => selected,
+            Err(error) => {
+                for (_, vk_surface) in vk_surfaces.drain(..) {
+                    unsafe { surface_loader.destroy_surface(vk_surface, None) };
                 }
-            };
+                unsafe { instance.destroy_instance(None) };
+                return Err(error);
+            }
+        };
 
         let priorities = [1.0f32];
         let mut queue_families = vec![graphics_queue_family];
@@ -137,12 +142,8 @@ impl VulkanRuntime {
                     .queue_priorities(&priorities)
             })
             .collect();
-        let mut device_extensions: Vec<*const c_char> = requirements
-            .device_extensions
-            .iter()
-            .map(|extension| extension.as_ptr())
-            .collect();
-        device_extensions.push(ash::khr::swapchain::NAME.as_ptr());
+        let device_extensions =
+            build_device_extension_ptrs(&requirements.device_extensions, has_drm_modifier);
         let device_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_infos)
             .enabled_extension_names(&device_extensions);
@@ -188,7 +189,7 @@ impl VulkanRuntime {
         };
         log::info!(
             "Vulkan WSI runtime ready: device={device_name} graphics_qfi={graphics_queue_family} \
-             present_qfi={present_queue_family} targets={}",
+             present_qfi={present_queue_family} targets={} drm_modifier={has_drm_modifier}",
             vk_surfaces.len()
         );
 
@@ -328,7 +329,7 @@ fn select_physical_device<W: WindowSystem>(
     surfaces: &[(u32, vk::SurfaceKHR)],
     importer_extensions: &[CString],
     compositor_drm: (u32, u32),
-) -> Result<(vk::PhysicalDevice, u32, u32, String)> {
+) -> Result<(vk::PhysicalDevice, u32, u32, String, bool)> {
     let devices =
         unsafe { instance.enumerate_physical_devices() }.context("vkEnumeratePhysicalDevices")?;
     let mut candidates = Vec::new();
@@ -349,6 +350,8 @@ fn select_physical_device<W: WindowSystem>(
         if !importer_ok || !available.contains(ash::khr::swapchain::NAME.to_bytes()) {
             continue;
         }
+        let has_drm_modifier =
+            available.contains(ash::ext::image_drm_format_modifier::NAME.to_bytes());
         let queue_properties =
             unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
         let graphics_families = queue_properties
@@ -415,21 +418,48 @@ fn select_physical_device<W: WindowSystem>(
             graphics_queue_family,
             present_queue_family,
             name,
+            has_drm_modifier,
         ));
     }
     candidates.sort_by_key(|candidate| device_candidate_sort_key(candidate.0, candidate.1));
     candidates
         .into_iter()
         .next()
-        .map(|(_, _, physical_device, graphics, present, name)| {
-            (physical_device, graphics, present, name)
-        })
+        .map(
+            |(_, _, physical_device, graphics, present, name, has_drm_modifier)| {
+                (physical_device, graphics, present, name, has_drm_modifier)
+            },
+        )
         .ok_or_else(|| {
             anyhow!(
                 "no Vulkan device satisfies display DMA-BUF import requirements and all {} targets",
                 W::NAME
             )
         })
+}
+
+fn build_device_extension_ptrs(
+    importer_extensions: &[CString],
+    has_drm_modifier: bool,
+) -> Vec<*const c_char> {
+    let mut device_extensions: Vec<*const c_char> = importer_extensions
+        .iter()
+        .map(|extension| extension.as_ptr())
+        .collect();
+    if has_drm_modifier
+        && !importer_extensions
+            .iter()
+            .any(|extension| extension.as_c_str() == ash::ext::image_drm_format_modifier::NAME)
+    {
+        device_extensions.push(ash::ext::image_drm_format_modifier::NAME.as_ptr());
+    }
+    if !importer_extensions
+        .iter()
+        .any(|extension| extension.as_c_str() == ash::khr::swapchain::NAME)
+    {
+        device_extensions.push(ash::khr::swapchain::NAME.as_ptr());
+    }
+    device_extensions
 }
 
 pub(super) fn device_candidate_sort_key(drm_match: bool, unified_queue: bool) -> (bool, bool) {

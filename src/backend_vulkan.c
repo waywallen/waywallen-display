@@ -360,9 +360,11 @@ int ww_vk_import_dmabuf(const ww_vk_backend_t* backend, const ww_vk_dmabuf_impor
 
     memset(out, 0, sizeof(*out));
 
+    const bool use_modifier = backend->have_modifier_ext;
+
     ww_log(WAYWALLEN_LOG_DEBUG,
            "vk import: fourcc=0x%08x %ux%u modifier=0x%" PRIx64 " n_planes=%u fd0=%d "
-           "stride0=%u offset0=%u",
+           "stride0=%u offset0=%u tiling=%s",
            im->fourcc,
            im->width,
            im->height,
@@ -370,7 +372,17 @@ int ww_vk_import_dmabuf(const ww_vk_backend_t* backend, const ww_vk_dmabuf_impor
            im->n_planes,
            im->fds[0],
            im->strides[0],
-           im->offsets[0]);
+           im->offsets[0],
+           use_modifier ? "DRM_FORMAT_MODIFIER_EXT" : "LINEAR");
+
+    if (! use_modifier && (im->modifier != WW_DRM_FORMAT_MOD_LINEAR || im->n_planes != 1u)) {
+        ww_log(WAYWALLEN_LOG_ERROR,
+               "vk import: VK_EXT_image_drm_format_modifier not enabled on VkDevice; "
+               "rejecting modifier=0x%" PRIx64 " n_planes=%u",
+               im->modifier,
+               im->n_planes);
+        return -ENOTSUP;
+    }
 
     VkFormat format = drm_fourcc_to_vk(im->fourcc);
     if (format == VK_FORMAT_UNDEFINED) {
@@ -387,8 +399,7 @@ int ww_vk_import_dmabuf(const ww_vk_backend_t* backend, const ww_vk_dmabuf_impor
         plane_layouts[p].size     = 0; /* driver computes */
     }
 
-    const bool                                    use_modifier = backend->have_modifier_ext;
-    VkImageDrmFormatModifierExplicitCreateInfoEXT mod_info     = {
+    VkImageDrmFormatModifierExplicitCreateInfoEXT mod_info = {
         .sType             = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT,
         .pNext             = NULL,
         .drmFormatModifier = im->modifier,
@@ -740,6 +751,19 @@ int ww_vk_query_format_caps(const ww_vk_backend_t* backend, uint32_t want_featur
     for (size_t i = 0; i < sizeof(s_vk_fourcc_table) / sizeof(s_vk_fourcc_table[0]); ++i) {
         const struct ww_vk_fourcc_entry* e = &s_vk_fourcc_table[i];
 
+        if (! backend->have_modifier_ext) {
+            /* No modifier extension enabled on the VkDevice: only advertise
+             * LINEAR when linear tiling supports all requested features. */
+            VkFormatProperties2 props = { 0 };
+            props.sType               = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2;
+            props.pNext               = NULL;
+            gpdfp2(backend->physical_device, e->vk_format, &props);
+            if ((props.formatProperties.linearTilingFeatures & want_features) == want_features) {
+                emit(e->fourcc, WW_DRM_FORMAT_MOD_LINEAR, 1u, user_data);
+            }
+            continue;
+        }
+
         /* Two-call idiom: first to learn modifier count, second to
          * fill the array. */
         VkDrmFormatModifierPropertiesListEXT list = { 0 };
@@ -753,14 +777,7 @@ int ww_vk_query_format_caps(const ww_vk_backend_t* backend, uint32_t want_featur
         props.pNext               = &list;
 
         gpdfp2(backend->physical_device, e->vk_format, &props);
-        if (list.drmFormatModifierCount == 0) {
-            /* No modifier extension: advertise LINEAR if usable. */
-            if (! backend->have_modifier_ext &&
-                (props.formatProperties.linearTilingFeatures & want_features) == want_features) {
-                emit(e->fourcc, 0ULL /* DRM_FORMAT_MOD_LINEAR */, 1u, user_data);
-            }
-            continue;
-        }
+        if (list.drmFormatModifierCount == 0) continue;
 
         VkDrmFormatModifierPropertiesEXT* entries = (VkDrmFormatModifierPropertiesEXT*)calloc(
             list.drmFormatModifierCount, sizeof(*entries));

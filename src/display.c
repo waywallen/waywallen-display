@@ -1140,12 +1140,14 @@ int waywallen_display_bind_vulkan(waywallen_display_t* d, const waywallen_vk_ctx
         ww_log(WAYWALLEN_LOG_WARN, "vk backend load failed: %d", rc);
         memset(&d->vk_backend, 0, sizeof(d->vk_backend));
     } else {
-        ww_log(WAYWALLEN_LOG_INFO,
-               "vk backend loaded (instance=%p physical_device=%p device=%p qfi=%u)",
-               ctx->instance,
-               ctx->physical_device,
-               ctx->device,
-               ctx->queue_family_index);
+        ww_log(
+            WAYWALLEN_LOG_INFO,
+            "vk backend loaded (instance=%p physical_device=%p device=%p qfi=%u modifier_ext=%d)",
+            ctx->instance,
+            ctx->physical_device,
+            ctx->device,
+            ctx->queue_family_index,
+            d->vk_backend.have_modifier_ext ? 1 : 0);
         PFN_vkGetDeviceQueue get_device_queue =
             (PFN_vkGetDeviceQueue)d->vk_backend.vkGetDeviceProcAddr((VkDevice)ctx->device,
                                                                     "vkGetDeviceQueue");
